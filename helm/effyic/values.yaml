@@ -1,0 +1,284 @@
+# =============================================================================
+# Effyic HiClaw Helm Chart — values.yaml
+# =============================================================================
+
+global:
+  namespace: ""  # defaults to .Release.Namespace
+  imageRegistry: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
+  imageTag: ""
+
+imagePullSecrets: []
+
+# ── Credentials (shared across all components) ────────────────────────────
+credentials:
+  registrationToken: ""       # Matrix registration token (auto-generated if empty)
+  adminUser: "admin"
+  adminPassword: "admin"           # Matrix admin password (auto-generated if empty)
+  llmApiKey: ""               # required — pass via --set credentials.llmApiKey=...
+  llmProvider: "qwen"
+  defaultModel: "qwen3.6-plus"
+  llmBaseUrl: ""
+
+# ── Nacos (Hermes capability registry) ────────────────────────────────────
+nacos:
+  enabled: true
+  mode: managed               # managed | existing
+  namespaceId: "public"
+  serverMode: standalone
+  replicaCount: 1
+  image:
+    repository: nacos/nacos-server
+    tag: "v3.2.2"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8848
+  auth:
+    enabled: true
+    type: nacos               # nacos | none | sts-hiclaw
+    username: nacos
+    password: nacos
+    token: "SecretKey012345678901234567890123456789012345678901234567890123456789"
+    identityKey: serverIdentity
+    identityValue: security
+  mysql:
+    host: "192.168.0.111"     # external MySQL for Nacos metadata
+    port: 3306
+    database: nacos
+    username: root
+    password: mysql
+    dbParam: "characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+  existing:
+    host: ""
+    port: 8848
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  extraEnv: {}
+
+# ── Matrix ────────────────────────────────────────────────────────────────
+matrix:
+  provider: tuwunel           # tuwunel | synapse
+  mode: managed               # managed | existing
+  internalURL: ""             # existing mode only; managed mode auto-derives
+  serverName: ""              # existing mode only; managed mode auto-derives
+  appservice:
+    enabled: true
+    asToken: ""
+    hsToken: ""
+  tuwunel:
+    image:
+      repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/tuwunel
+      tag: "20260216"
+      pullPolicy: IfNotPresent
+    newUserDisplayNameSuffix: ""  # empty disables Tuwunel's default "💕" suffix
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    service:
+      type: ClusterIP
+      port: 6167
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: ""    # empty = default StorageClass
+      mountPath: /data/conduwuit
+    extraEnv: {}
+  synapse: {}
+
+# ── Gateway ───────────────────────────────────────────────────────────────
+gateway:
+  provider: higress           # higress | ai-gateway
+  mode: managed               # managed | existing
+  publicURL: "http://localhost"               # required browser/public URL, e.g. http://localhost:18080
+  higress:
+    enabled: true             # controls Higress subchart deployment
+  aiGateway:
+    region: ""
+    gatewayId: ""
+    modelApiId: ""
+    envId: ""
+
+# ── Storage ───────────────────────────────────────────────────────────────
+storage:
+  provider: minio             # minio | oss
+  mode: managed               # managed | existing
+  bucket: "hiclaw"
+  oss:
+    region: ""
+    endpoint: ""
+  minio:
+    image:
+      repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/minio
+      tag: "20260216"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    service:
+      type: ClusterIP
+      apiPort: 9000
+      consolePort: 9001
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: ""
+    auth:
+      rootUser: "minioadmin"
+      rootPassword: "minioadmin"
+
+higress:
+  global:
+    local: true               # kind / minikube: no cloud LoadBalancer
+  higress-core:
+    gateway:
+      replicas: 1
+      httpPort: 80
+      httpsPort: 443
+      service:
+        type: ClusterIP
+        ports:
+          - name: http2
+            port: 80
+            protocol: TCP
+            targetPort: 80
+          - name: https
+            port: 443
+            protocol: TCP
+            targetPort: 443
+    controller:
+      replicas: 1
+      image: higress
+  higress-console:
+    admin:
+      password: ""
+
+credentialProvider:
+  enabled: false
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  port: 17070
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  env: {}
+  envFrom: []
+
+# ── Controller — 本地构建：make build-hiclaw-controller ───────────────────
+controller:
+  replicaCount: 1
+  image:
+    repository: hiclaw/hiclaw-controller
+    tag: "latest"
+    pullPolicy: Never
+  service:
+    type: ClusterIP
+    port: 8090
+    targetPort: 8090
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  workerBackend: "k8s"
+  resourcePrefix: "hiclaw-"
+  resourceAutoPrefix: true
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  env: {}
+  timezone: "Asia/Shanghai"
+  uninstallHook:
+    enabled: true
+    timeoutSeconds: 300
+    backoffLimit: 1
+    activeDeadlineSeconds: 1500
+    resources: {}
+
+manager:
+  enabled: true
+  model: ""
+  runtime: "openclaw"
+  image:
+    repository: hiclaw/hiclaw-manager
+    tag: "latest"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+elementWeb:
+  enabled: true
+  image:
+    repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/element-web
+    tag: "20260216"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 8080
+
+cms:
+  enabled: false
+  endpoint: ""
+  licenseKey: ""
+  project: ""
+  workspace: ""
+  serviceName: "hiclaw-manager"
+  metricsEnabled: false
+
+# ── Worker defaults — 仅 hermes 使用本地镜像 ─────────────────────────────
+worker:
+  defaultImage:
+    openclaw:
+      repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-worker
+      tag: ""
+    copaw:
+      repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-copaw-worker
+      tag: ""
+    hermes:
+      repository: hiclaw/hermes-worker
+      tag: "latest"
+    openhuman:
+      repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-openhuman-worker
+      tag: ""
+  defaultRuntime: "hermes"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi

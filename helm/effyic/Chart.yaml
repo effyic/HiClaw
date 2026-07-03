@@ -1,0 +1,27 @@
+apiVersion: v2
+name: effyic
+description: Effyic HiClaw — Hermes workers with Nacos capability registry
+type: application
+version: 1.1.1
+appVersion: "1.1.1"
+
+keywords:
+  - ai-agent
+  - multi-agent
+  - matrix
+  - collaboration
+  - llm
+
+home: https://github.com/agentscope-ai/HiClaw
+sources:
+  - https://github.com/agentscope-ai/HiClaw
+
+maintainers:
+  - name: HiClaw Team
+    url: https://github.com/agentscope-ai/HiClaw
+
+dependencies:
+  - name: higress
+    version: "2.2.1"
+    repository: "https://higress.io/helm-charts"
+    condition: gateway.higress.enabled

@@ -48,6 +48,7 @@ class Worker:
         self.config = config
         self.worker_name = config.worker_name
         self.sync: Optional[FileSync] = None
+        self._capability: Optional[Any] = None
         self._hermes_home: Path = config.hermes_home
         self._gateway_task: Optional[asyncio.Task] = None
         self._stopping = False
@@ -77,6 +78,11 @@ class Worker:
                 await self._gateway_task
             except (asyncio.CancelledError, Exception):
                 pass
+        if self._capability is not None:
+            try:
+                await self._capability.stop()
+            except Exception as exc:
+                logger.warning("CapabilityEngine stop: %s", exc)
         console.print("[green]Hermes worker stopped.[/green]")
 
     # ------------------------------------------------------------------
@@ -151,6 +157,27 @@ class Worker:
 
         self._sync_skills()
         self._copy_mcporter_config()
+
+        from hermes_worker.capability.engine import CapabilityEngine
+
+        self._capability = CapabilityEngine(
+            self.worker_name,
+            self.sync,
+            self._hermes_home,
+            sync_skills=self._sync_skills,
+            copy_mcporter=self._copy_mcporter_config,
+            rebridge_prompts=self._rebridge_prompts,
+            gateway_running=lambda: bool(
+                self._gateway_task and not self._gateway_task.done()
+            ),
+        )
+        self.sync.set_protected_skills_fn(self._capability.protected_skills)
+        try:
+            await self._capability.start()
+        except Exception as exc:
+            console.print(
+                f"[yellow]CapabilityEngine start failed (non-fatal): {exc}[/yellow]"
+            )
 
         asyncio.create_task(
             sync_loop(
@@ -366,6 +393,8 @@ class Worker:
         # Drop stale skills that are no longer published by the Manager so
         # they don't leak into the agent's tool list.
         keep = set(installed) | {"file-sync"}
+        if self._capability is not None:
+            keep |= self._capability.protected_skills()
         for child in list(skills_dir.iterdir()):
             if child.is_dir() and child.name not in keep:
                 try:
@@ -399,10 +428,24 @@ class Worker:
     # File sync callback
     # ------------------------------------------------------------------
 
+    async def _rebridge_prompts(self) -> None:
+        if self.sync is None:
+            return
+        openclaw_cfg = self.sync.get_config()
+        soul = self._read_text_file(self.sync.local_dir / "SOUL.md")
+        agents = self._read_text_file(self.sync.local_dir / "AGENTS.md")
+        bridge_openclaw_to_hermes(
+            openclaw_cfg, self._hermes_home, soul=soul, agents_md=agents,
+        )
+        self._load_env_file(self._hermes_home / ".env")
+
     async def _on_files_pulled(self, pulled_files: list[str]) -> None:
         """React to Manager-side file changes by re-bridging only when needed."""
         if self.sync is None:
             return
+
+        if self._capability is not None:
+            await self._capability.on_files_pulled(pulled_files)
 
         if any(f.startswith("skills/") for f in pulled_files):
             self._sync_skills()
@@ -414,13 +457,7 @@ class Worker:
 
         console.print("[yellow]openclaw.json changed; re-bridging...[/yellow]")
         try:
-            openclaw_cfg = self.sync.get_config()
-            soul = self._read_text_file(self.sync.local_dir / "SOUL.md")
-            agents = self._read_text_file(self.sync.local_dir / "AGENTS.md")
-            bridge_openclaw_to_hermes(
-                openclaw_cfg, self._hermes_home, soul=soul, agents_md=agents,
-            )
-            self._load_env_file(self._hermes_home / ".env")
+            await self._rebridge_prompts()
             console.print(
                 "[green]Re-bridge complete; restart the gateway to apply "
                 "settings that aren't hot-reloadable.[/green]"

@@ -76,7 +76,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm config set registry ${NPM_REGISTRY} && \
-    npm install -g mcporter skills @nacos-group/cli && \
+    npm install -g mcporter skills && \
     rm -rf /root/.npm
 
 # --- Heavy install layer (cached unless HERMES_GIT_REF or hermes-worker
@@ -114,6 +114,7 @@ RUN python -m venv /opt/venv/hermes \
         "typer>=0.9" \
         "rich>=13.0" \
         "httpx>=0.25" \
+        "aiohttp>=3.9" \
         "pyyaml>=6.0" \
     && /opt/venv/hermes/bin/pip install --no-cache-dir \
         --index-url "${PIP_INDEX_URL}" \
@@ -146,7 +147,8 @@ RUN if [ -f /opt/venv/hermes/bin/hermes ]; then \
     && if [ -f /opt/venv/hermes/bin/hermes-agent ]; then \
         ln -sf /opt/venv/hermes/bin/hermes-agent /usr/local/bin/hermes-agent; \
     fi \
-    && ln -sf /opt/venv/hermes/bin/hermes-worker /usr/local/bin/hermes-worker
+    && ln -sf /opt/venv/hermes/bin/hermes-worker /usr/local/bin/hermes-worker \
+    && ln -sf /opt/venv/hermes/bin/hermes-nacos /usr/local/bin/hermes-nacos
 
 # Entrypoint script
 COPY --chmod=755 scripts/hermes-worker-entrypoint.sh /opt/hiclaw/scripts/hermes-worker-entrypoint.sh

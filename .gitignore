@@ -1,6 +1,7 @@
 # Environment and secrets
 hiclaw-manager.env
 *.env
+.project
 
 # Replay logs (contain conversation data, may include secrets)
 logs/

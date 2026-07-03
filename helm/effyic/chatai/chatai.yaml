@@ -1,0 +1,42 @@
+# 部署前替换占位符，或运行 ./apply-chatai.sh <worker-name> [namespace]
+# 占位符：__WORKER_NAME__  __NAMESPACE__  __API_SERVER_KEY__（明文写入 Worker / WasmPlugin）
+---
+apiVersion: hiclaw.io/v1beta1
+kind: Worker
+metadata:
+  name: __WORKER_NAME__
+  labels:
+    hiclaw.io/controller: effyic-controller
+spec:
+  runtime: hermes
+  model: qwen3.6-plus
+  image: hiclaw/hermes-worker:latest
+  containerManaged: true
+  env:
+    API_SERVER_ENABLED: "1"
+    API_SERVER_HOST: "0.0.0.0"
+    API_SERVER_PORT: "8642"
+    API_SERVER_MODEL_NAME: __WORKER_NAME__
+    # 绑定 0.0.0.0 时 hermes-agent 强制要求 Key；与 Higress key-auth 使用同一值
+    API_SERVER_KEY: __API_SERVER_KEY__
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: __WORKER_NAME__-chatai
+  labels:
+    app.kubernetes.io/name: __WORKER_NAME__
+    app.kubernetes.io/component: chatai
+spec:
+  type: ClusterIP
+  selector:
+    hiclaw.io/worker: __WORKER_NAME__
+  ports:
+    - name: api-server
+      port: 8642
+      targetPort: 8642
+      protocol: TCP
+
+
+### 路由层将由 higress-controller 通过 API 自动完成，可通过 chatai_ingress.yaml 临时验证

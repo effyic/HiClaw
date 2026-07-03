@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,21 @@ class FileSync:
         self._prefix = f"agents/{worker_name}"
         self._alias_set = False
         self._cloud_mode = os.environ.get("HICLAW_RUNTIME") == "aliyun"
+        self._protected_skills_fn: Optional[Callable[[], Set[str]]] = None
+
+    def set_protected_skills_fn(
+        self, fn: Optional[Callable[[], Set[str]]]
+    ) -> None:
+        """Skills that must not be removed by pull_all (Nacos self-managed)."""
+        self._protected_skills_fn = fn
+
+    def _protected_skills(self) -> Set[str]:
+        if self._protected_skills_fn is None:
+            return set()
+        try:
+            return set(self._protected_skills_fn())
+        except Exception:
+            return set()
 
     # ------------------------------------------------------------------
     # mc alias management
@@ -445,7 +460,7 @@ class FileSync:
 
         local_skills_dir = self.local_dir / "skills"
         if local_skills_dir.is_dir():
-            minio_skill_set = set(minio_skills)
+            minio_skill_set = set(minio_skills) | self._protected_skills()
             for child in list(local_skills_dir.iterdir()):
                 if child.is_dir() and child.name not in minio_skill_set:
                     shutil.rmtree(child)
@@ -461,8 +476,11 @@ async def sync_loop(
     sync: FileSync,
     interval: int,
     on_pull: Callable[[list[str]], Coroutine],
+    protected_skills: Optional[Set[str]] = None,
 ) -> None:
     """Background task: pull files every ``interval`` seconds."""
+    if protected_skills is not None:
+        sync.set_protected_skills_fn(lambda: protected_skills)
     while True:
         await asyncio.sleep(interval)
         try:

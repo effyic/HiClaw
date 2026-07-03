@@ -1,0 +1,23 @@
+{{- if and .Values.nacos.enabled (eq .Values.nacos.mode "managed") }}
+{{- $comp := dict "root" . "component" "nacos" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hiclaw.nacos.fullname" . }}
+  namespace: {{ include "hiclaw.namespace" . }}
+  labels:
+    {{- include "hiclaw.component.labels" $comp | nindent 4 }}
+spec:
+  type: {{ .Values.nacos.service.type | default "ClusterIP" }}
+  selector:
+    {{- include "hiclaw.component.selectorLabels" $comp | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.nacos.service.port | int }}
+      targetPort: client
+      protocol: TCP
+    - name: client-rpc
+      port: {{ add (.Values.nacos.service.port | int) 1000 }}
+      targetPort: client-rpc
+      protocol: TCP
+{{- end }}

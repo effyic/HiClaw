@@ -21,6 +21,7 @@ dependencies = [
     "typer>=0.9",
     "rich>=13.0",
     "httpx>=0.25",
+    "aiohttp>=3.9",
     "pyyaml>=6.0",
 ]
 
@@ -30,6 +31,7 @@ Repository = "https://github.com/higress-group/hiclaw"
 
 [project.scripts]
 hermes-worker = "hermes_worker.cli:main"
+hermes-nacos = "hermes_worker.nacos.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

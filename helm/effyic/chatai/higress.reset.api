@@ -1,0 +1,67 @@
+# higress 替换 ingress 路由
+# 1. 登录 Console（Session Cookie）
+curl -X POST http://127.0.0.1:8001/session/login \
+  -H 'Content-Type: application/json' \
+  -c /tmp/higress-cookie \
+  -d '{"username":"admin","password":"<password>"}'
+
+# 2. 注册域名
+curl -X POST http://127.0.0.1:8001/v1/domains -b /tmp/higress-cookie \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"worker-effyic-chatai-local.hiclaw.io","enableHttps":"off"}'
+
+# 3. 注册后端（K8s 内用 DNS 类型，指向 ClusterIP Service）
+curl -X POST http://127.0.0.1:8001/v1/service-sources -b /tmp/higress-cookie \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "effyic-chatai-chatai",
+    "type": "dns",
+    "domain": "effyic-chatai-chatai.default.svc.cluster.local",
+    "port": 8642,
+    "protocol": "http",
+    "properties": {},
+    "authN": {"enabled": false}
+  }'
+
+# 4. 创建路由（等价于 Ingress）
+curl -X POST http://127.0.0.1:8001/v1/routes -b /tmp/higress-cookie \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "effyic-chatai-chatai",
+    "domains": ["worker-effyic-chatai-local.hiclaw.io"],
+    "path": {"matchType": "PRE", "matchValue": "/", "caseSensitive": false},
+    "services": [{"name": "effyic-chatai-chatai.dns", "port": 8642, "weight": 100}]
+  }'
+
+# 5. 创建 Consumer（等价于 WasmPlugin 里的 consumers）
+curl -X POST http://127.0.0.1:8001/v1/consumers -b /tmp/higress-cookie \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "effyic-chatai-chatai",
+    "credentials": [{"type": "key-auth", "source": "BEARER", "values": ["<API_SERVER_KEY>"]}]
+  }'
+
+# 6. 在路由上启用 key-auth（等价于 WasmPlugin）
+curl -X PUT http://127.0.0.1:8001/v1/routes/effyic-chatai-chatai/plugin-instances/key-auth \
+  -b /tmp/higress-cookie \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": true,
+    "scope": "ROUTE",
+    "target": "effyic-chatai-chatai",
+    "pluginName": "key-auth",
+    "rawConfigurations": "consumers:\n  - name: effyic-chatai-chatai\n    credential: <API_SERVER_KEY>\nkeys:\n  - Authorization\n  - x-api-key\nin_header: true\nin_query: true\nglobal_auth: false\nallow:\n  - effyic-chatai-chatai"
+  }'
+
+
+# 7. 路由级限流（本地单网关实例）
+curl -X PUT http://127.0.0.1:8080/v1/routes/effyic-chatai-chatai/plugin-instances/key-rate-limit \
+  -b /tmp/higress-cookie \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": true,
+    "scope": "ROUTE",
+    "target": "effyic-chatai-chatai",
+    "pluginName": "key-rate-limit",
+    "rawConfigurations": "limit_by_header: Authorization\nlimit_keys:\n  - key: \"<API_SERVER_KEY>\"\n    query_per_second: 10"
+  }'
