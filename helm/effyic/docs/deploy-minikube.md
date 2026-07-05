@@ -8,7 +8,7 @@
 | 集群          | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                                |
 | 工具          | Helm 3.14+                                                                                |
 | LLM         | 通义千问 API Key（安装时通过 `--set` 传入）                                                            |
-| Nacos MySQL | 外部 MySQL 已建库 `nacos`，且 minikube 节点能访问 `nacos.mysql.host`（默认 `192.168.0.111:3306`）         |
+| Nacos MySQL | 外部 MySQL 已建库 `nacos`，且 minikube 节点能访问 `nacos.mysql.host`                                  |
 | 本地镜像        | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/hermes-worker`、`hiclaw/hiclaw-manager` |
 | inotify 限制  | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令          |
 
@@ -19,10 +19,13 @@ minikube ssh -- "echo -e 'fs.inotify.max_user_instances=1024\nfs.inotify.max_use
 
 
 
-## 1. 构建本地镜像
+## 1. 准备镜像
 
 ```bash
 cd /path/to/HiClaw
+
+REG=higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
+load_image() { minikube image load "$1"; }
 
 export DOCKER_BUILDKIT=1
 export DOCKER_BUILD_ARGS="\
@@ -30,24 +33,26 @@ export DOCKER_BUILD_ARGS="\
   --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com/"
 
+# openclaw-base（build-manager 依赖）
+docker pull "$REG/openclaw-base:20260423-8359cbc"
+docker tag "$REG/openclaw-base:20260423-8359cbc" hiclaw/openclaw-base:latest
+
+# 本地构建
 make build-hiclaw-controller DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 make build-hermes-worker DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 make build-manager \
   OPENCLAW_BASE_IMAGE=hiclaw/openclaw-base \
-  OPENCLAW_BASE_VERSION=latest
-```
+  OPENCLAW_BASE_VERSION=latest \
+  DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 
-其余组件（Manager、Tuwunel、MinIO、Element Web、Higress 子 chart）使用 `values.yaml` 中的 higress 远程镜像，安装前需能拉取或预装入 minikube。
-
-## 2. 拉取非本地构建镜像
-
-```bash
-REG=higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
+# 装入 minikube
+for img in hiclaw/hiclaw-controller:latest hiclaw/hermes-worker:latest hiclaw/hiclaw-manager:latest; do
+  load_image "$img"
+done
 for img in \
   "$REG/tuwunel:20260216" \
   "$REG/minio:20260216" \
   "$REG/element-web:20260216" \
-  "$REG/hiclaw-manager:v1.1.1" \
   "$REG/higress:2.2.1" \
   "$REG/pilot:2.2.1" \
   "$REG/gateway:2.2.1" \
@@ -57,9 +62,7 @@ for img in \
 done
 ```
 
-
-
-## 3. 拉取 Helm 依赖
+## 2. 拉取 Helm 依赖
 
 ```bash
 helm dependency build helm/effyic/
@@ -67,7 +70,7 @@ helm dependency build helm/effyic/
 
 
 
-## 4. 安装
+## 3. 安装
 
 ```bash
 export HICLAW_LLM_API_KEY="sk-your-qwen-api-key"
@@ -81,7 +84,7 @@ helm upgrade --install effyic helm/effyic \
 
 
 
-## 5. 验证
+## 4. 验证
 
 ```bash
 kubectl get pods -n default
@@ -91,13 +94,13 @@ kubectl get manager.hiclaw.io -n default
 
 预期 Running 组件：controller、nacos、tuwunel、minio、element-web、higress-gateway / higress-controller / higress-console、Manager Pod（`hiclaw-manager`）。
 
-## 6. 访问
+## 5. 访问
 
 **Element Web（IM）**
 
 浏览器打开 [http://localhost](http://localhost) ，用户名 `admin`，密码见 `values.yaml` 中 `credentials.adminPassword`（默认 `admin`）。
 
-## 7. ChatAI Worker（可选）
+## 6. ChatAI Worker（可选）
 
 Hermes Chat API
 
@@ -114,7 +117,7 @@ curl -sS http://127.0.0.1:18080/v1/chat/completions \
 
 
 
-## 8. 卸载
+## 7. 卸载
 
 ```bash
 kubectl delete -f helm/effyic/chatai/chatai.yaml --ignore-not-found

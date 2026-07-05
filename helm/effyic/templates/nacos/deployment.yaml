@@ -25,6 +25,10 @@ spec:
         - name: nacos
           image: "{{ .Values.nacos.image.repository }}:{{ .Values.nacos.image.tag }}"
           imagePullPolicy: {{ .Values.nacos.image.pullPolicy | default "IfNotPresent" }}
+          command:
+            - bash
+            - -c
+            - ulimit -n 4096 && exec bin/docker-startup.sh
           ports:
             - name: client
               containerPort: {{ .Values.nacos.service.port | int }}
