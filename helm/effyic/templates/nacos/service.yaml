@@ -16,6 +16,10 @@ spec:
       port: {{ .Values.nacos.service.port | int }}
       targetPort: client
       protocol: TCP
+    - name: console
+      port: {{ .Values.nacos.service.consolePort | default 8080 | int }}
+      targetPort: console
+      protocol: TCP
     - name: client-rpc
       port: {{ add (.Values.nacos.service.port | int) 1000 }}
       targetPort: client-rpc

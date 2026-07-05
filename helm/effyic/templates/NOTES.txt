@@ -27,9 +27,12 @@ Namespace: {{ include "hiclaw.namespace" . }}
 
    URI: {{ include "hiclaw.nacos.registryURI" . }}
 
-   kubectl port-forward svc/{{ include "hiclaw.nacos.fullname" . }} 8848:{{ .Values.nacos.service.port }} -n {{ include "hiclaw.namespace" . }}
+   kubectl port-forward svc/{{ include "hiclaw.nacos.fullname" . }} \
+     {{ .Values.nacos.service.port }}:{{ .Values.nacos.service.port }} \
+     {{ .Values.nacos.service.consolePort | default 8080 }}:{{ .Values.nacos.service.consolePort | default 8080 }} \
+     -n {{ include "hiclaw.namespace" . }}
 
-   Console: http://localhost:8848/nacos  ({{ .Values.nacos.auth.username }}/{{ .Values.nacos.auth.password }})
+   Console (Nacos 3.x): http://localhost:{{ .Values.nacos.service.consolePort | default 8080 }}  ({{ .Values.nacos.auth.username }}/{{ .Values.nacos.auth.password }})
 {{- end }}
 
 ========================================================================
