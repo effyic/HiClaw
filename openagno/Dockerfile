@@ -44,6 +44,8 @@ RUN python -m venv /opt/venv/agno \
         --index-url "${PIP_INDEX_URL}" \
         --trusted-host "$(echo ${PIP_INDEX_URL} | sed 's|https\?://||;s|/.*||')" \
         "agno==${AGNO_VERSION}" \
+        "openai>=1.0" \
+        "sqlalchemy>=2.0" \
         "psycopg[binary]>=3.1" \
         "uvicorn>=0.27" \
         "fastapi>=0.109" \

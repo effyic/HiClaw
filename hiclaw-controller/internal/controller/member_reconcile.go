@@ -449,6 +449,9 @@ func createMemberContainer(ctx context.Context, d MemberDeps, m MemberContext, s
 		workerEnv = d.EnvBuilder.Build(m.RuntimeName, prov)
 	}
 	workerEnv["HICLAW_WORKER_CR_NAME"] = m.Name
+	if m.Spec.Model != "" {
+		workerEnv["HICLAW_DEFAULT_MODEL"] = m.Spec.Model
+	}
 	if m.ModelProviderInfo != nil && m.ModelProviderInfo.IntranetURL != "" {
 		workerEnv["HICLAW_AI_GATEWAY_URL"] = m.ModelProviderInfo.IntranetURL
 	}

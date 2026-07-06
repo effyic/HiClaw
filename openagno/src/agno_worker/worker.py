@@ -54,7 +54,11 @@ class Worker:
             console.print(f"[red]Failed to load AgentSpec: {exc}[/red]")
             return False
 
-        token = __import__("os").environ.get("AGNO_CONTROL_TOKEN", "")
+        import os
+
+        token = os.environ.get("AGNO_CONTROL_TOKEN") or os.environ.get(
+            "HICLAW_WORKER_GATEWAY_KEY", ""
+        )
         self._api = AgnoAPIServer(
             bind=self.config.api_bind,
             port=self.config.api_port,

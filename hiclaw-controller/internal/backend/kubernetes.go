@@ -334,7 +334,7 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 		})
 		extraMounts = append(extraMounts, corev1.VolumeMount{
 			Name:      "agentspec",
-			MountPath: backend.AgnoAgentSpecMountPath,
+			MountPath: AgnoAgentSpecMountPath,
 			ReadOnly:  true,
 		})
 	}

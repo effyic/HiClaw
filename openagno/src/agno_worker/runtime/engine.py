@@ -81,16 +81,38 @@ class AgnoRuntime:
     def _create_agent(self, defn: AgentDef) -> Any:
         from agno.agent import Agent
 
-        model_id = defn.model or self._spec.model or os.environ.get("AGNO_DEFAULT_MODEL", "")
+        model = self._resolve_model(defn.model or self._spec.model)
         instructions = self._build_instructions(defn)
         return Agent(
             name=defn.name,
-            model=model_id,
+            model=model,
             instructions=instructions,
             db=self._db,
             add_history_to_context=True,
             markdown=True,
         )
+
+    def _resolve_model(self, model_id: str) -> Any:
+        """Route LLM calls through HiClaw AI gateway when env vars are set."""
+        default_model = (
+            os.environ.get("HICLAW_DEFAULT_MODEL", "")
+            or os.environ.get("AGNO_DEFAULT_MODEL", "")
+            or model_id
+            or "qwen3.6-plus"
+        )
+        gateway_url = os.environ.get("HICLAW_AI_GATEWAY_URL", "").rstrip("/")
+        gateway_key = os.environ.get("HICLAW_WORKER_GATEWAY_KEY", "")
+        if gateway_url and gateway_key:
+            from agno.models.openai import OpenAIChat
+
+            return OpenAIChat(
+                id=default_model,
+                api_key=gateway_key,
+                base_url=f"{gateway_url}/v1",
+            )
+        if ":" not in default_model:
+            return f"openai:{default_model}"
+        return default_model
 
     def _create_team(self) -> Any:
         from agno.team import Team

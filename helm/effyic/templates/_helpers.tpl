@@ -241,6 +241,13 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s:%s" .Values.worker.defaultImage.hermes.repository $tag }}
 {{- end }}
 
+{{- define "hiclaw.worker.agnoImage" -}}
+{{- $agno := .Values.worker.defaultImage.agno | default dict }}
+{{- $tag := default (include "hiclaw.globalImageTag" .) ($agno.tag | default "latest") }}
+{{- $repo := $agno.repository | default "hiclaw/agno-worker" }}
+{{- printf "%s:%s" $repo $tag }}
+{{- end }}
+
 {{- define "hiclaw.worker.openhumanImage" -}}
 {{- $tag := default (include "hiclaw.globalImageTag" .) .Values.worker.defaultImage.openhuman.tag }}
 {{- printf "%s:%s" .Values.worker.defaultImage.openhuman.repository $tag }}

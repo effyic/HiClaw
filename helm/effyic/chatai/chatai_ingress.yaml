@@ -9,7 +9,7 @@ metadata:
 spec:
   ingressClassName: higress
   rules:
-    - host: worker-__WORKER_NAME__-local.hiclaw.io
+    - host: worker-__WORKER_NAME__-8090-local.hiclaw.io
       http:
         paths:
           - path: /
@@ -18,7 +18,7 @@ spec:
               service:
                 name: __WORKER_NAME__-chatai
                 port:
-                  number: 8642
+                  number: 8090
 
 ---
 apiVersion: extensions.higress.io/v1alpha1
@@ -33,7 +33,7 @@ spec:
     global_auth: false
     consumers:
       - name: __WORKER_NAME__-chatai
-        credential: __API_SERVER_KEY__
+        credential: __GATEWAY_KEY__
     keys:
       - Authorization
       - x-api-key

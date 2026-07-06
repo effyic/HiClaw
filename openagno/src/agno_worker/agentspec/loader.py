@@ -22,6 +22,10 @@ def load_agentspec_from_dir(spec_dir: Path) -> AgentSpec:
         if candidate.is_file():
             return parse_agentspec_yaml(candidate.read_text(encoding="utf-8"))
 
+    for path in sorted(spec_dir.glob("*.agentspec.yaml")):
+        if path.is_file():
+            return parse_agentspec_yaml(path.read_text(encoding="utf-8"))
+
     manifest = spec_dir / "manifest.json"
     if manifest.is_file():
         raw = json.loads(manifest.read_text(encoding="utf-8"))

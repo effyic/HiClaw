@@ -21,6 +21,12 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.nacos.mysql.hostAliasIP }}
+      hostAliases:
+        - ip: {{ .Values.nacos.mysql.hostAliasIP | quote }}
+          hostnames:
+            - {{ .Values.nacos.mysql.host | quote }}
+      {{- end }}
       containers:
         - name: nacos
           image: "{{ .Values.nacos.image.repository }}:{{ .Values.nacos.image.tag }}"

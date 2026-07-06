@@ -33,6 +33,7 @@ nacos:
   service:
     type: ClusterIP
     port: 8848
+    consolePort: 8080   # Nacos 3.x 控制台端口（与 API 8848 分离）
   auth:
     enabled: true
     type: nacos               # nacos | none | sts-hiclaw
@@ -42,7 +43,8 @@ nacos:
     identityKey: serverIdentity
     identityValue: security
   mysql:
-    host: "192.168.0.111"     # external MySQL for Nacos metadata
+    host: "host.minikube.internal"  # host MySQL via minikube gateway; stable across host LAN IP changes
+    hostAliasIP: "192.168.49.1"     # minikube docker gateway; docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'
     port: 3306
     database: nacos
     username: root
@@ -270,6 +272,9 @@ worker:
       tag: ""
     hermes:
       repository: hiclaw/hermes-worker
+      tag: "latest"
+    agno:
+      repository: hiclaw/agno-worker
       tag: "latest"
     openhuman:
       repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-openhuman-worker

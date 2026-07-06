@@ -46,11 +46,14 @@ func (b *WorkerEnvBuilder) BuildAgno(workerName string, prov *WorkerProvisionRes
 		"HICLAW_WORKER_NAME":  workerName,
 		"AGNO_CONTROL_PORT":   "8090",
 		"AGNO_AGENTSPEC_DIR":  backend.AgnoAgentSpecMountPath,
-		"AGNO_DB_URL":         envOrDefaultAgnoDBURL(),
+	}
+	if dbURL := envOrDefaultAgnoDBURL(); dbURL != "" {
+		env["AGNO_DB_URL"] = dbURL
 	}
 	if prov != nil && prov.GatewayKey != "" {
 		env["HICLAW_WORKER_GATEWAY_KEY"] = prov.GatewayKey
 	}
+	b.applyClusterDefaults(env)
 	return env
 }
 
@@ -58,7 +61,7 @@ func envOrDefaultAgnoDBURL() string {
 	if v := os.Getenv("HICLAW_AGNO_DEFAULT_DB_URL"); v != "" {
 		return v
 	}
-	return "postgresql+psycopg://root:vector_store@localhost:5432/postgres"
+	return ""
 }
 
 // BuildManager returns the env map for a Manager container.

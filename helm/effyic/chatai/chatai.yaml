@@ -1,5 +1,5 @@
 # 部署前替换占位符，或运行 ./apply-chatai.sh <worker-name> [namespace]
-# 占位符：__WORKER_NAME__  __NAMESPACE__  __API_SERVER_KEY__（明文写入 Worker / WasmPlugin）
+# 占位符：__WORKER_NAME__  __NAMESPACE__  __GATEWAY_KEY__
 ---
 apiVersion: hiclaw.io/v1beta1
 kind: Worker
@@ -8,17 +8,21 @@ metadata:
   labels:
     hiclaw.io/controller: effyic-controller
 spec:
-  runtime: hermes
+  runtime: agno
   model: qwen3.6-plus
-  image: hiclaw/hermes-worker:latest
+  image: hiclaw/agno-worker:latest
   containerManaged: true
+  # Controller 从 Nacos 拉取 AgentSpec 并写入 ConfigMap 挂载到 Pod。
+  # 本地验证可改用 file:// 路径（需先将 agentspec 目录复制到 controller Pod）：
+  # package: file:///tmp/agentspec/__WORKER_NAME__
+  package: nacos://effyic-nacos:8848/public/medical-orchestrator?label:stable
   env:
-    API_SERVER_ENABLED: "1"
-    API_SERVER_HOST: "0.0.0.0"
-    API_SERVER_PORT: "8642"
-    API_SERVER_MODEL_NAME: __WORKER_NAME__
-    # 绑定 0.0.0.0 时 hermes-agent 强制要求 Key；与 Higress key-auth 使用同一值
-    API_SERVER_KEY: __API_SERVER_KEY__
+    # 物理机 PostgreSQL（network_mode: host, 端口 5432）
+    # 网关 IP 查询：docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'
+    AGNO_DB_URL: postgresql+psycopg://root:postgresql@192.168.49.1:5432/vector_store
+  expose:
+    - port: 8090
+      protocol: http
 
 ---
 apiVersion: v1
@@ -33,10 +37,7 @@ spec:
   selector:
     hiclaw.io/worker: __WORKER_NAME__
   ports:
-    - name: api-server
-      port: 8642
-      targetPort: 8642
+    - name: api
+      port: 8090
+      targetPort: 8090
       protocol: TCP
-
-
-### 路由层将由 higress-controller 通过 API 自动完成，可通过 chatai_ingress.yaml 临时验证
