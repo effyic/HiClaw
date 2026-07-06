@@ -9,6 +9,7 @@ import (
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
 	authpkg "github.com/hiclaw/hiclaw-controller/internal/auth"
+	"github.com/hiclaw/hiclaw-controller/internal/backend"
 	"github.com/hiclaw/hiclaw-controller/internal/gateway"
 	"github.com/hiclaw/hiclaw-controller/internal/matrix"
 	"github.com/hiclaw/hiclaw-controller/internal/oss"
@@ -23,6 +24,7 @@ type WorkerProvisionRequest struct {
 	Name            string
 	CredentialName  string
 	ModelProviderID string
+	Runtime         string
 	Role            string // "standalone" | "team_leader" | "worker"
 	TeamName        string
 	TeamLeaderName  string
@@ -289,6 +291,9 @@ func (p *Provisioner) DeleteManagerRoom(ctx context.Context, roomID string) erro
 // ProvisionWorker executes the full infrastructure setup for a new worker:
 // credentials, Matrix account, MinIO user, Matrix room, Gateway consumer.
 func (p *Provisioner) ProvisionWorker(ctx context.Context, req WorkerProvisionRequest) (*WorkerProvisionResult, error) {
+	if backend.IsAgnoRuntime(req.Runtime) {
+		return p.provisionAgnoWorker(ctx, req)
+	}
 	logger := log.FromContext(ctx)
 	workerName := req.Name
 	credentialName := req.CredentialName
@@ -463,6 +468,57 @@ func (p *Provisioner) ProvisionWorker(ctx context.Context, req WorkerProvisionRe
 		MinIOPassword:  creds.MinIOPassword,
 		MatrixPassword: creds.MatrixPassword,
 	}, nil
+}
+
+// provisionAgnoWorker provisions only optional gateway credentials for Agno
+// workers. Matrix accounts, MinIO users, and DM rooms are not created.
+func (p *Provisioner) provisionAgnoWorker(ctx context.Context, req WorkerProvisionRequest) (*WorkerProvisionResult, error) {
+	logger := log.FromContext(ctx)
+	workerName := req.Name
+	credentialName := req.CredentialName
+	if credentialName == "" {
+		credentialName = workerName
+	}
+	consumerName := "worker-" + workerName
+
+	creds, err := p.loadWorkerCredentials(ctx, credentialName, workerName)
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if creds == nil {
+		creds, err = GenerateCredentials()
+		if err != nil {
+			return nil, fmt.Errorf("generate credentials: %w", err)
+		}
+		if err := p.creds.Save(ctx, credentialName, creds); err != nil {
+			return nil, fmt.Errorf("save credentials: %w", err)
+		}
+	}
+
+	result := &WorkerProvisionResult{GatewayKey: creds.GatewayKey}
+	if p.gateway == nil {
+		return result, nil
+	}
+
+	logger.Info("creating gateway consumer for agno worker", "consumer", consumerName)
+	consumerResult, err := p.gateway.EnsureConsumer(ctx, gateway.ConsumerRequest{
+		Name:          consumerName,
+		CredentialKey: creds.GatewayKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("gateway consumer creation failed: %w", err)
+	}
+	if consumerResult.APIKey != "" {
+		result.GatewayKey = consumerResult.APIKey
+		creds.GatewayKey = consumerResult.APIKey
+		_ = p.creds.Save(ctx, credentialName, creds)
+	}
+	if req.ModelProviderID != "" {
+		if err := p.gateway.AuthorizeAIRoutes(ctx, consumerName, req.ModelProviderID); err != nil {
+			return nil, fmt.Errorf("AI route authorization failed: %w", err)
+		}
+	}
+	return result, nil
 }
 
 // DeprovisionWorker cleans up infrastructure for a deleted worker:

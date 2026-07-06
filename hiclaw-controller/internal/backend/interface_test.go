@@ -36,6 +36,7 @@ func TestValidRuntime(t *testing.T) {
 		{RuntimeOpenClaw, true},
 		{RuntimeCopaw, true},
 		{RuntimeHermes, true},
+		{RuntimeAgno, true},
 		{"unknown", false},
 	}
 	for _, tc := range cases {

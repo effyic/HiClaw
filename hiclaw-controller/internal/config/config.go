@@ -429,6 +429,7 @@ func (c *Config) DockerConfig() backend.DockerConfig {
 		CopawWorkerImage:     envOrDefault("HICLAW_COPAW_WORKER_IMAGE", "hiclaw/copaw-worker:latest"),
 		HermesWorkerImage:    envOrDefault("HICLAW_HERMES_WORKER_IMAGE", "hiclaw/hermes-worker:latest"),
 		OpenHumanWorkerImage: envOrDefault("HICLAW_OPENHUMAN_WORKER_IMAGE", "hiclaw/openhuman-worker:latest"),
+		AgnoWorkerImage:      envOrDefault("HICLAW_AGNO_WORKER_IMAGE", "hiclaw/agno-worker:latest"),
 		DefaultNetwork:       envOrDefault("HICLAW_DOCKER_NETWORK", "hiclaw-net"),
 	}
 }
@@ -470,6 +471,7 @@ func (c *Config) K8sConfig() backend.K8sConfig {
 		CopawWorkerImage:     envOrDefault("HICLAW_COPAW_WORKER_IMAGE", "hiclaw/copaw-worker:latest"),
 		HermesWorkerImage:    envOrDefault("HICLAW_HERMES_WORKER_IMAGE", "hiclaw/hermes-worker:latest"),
 		OpenHumanWorkerImage: envOrDefault("HICLAW_OPENHUMAN_WORKER_IMAGE", "hiclaw/openhuman-worker:latest"),
+		AgnoWorkerImage:      envOrDefault("HICLAW_AGNO_WORKER_IMAGE", "hiclaw/agno-worker:latest"),
 		WorkerCPU:            c.K8sWorkerCPU,
 		WorkerMemory:         c.K8sWorkerMemory,
 		ControllerName:       c.ControllerName,

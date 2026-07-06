@@ -27,6 +27,7 @@ type K8sConfig struct {
 	CopawWorkerImage     string
 	HermesWorkerImage    string
 	OpenHumanWorkerImage string
+	AgnoWorkerImage      string
 	WorkerCPU            string
 	WorkerMemory         string
 
@@ -227,6 +228,8 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 			image = k.config.HermesWorkerImage
 		case req.Runtime == RuntimeOpenHuman && k.config.OpenHumanWorkerImage != "":
 			image = k.config.OpenHumanWorkerImage
+		case req.Runtime == RuntimeAgno && k.config.AgnoWorkerImage != "":
+			image = k.config.AgnoWorkerImage
 		case k.config.WorkerImage != "":
 			image = k.config.WorkerImage
 		}
@@ -241,6 +244,8 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 			req.WorkingDir = "/root/.copaw-worker"
 		case req.Runtime == RuntimeOpenHuman:
 			req.WorkingDir = "/home/openhuman/.openhuman"
+		case req.Runtime == RuntimeAgno:
+			req.WorkingDir = "/opt/agno-worker"
 		default:
 			// Both openclaw and hermes use the same workspace layout:
 			// HOME == WorkingDir == /root/hiclaw-fs/agents/<name> (== MinIO
@@ -316,6 +321,24 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 
 	tmpl := LoadAgentPodTemplate(ctx, k.client, k.config.Namespace, k.config.ControllerName)
 
+	var extraVolumes []corev1.Volume
+	var extraMounts []corev1.VolumeMount
+	if req.AgentSpecConfigMap != "" {
+		extraVolumes = append(extraVolumes, corev1.Volume{
+			Name: "agentspec",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: req.AgentSpecConfigMap},
+				},
+			},
+		})
+		extraMounts = append(extraMounts, corev1.VolumeMount{
+			Name:      "agentspec",
+			MountPath: backend.AgnoAgentSpecMountPath,
+			ReadOnly:  true,
+		})
+	}
+
 	pod := ApplyPodTemplate(tmpl, PodOverlay{
 		Name:               podName,
 		Namespace:          k.config.Namespace,
@@ -328,6 +351,8 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 		TokenVolume:        tokenVolume,
 		TokenVolumeMount:   tokenVolumeMount,
 		HostAliases:        buildHostAliases(req.ExtraHosts),
+		ExtraVolumes:       extraVolumes,
+		ExtraVolumeMounts:  extraMounts,
 	})
 
 	if req.Owner != nil {
@@ -589,6 +614,8 @@ func defaultRuntime(runtime string) string {
 		return RuntimeHermes
 	case RuntimeOpenHuman:
 		return RuntimeOpenHuman
+	case RuntimeAgno:
+		return RuntimeAgno
 	default:
 		return RuntimeOpenClaw
 	}

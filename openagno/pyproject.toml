@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agno-worker"
+version = "0.1.0"
+description = "HiClaw standalone Agno conversational worker (controller-injected AgentSpec)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = [
+    "agno>=2.7.0a4",
+    "psycopg[binary]>=3.1",
+    "typer>=0.9",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "uvicorn>=0.27",
+    "fastapi>=0.109",
+]
+
+[project.scripts]
+agno-worker = "agno_worker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agno_worker*"]

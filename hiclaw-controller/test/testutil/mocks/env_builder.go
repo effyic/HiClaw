@@ -56,4 +56,8 @@ func (m *MockEnvBuilder) Build(workerName string, prov *service.WorkerProvisionR
 	}
 }
 
+func (m *MockEnvBuilder) BuildAgno(workerName string, prov *service.WorkerProvisionResult) map[string]string {
+	return m.Build(workerName, prov)
+}
+
 var _ service.WorkerEnvBuilderI = (*MockEnvBuilder)(nil)

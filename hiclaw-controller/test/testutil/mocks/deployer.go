@@ -112,6 +112,10 @@ func (m *MockDeployer) PushOnDemandSkills(ctx context.Context, workerName string
 	return nil
 }
 
+func (m *MockDeployer) ResolveAgnoAgentSpec(ctx context.Context, workerName, uri string) (map[string]string, error) {
+	return nil, nil
+}
+
 func (m *MockDeployer) CleanupOSSData(ctx context.Context, workerName string) error {
 	m.mu.Lock()
 	m.Calls.CleanupOSSData = append(m.Calls.CleanupOSSData, workerName)

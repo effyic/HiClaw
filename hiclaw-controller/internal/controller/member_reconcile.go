@@ -12,6 +12,7 @@ import (
 	"github.com/hiclaw/hiclaw-controller/internal/gateway"
 	"github.com/hiclaw/hiclaw-controller/internal/service"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -113,6 +114,8 @@ type MemberState struct {
 	RoomID         string
 	ContainerState string
 	ExposedPorts   []v1beta1.ExposedPortStatus
+	// AgentSpecConfigMap is the K8s ConfigMap name mounting AgentSpec for agno.
+	AgentSpecConfigMap string
 	// ProvResult is the credentials bundle produced by Infra; passed through
 	// Config and Container phases for idempotent reuse within one reconcile.
 	ProvResult *service.WorkerProvisionResult
@@ -147,13 +150,22 @@ type MemberDeps struct {
 	// Backend.Create is shared between Worker and Manager paths and only the
 	// caller knows which env var applies.
 	DefaultRuntime string
+
+	// K8sClient / K8sNamespace enable agno AgentSpec ConfigMap injection.
+	K8sClient    client.Client
+	K8sNamespace string
 }
 
 // ReconcileMemberInfra ensures Matrix account, Gateway consumer, MinIO user,
 // and DM room are provisioned (or credentials refreshed). Writes MatrixUserID,
 // RoomID, and ProvResult into state.
 func ReconcileMemberInfra(ctx context.Context, d MemberDeps, m MemberContext, state *MemberState) (reconcile.Result, error) {
-	if m.ExistingMatrixUserID != "" {
+	if backend.IsAgnoRuntime(m.Spec.Runtime) && m.ExistingMatrixUserID != "" {
+		// Agno workers never use Matrix; ignore stale status from prior runtime.
+		m.ExistingMatrixUserID = ""
+		m.ExistingRoomID = ""
+	}
+	if m.ExistingMatrixUserID != "" && !backend.IsAgnoRuntime(m.Spec.Runtime) {
 		refreshResult, err := d.Provisioner.RefreshWorkerCredentials(ctx, m.Name, m.RuntimeName)
 		if err != nil {
 			return reconcile.Result{}, fmt.Errorf("refresh credentials: %w", err)
@@ -182,6 +194,7 @@ func ReconcileMemberInfra(ctx context.Context, d MemberDeps, m MemberContext, st
 		Name:            m.RuntimeName,
 		CredentialName:  m.Name,
 		ModelProviderID: modelProviderID,
+		Runtime:         m.Spec.Runtime,
 		Role:            m.Role.String(),
 		TeamName:        m.TeamName,
 		TeamLeaderName:  m.TeamLeaderName,
@@ -228,6 +241,9 @@ func ReconcileMemberConfig(ctx context.Context, d MemberDeps, m MemberContext, s
 	if state.ProvResult == nil {
 		return nil
 	}
+	if backend.IsAgnoRuntime(m.Spec.Runtime) {
+		return reconcileAgnoMemberConfig(ctx, d, m, state)
+	}
 	logger := log.FromContext(ctx)
 
 	if err := d.Deployer.DeployPackage(ctx, m.RuntimeName, m.Spec.Package, m.IsUpdate); err != nil {
@@ -262,6 +278,35 @@ func ReconcileMemberConfig(ctx context.Context, d MemberDeps, m MemberContext, s
 	if err := d.Deployer.PushOnDemandSkills(ctx, m.RuntimeName, m.Spec.Skills, m.Spec.RemoteSkills); err != nil {
 		logger.Info("skill push failed", "error", err)
 	}
+	return nil
+}
+
+func reconcileAgnoMemberConfig(ctx context.Context, d MemberDeps, m MemberContext, state *MemberState) error {
+	logger := log.FromContext(ctx)
+	if m.Spec.Package == "" {
+		logger.Info("agno worker has no package URI; expecting AgentSpec via mounted ConfigMap or env")
+		return nil
+	}
+	data, err := d.Deployer.ResolveAgnoAgentSpec(ctx, m.RuntimeName, m.Spec.Package)
+	if err != nil {
+		return fmt.Errorf("resolve agno agentspec: %w", err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	ns := m.Namespace
+	if ns == "" {
+		ns = d.K8sNamespace
+	}
+	if d.K8sClient == nil || ns == "" {
+		return fmt.Errorf("k8s client and namespace required to inject agno AgentSpec ConfigMap")
+	}
+	cmName, err := EnsureAgnoAgentSpecConfigMap(ctx, d.K8sClient, ns, m.RuntimeName, data, m.Owner)
+	if err != nil {
+		return fmt.Errorf("ensure agentspec ConfigMap: %w", err)
+	}
+	state.AgentSpecConfigMap = cmName
+	logger.Info("agno AgentSpec ConfigMap ready", "worker", m.RuntimeName, "configMap", cmName)
 	return nil
 }
 
@@ -378,7 +423,10 @@ func createMemberContainer(ctx context.Context, d MemberDeps, m MemberContext, s
 	logger := log.FromContext(ctx)
 
 	prov := state.ProvResult
-	if prov == nil || prov.MatrixToken == "" {
+	if prov == nil {
+		return reconcile.Result{}, fmt.Errorf("missing provision result for container create")
+	}
+	if !backend.IsAgnoRuntime(m.Spec.Runtime) && prov.MatrixToken == "" {
 		refreshResult, err := d.Provisioner.RefreshWorkerCredentials(ctx, m.Name, m.RuntimeName)
 		if err != nil {
 			return reconcile.Result{}, fmt.Errorf("refresh credentials for container: %w", err)
@@ -394,7 +442,12 @@ func createMemberContainer(ctx context.Context, d MemberDeps, m MemberContext, s
 		state.ProvResult = prov
 	}
 
-	workerEnv := d.EnvBuilder.Build(m.RuntimeName, prov)
+	var workerEnv map[string]string
+	if backend.IsAgnoRuntime(m.Spec.Runtime) {
+		workerEnv = d.EnvBuilder.BuildAgno(m.RuntimeName, prov)
+	} else {
+		workerEnv = d.EnvBuilder.Build(m.RuntimeName, prov)
+	}
 	workerEnv["HICLAW_WORKER_CR_NAME"] = m.Name
 	if m.ModelProviderInfo != nil && m.ModelProviderInfo.IntranetURL != "" {
 		workerEnv["HICLAW_AI_GATEWAY_URL"] = m.ModelProviderInfo.IntranetURL
@@ -422,6 +475,7 @@ func createMemberContainer(ctx context.Context, d MemberDeps, m MemberContext, s
 		Resources:          agentResourcesToBackend(m.Spec.Resources),
 		Labels:             labels,
 		Owner:              m.Owner,
+		AgentSpecConfigMap: state.AgentSpecConfigMap,
 	}
 	if wb.Name() != "k8s" {
 		token, err := d.Provisioner.RequestSAToken(ctx, m.Name)

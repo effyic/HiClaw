@@ -24,6 +24,7 @@ type DockerConfig struct {
 	CopawWorkerImage     string // default copaw worker image (HICLAW_COPAW_WORKER_IMAGE)
 	HermesWorkerImage    string // default hermes worker image (HICLAW_HERMES_WORKER_IMAGE)
 	OpenHumanWorkerImage string // default openhuman worker image (HICLAW_OPENHUMAN_WORKER_IMAGE)
+	AgnoWorkerImage      string // default agno worker image (HICLAW_AGNO_WORKER_IMAGE)
 	DefaultNetwork       string // default Docker network (default "hiclaw-net")
 }
 
@@ -113,6 +114,8 @@ func (d *DockerBackend) Create(ctx context.Context, req CreateRequest) (*WorkerR
 			image = d.config.HermesWorkerImage
 		case req.Runtime == RuntimeOpenHuman && d.config.OpenHumanWorkerImage != "":
 			image = d.config.OpenHumanWorkerImage
+		case req.Runtime == RuntimeAgno && d.config.AgnoWorkerImage != "":
+			image = d.config.AgnoWorkerImage
 		default:
 			image = d.config.WorkerImage
 		}
@@ -171,10 +174,15 @@ func (d *DockerBackend) Create(ctx context.Context, req CreateRequest) (*WorkerR
 	// other runtimes (openclaw / copaw / hermes) derive from HOME, which
 	// the service layer already sets to the per-worker hiclaw-fs path.
 	if req.WorkingDir == "" {
-		if req.Runtime == RuntimeOpenHuman {
+		switch req.Runtime {
+		case RuntimeOpenHuman:
 			req.WorkingDir = "/home/openhuman/.openhuman"
-		} else if home, ok := req.Env["HOME"]; ok {
-			req.WorkingDir = home
+		case RuntimeAgno:
+			req.WorkingDir = "/opt/agno-worker"
+		default:
+			if home, ok := req.Env["HOME"]; ok {
+				req.WorkingDir = home
+			}
 		}
 	}
 

@@ -42,6 +42,7 @@ type WorkerDeployer interface {
 	WriteInlineConfigs(name string, spec v1beta1.WorkerSpec) error
 	DeployWorkerConfig(ctx context.Context, req WorkerDeployRequest) error
 	PushOnDemandSkills(ctx context.Context, workerName string, skills []string, remoteSkills []v1beta1.RemoteSkillSource) error
+	ResolveAgnoAgentSpec(ctx context.Context, workerName, uri string) (map[string]string, error)
 	CleanupOSSData(ctx context.Context, workerName string) error
 	InjectCoordinationContext(ctx context.Context, req CoordinationDeployRequest) error
 	EnsureTeamStorage(ctx context.Context, teamName string) error
@@ -51,6 +52,7 @@ type WorkerDeployer interface {
 // Implemented by *WorkerEnvBuilder; extracted for testability.
 type WorkerEnvBuilderI interface {
 	Build(workerName string, prov *WorkerProvisionResult) map[string]string
+	BuildAgno(workerName string, prov *WorkerProvisionResult) map[string]string
 }
 
 // ManagerProvisioner defines the provisioning operations used by ManagerReconciler.

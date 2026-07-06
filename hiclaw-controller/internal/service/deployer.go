@@ -143,6 +143,31 @@ func (d *Deployer) DeployPackage(ctx context.Context, name, uri string, isUpdate
 	return nil
 }
 
+// ResolveAgnoAgentSpec fetches a package URI (typically nacos://…) and packs
+// the extracted AgentSpec directory for ConfigMap injection. Does not write
+// to MinIO — agno workers are stateless aside from PostgreSQL sessions.
+func (d *Deployer) ResolveAgnoAgentSpec(ctx context.Context, workerName, uri string) (map[string]string, error) {
+	if uri == "" {
+		return nil, nil
+	}
+	if d.packages == nil {
+		return nil, fmt.Errorf("package resolver unavailable")
+	}
+	extractedDir, err := d.packages.ResolveAndExtract(ctx, uri, workerName)
+	if err != nil {
+		return nil, fmt.Errorf("resolve agentspec package: %w", err)
+	}
+	if extractedDir == "" {
+		return nil, nil
+	}
+	// Nacos AgentSpec layout: {importDir}/nacos/{specName}/ — use the inner dir.
+	specRoot := extractedDir
+	if entries, err := os.ReadDir(extractedDir); err == nil && len(entries) == 1 && entries[0].IsDir() {
+		specRoot = filepath.Join(extractedDir, entries[0].Name())
+	}
+	return executor.PackAgentSpecDir(specRoot)
+}
+
 // WriteInlineConfigs writes inline identity/soul/agents content to the local agent directory.
 // No-op if all inline fields are empty.
 func (d *Deployer) WriteInlineConfigs(name string, spec v1beta1.WorkerSpec) error {
@@ -872,6 +897,8 @@ func (d *Deployer) builtinAgentDir(role, runtime string) string {
 			return filepath.Join(baseDir, "copaw-worker-agent")
 		case "hermes":
 			return filepath.Join(baseDir, "hermes-worker-agent")
+		case "agno":
+			return filepath.Join(baseDir, "agno-worker-agent")
 		case "openhuman":
 			return filepath.Join(baseDir, "openhuman-worker-agent")
 		}

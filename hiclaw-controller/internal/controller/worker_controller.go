@@ -8,6 +8,7 @@ import (
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
 	"github.com/hiclaw/hiclaw-controller/internal/auth"
 	"github.com/hiclaw/hiclaw-controller/internal/backend"
+	"github.com/hiclaw/hiclaw-controller/internal/backend"
 	"github.com/hiclaw/hiclaw-controller/internal/gateway"
 	"github.com/hiclaw/hiclaw-controller/internal/metrics"
 	"github.com/hiclaw/hiclaw-controller/internal/service"
@@ -123,6 +124,8 @@ func (r *WorkerReconciler) reconcileNormal(ctx context.Context, w *v1beta1.Worke
 		ResourcePrefix: r.ResourcePrefix,
 		DefaultRuntime: r.DefaultRuntime,
 		GatewayClient:  r.GatewayClient,
+		K8sClient:      r.Client,
+		K8sNamespace:   w.Namespace,
 	}
 	mctx := r.workerMemberContext(w)
 
@@ -186,6 +189,8 @@ func (r *WorkerReconciler) reconcileDelete(ctx context.Context, w *v1beta1.Worke
 		ResourcePrefix: r.ResourcePrefix,
 		DefaultRuntime: r.DefaultRuntime,
 		GatewayClient:  r.GatewayClient,
+		K8sClient:      r.Client,
+		K8sNamespace:   w.Namespace,
 	}
 	mctx := r.workerMemberContext(w)
 
@@ -216,6 +221,9 @@ func (r *WorkerReconciler) reconcileDelete(ctx context.Context, w *v1beta1.Worke
 // reconcileLegacy writes the worker to the legacy workers-registry and grants
 // the standalone worker publish rights into the Manager's group DM room.
 func (r *WorkerReconciler) reconcileLegacy(ctx context.Context, w *v1beta1.Worker, state *MemberState) {
+	if backend.IsAgnoRuntime(w.Spec.Runtime) {
+		return
+	}
 	if r.Legacy == nil || !r.Legacy.Enabled() {
 		return
 	}

@@ -47,6 +47,11 @@ type PodOverlay struct {
 	// HostAliases from CreateRequest.ExtraHosts; appended to any host
 	// aliases the template already declared.
 	HostAliases []corev1.HostAlias
+
+	// ExtraVolumes / ExtraVolumeMounts are appended after the token volume
+	// (e.g. agno AgentSpec ConfigMap).
+	ExtraVolumes      []corev1.Volume
+	ExtraVolumeMounts []corev1.VolumeMount
 }
 
 // LoadAgentPodTemplate fetches the agent PodTemplateSpec overlay from the
@@ -142,6 +147,9 @@ func ApplyPodTemplate(tmpl corev1.PodTemplateSpec, overlay PodOverlay) *corev1.P
 	pod.Spec.Containers = append([]corev1.Container{agentContainer}, sidecars...)
 
 	pod.Spec.Volumes = append(pod.Spec.Volumes, overlay.TokenVolume)
+	if len(overlay.ExtraVolumes) > 0 {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, overlay.ExtraVolumes...)
+	}
 
 	pod.Spec.ServiceAccountName = overlay.ServiceAccountName
 	pod.Spec.AutomountServiceAccountToken = boolPtr(false)
@@ -201,6 +209,9 @@ func overlayAgentContainer(base corev1.Container, overlay PodOverlay) corev1.Con
 		out.WorkingDir = overlay.Container.WorkingDir
 	}
 	out.VolumeMounts = append(out.VolumeMounts, overlay.TokenVolumeMount)
+	if len(overlay.ExtraVolumeMounts) > 0 {
+		out.VolumeMounts = append(out.VolumeMounts, overlay.ExtraVolumeMounts...)
+	}
 
 	switch {
 	case overlay.ResourcesOverride != nil:

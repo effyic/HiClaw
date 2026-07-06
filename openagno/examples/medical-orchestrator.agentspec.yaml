@@ -1,0 +1,100 @@
+apiVersion: hiclaw.agno/v1
+runtime: agno
+name: medical-orchestrator
+description: 医疗对话编排 — 固定分诊 + 单问诊 Agent 动态专科装配 + 病历生成
+model: gpt-4o
+
+db:
+  type: postgres
+  session_table: medical_sessions
+
+# ---------------------------------------------------------------------------
+# Agent 定义：仅 3 个逻辑 Agent（不为每个科室创建独立 Agent / Pod）
+# ---------------------------------------------------------------------------
+agents:
+  triage:
+    role: 分诊护士
+    # 固定分诊 AgentSpec；知识库 ID 固定
+    instructions: |
+      你是首诊分诊助手。根据患者主诉判断科室与紧急程度，不做诊断。
+      完成分诊后，必须输出一段 JSON（用 ```json 代码块包裹），格式：
+      {
+        "specialty": "<专科代码，见 specialties 目录>",
+        "urgency": "routine|urgent|emergency",
+        "chief_complaint": "<主诉摘要>",
+        "route_reason": "<路由理由>"
+      }
+      专科代码必须从 specialties 目录中选择；若无法判断用 "general".
+    knowledge:
+      provider: weknora
+      knowledge_id: triage-kb-fixed
+
+  consultation:
+    role: 专科问诊医生
+    # 问诊 Agent 的「壳」：具体 Soul / 知识库在运行时按 session.specialty 动态注入
+    instructions: |
+      你是专科问诊助手。根据已确定的分诊专科，进行深入问诊。
+      收集病史与症状细节，给出初步建议（非最终诊断）。
+      语气专业、有条理，一次只追问 1～2 个关键问题。
+    # knowledge_id 留空或写占位符；运行时由 specialty 目录解析
+    knowledge:
+      provider: weknora
+      knowledge_id: "${session.specialty.knowledge_id}"
+
+  emr_writer:
+    role: 病历书写助手
+    instructions: |
+      根据本会话完整对话历史，生成结构化电子病历：
+      主诉、现病史、既往史、过敏史、初步印象、建议随访。
+      输出 Markdown 表格。
+
+# ---------------------------------------------------------------------------
+# 编排：按会话阶段（phase）选择 Agent，而非为每科室建 Team 成员
+# ---------------------------------------------------------------------------
+orchestration:
+  mode: session_phase
+  phases:
+    - name: triage
+      agent: triage
+      until: specialty_resolved          # 直到分诊 JSON 解析成功
+    - name: consultation
+      agent: consultation
+      until: consultation_complete       # 可由 emr 触发或用户显式结束
+    - name: emr
+      agent: emr_writer
+      once: true
+
+# ---------------------------------------------------------------------------
+# 专科目录：问诊阶段动态装配的数据源（可随 AgentSpec 热更新）
+# 不为每个科室创建 agents.cardiology / agents.dermatology ...
+# ---------------------------------------------------------------------------
+specialties:
+  general:
+    display_name: 全科
+    knowledge_id: weknora-kb-general
+    soul: |
+      你当前接诊全科门诊。关注常见症状的全科鉴别与转诊建议。
+
+  cardiology:
+    display_name: 心血管内科
+    knowledge_id: weknora-kb-cardiology
+    soul: |
+      你当前接诊心血管内科。重点关注胸痛、心悸、血压、心衰相关病史与危险因素。
+
+  dermatology:
+    display_name: 皮肤科
+    knowledge_id: weknora-kb-dermatology
+    soul: |
+      你当前接诊皮肤科。关注皮损形态、分布、病程、过敏与用药史。
+
+  pediatrics:
+    display_name: 儿科
+    knowledge_id: weknora-kb-pediatrics
+    soul: |
+      你当前接诊儿科。注意患儿年龄、生长发育、疫苗接种与家族史。
+
+metadata:
+  domain: healthcare
+  triage:
+    knowledge_id: triage-kb-fixed
+  # 分诊输出 JSON 中 specialty 字段与 specialties 的 key 对齐

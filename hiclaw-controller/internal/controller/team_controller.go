@@ -252,6 +252,8 @@ func (r *TeamReconciler) reconcileTeamNormal(ctx context.Context, t *v1beta1.Tea
 		ResourcePrefix: r.ResourcePrefix,
 		DefaultRuntime: r.DefaultRuntime,
 		GatewayClient:  r.GatewayClient,
+		K8sClient:      r.Client,
+		K8sNamespace:   t.Namespace,
 	}
 	// staleCtx.Spec is intentionally left zero. The original TeamWorkerSpec
 	// has already been removed from t.Spec.Workers, and we never persisted a
@@ -531,6 +533,8 @@ func (r *TeamReconciler) handleDelete(ctx context.Context, t *v1beta1.Team) erro
 		ResourcePrefix: r.ResourcePrefix,
 		DefaultRuntime: r.DefaultRuntime,
 		GatewayClient:  r.GatewayClient,
+		K8sClient:      r.Client,
+		K8sNamespace:   t.Namespace,
 	}
 
 	// Union of Status.Members and desired members to guarantee cleanup even

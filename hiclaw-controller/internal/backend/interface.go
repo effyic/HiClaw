@@ -31,12 +31,23 @@ const (
 	RuntimeCopaw     = "copaw"
 	RuntimeHermes    = "hermes"
 	RuntimeOpenHuman = "openhuman"
+	RuntimeAgno      = "agno"
 )
+
+// AgnoAgentSpecMountPath is where the controller mounts AgentSpec ConfigMaps
+// for runtime=agno workers.
+const AgnoAgentSpecMountPath = "/etc/hiclaw/agentspec"
 
 // ValidRuntime reports whether r is a recognized runtime value.
 // An empty string is valid — backends resolve it via ResolveRuntime.
 func ValidRuntime(r string) bool {
-	return r == "" || r == RuntimeOpenClaw || r == RuntimeCopaw || r == RuntimeHermes || r == RuntimeOpenHuman
+	return r == "" || r == RuntimeOpenClaw || r == RuntimeCopaw || r == RuntimeHermes || r == RuntimeOpenHuman || r == RuntimeAgno
+}
+
+// IsAgnoRuntime reports whether the worker uses the standalone Agno conversational
+// runtime (no Matrix / MinIO workspace; AgentSpec injected by controller).
+func IsAgnoRuntime(r string) bool {
+	return r == RuntimeAgno
 }
 
 // ResolveRuntime returns the effective runtime for a backend request.
@@ -95,7 +106,10 @@ type CreateRequest struct {
 	Name    string            `json:"name"`
 	Image   string            `json:"image,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
-	Runtime string            `json:"runtime,omitempty"` // "openclaw" | "copaw" | "hermes" | "openhuman"
+	Runtime string            `json:"runtime,omitempty"` // "openclaw" | "copaw" | "hermes" | "openhuman" | "agno"
+	// AgentSpecConfigMap, when set (agno runtime), mounts the named ConfigMap at
+	// /etc/hiclaw/agentspec inside the worker container.
+	AgentSpecConfigMap string `json:"-"`
 	// RuntimeFallback is the value used by Backend.Create when Runtime is
 	// empty, before falling back to RuntimeOpenClaw. Manager / Worker
 	// reconcilers populate this from HICLAW_MANAGER_RUNTIME /

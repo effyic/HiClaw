@@ -1,7 +1,10 @@
 package service
 
 import (
+	"os"
+
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
+	"github.com/hiclaw/hiclaw-controller/internal/backend"
 	"github.com/hiclaw/hiclaw-controller/internal/config"
 )
 
@@ -34,6 +37,28 @@ func (b *WorkerEnvBuilder) Build(workerName string, prov *WorkerProvisionResult)
 
 	b.applyClusterDefaults(env)
 	return env
+}
+
+// BuildAgno returns env for standalone Agno conversational workers. These
+// workers do not use Matrix, MinIO, or Manager integration.
+func (b *WorkerEnvBuilder) BuildAgno(workerName string, prov *WorkerProvisionResult) map[string]string {
+	env := map[string]string{
+		"HICLAW_WORKER_NAME":  workerName,
+		"AGNO_CONTROL_PORT":   "8090",
+		"AGNO_AGENTSPEC_DIR":  backend.AgnoAgentSpecMountPath,
+		"AGNO_DB_URL":         envOrDefaultAgnoDBURL(),
+	}
+	if prov != nil && prov.GatewayKey != "" {
+		env["HICLAW_WORKER_GATEWAY_KEY"] = prov.GatewayKey
+	}
+	return env
+}
+
+func envOrDefaultAgnoDBURL() string {
+	if v := os.Getenv("HICLAW_AGNO_DEFAULT_DB_URL"); v != "" {
+		return v
+	}
+	return "postgresql+psycopg://root:vector_store@localhost:5432/postgres"
 }
 
 // BuildManager returns the env map for a Manager container.
