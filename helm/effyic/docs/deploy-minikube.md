@@ -3,14 +3,14 @@
 ## 前置条件
 
 
-| 项           | 要求                                                                                        |
-| ----------- | ----------------------------------------------------------------------------------------- |
-| 集群          | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                                |
-| 工具          | Helm 3.14+                                                                                |
-| LLM         | 通义千问 API Key（安装时通过 `--set` 传入）                                                            |
-| Nacos MySQL | 宿主机 MySQL 已建库 `nacos`；`values.yaml` 默认 `host.minikube.internal` + `hostAliasIP`（Docker 网关 IP，不随局域网 IP 变化）。网关 IP 查询：`docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'` |
-| 本地镜像        | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager` |
-| inotify 限制  | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令          |
+| 项          | 要求                                                                                                                                                                                                 |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 集群         | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                                                                                                                                         |
+| 工具         | Helm 3.14+                                                                                                                                                                                         |
+| LLM        | 通义千问 API Key（安装时通过 `--set` 传入）                                                                                                                                                                     |
+| MySQL      | 宿主机 MySQL 已建库 `nacos`；`values.yaml` 默认 `host.minikube.internal` + `hostAliasIP`（Docker 网关 IP，不随局域网 IP 变化）。网关 IP 查询：`docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'` |
+| 本地镜像       | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager`                                                                                                            |
+| inotify 限制 | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令                                                                                                                   |
 
 
 ```bash
@@ -37,16 +37,20 @@ export DOCKER_BUILD_ARGS="\
 docker pull "$REG/openclaw-base:20260423-8359cbc"
 docker tag "$REG/openclaw-base:20260423-8359cbc" hiclaw/openclaw-base:latest
 
-# 本地构建
+# 构建 hiclaw-controller
 make build-hiclaw-controller DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
+# 构建ChatAgent
 make build-agno-worker DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
+# 构建个人助手Agent
+make build-hermes-worker DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
+# 构建manager, 自主协调团队时才会用到
 make build-manager \
   OPENCLAW_BASE_IMAGE=hiclaw/openclaw-base \
   OPENCLAW_BASE_VERSION=latest \
   DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 
 # 装入 minikube
-for img in hiclaw/hiclaw-controller:latest hiclaw/agno-worker:latest hiclaw/hiclaw-manager:latest; do
+for img in hiclaw/hiclaw-controller:latest hiclaw/agno-worker:latest hiclaw/hermes-worker:latest hiclaw/hiclaw-manager:latest; do
   load_image "$img"
 done
 for img in \
@@ -61,6 +65,8 @@ for img in \
   load_image "$img"
 done
 ```
+
+
 
 ## 2. 拉取 Helm 依赖
 
@@ -100,13 +106,13 @@ kubectl get manager.hiclaw.io -n default
 
 浏览器打开 [http://localhost](http://localhost) ，用户名 `admin`，密码见 `values.yaml` 中 `credentials.adminPassword`（默认 `admin`）。
 
-## 6. ChatAI Worker（Agno，替代 Hermes）
+## 6. Agno-Worker（ChatAi）
 
 Agno Worker 是独立对话运行时，通过 **Worker CR** 由 hiclaw-controller 部署，不依赖 Matrix / MinIO。医疗场景 AgentSpec 由 Controller 从 Nacos 拉取并写入 ConfigMap 挂载到 Pod。
 
 ### 6.1 PostgreSQL（会话持久化）
 
-Agno Worker 需要 PostgreSQL 持久化对话。推荐使用**宿主机**上已部署的实例（无需在 minikube 内再起 PG）：
+Agno Worker 需要 PostgreSQL 持久化对话，挂载外部数据源：
 
 ```yaml
 # docker-compose 示例（network_mode: host）
@@ -120,20 +126,7 @@ Worker CR 中通过 `spec.env.AGNO_DB_URL` 指向宿主机 PG。minikube Pod 访
 docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'
 ```
 
-`chatai.yaml` 默认连接串：
 
-```
-postgresql+psycopg://root:postgresql@192.168.49.1:5432/vector_store
-```
-
-验证连通性：
-
-```bash
-GW=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
-kubectl run pg-test --restart=Never -n default --image=postgres:16-alpine \
-  --command -- psql "postgresql://root:postgresql@${GW}:5432/vector_store" -c 'SELECT 1'
-kubectl logs pg-test; kubectl delete pod pg-test --ignore-not-found
-```
 
 ### 6.2 注册 AgentSpec（二选一）
 
@@ -152,7 +145,9 @@ kubectl cp openagno/examples/. "$CTRL_POD:/tmp/agentspec/effyic-chatai/"
 # 部署时设置 PACKAGE_URI=file:///tmp/agentspec/effyic-chatai
 ```
 
-### 6.3 部署 ChatAI Worker
+
+
+### 6.3 部署 Agno-Worker
 
 ```bash
 cd helm/effyic/chatai
@@ -163,6 +158,8 @@ cd helm/effyic/chatai
 # 或本地 file:// 包
 PACKAGE_URI='file:///tmp/agentspec/effyic-chatai' ./apply-chatai.sh effyic-chatai default
 ```
+
+
 
 ### 6.4 验证 HTTP 聊天
 
@@ -198,16 +195,6 @@ curl -sS http://127.0.0.1/v1/chat \
 APPLY_INGRESS=1 ./apply-chatai.sh effyic-chatai default
 ```
 
-### Agno vs Hermes 对比
-
-| 项 | Hermes Worker | Agno Worker |
-| --- | --- | --- |
-| 运行时 | hermes-agent + Matrix | Agno Team/Agent |
-| 配置来源 | MinIO + Nacos Skills | Nacos AgentSpec → ConfigMap |
-| 对话 API | `/v1/chat/completions`（OpenAI 兼容） | `/v1/chat`（自定义 JSON） |
-| 默认端口 | 8642 | 8090 |
-| 会话存储 | hermes 内置 | PostgreSQL |
-
 ## 7. 卸载
 
 ```bash
@@ -220,3 +207,4 @@ helm uninstall effyic -n default --wait --timeout 15m
 # 卸载删 PVC
 helm uninstall effyic -n default --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n default --ignore-not-found
 ```
+
