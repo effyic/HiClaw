@@ -27,7 +27,7 @@ nacos:
   serverMode: standalone
   replicaCount: 1
   image:
-    repository: nacos/nacos-server
+    repository: nacos-registry.cn-hangzhou.cr.aliyuncs.com/nacos/nacos-server
     tag: "v3.2.2"
     pullPolicy: IfNotPresent
   service:

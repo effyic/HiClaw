@@ -53,17 +53,6 @@ make build-manager \
 for img in hiclaw/hiclaw-controller:latest hiclaw/agno-worker:latest hiclaw/hermes-worker:latest hiclaw/hiclaw-manager:latest; do
   load_image "$img"
 done
-for img in \
-  "$REG/tuwunel:20260216" \
-  "$REG/minio:20260216" \
-  "$REG/element-web:20260216" \
-  "$REG/higress:2.2.1" \
-  "$REG/pilot:2.2.1" \
-  "$REG/gateway:2.2.1" \
-  "$REG/console:2.2.1"; do
-  docker pull "$img"
-  load_image "$img"
-done
 ```
 
 
@@ -143,68 +132,5 @@ CTRL_POD=$(kubectl get pod -l app.kubernetes.io/name=effyic-controller -o jsonpa
 kubectl exec "$CTRL_POD" -- mkdir -p /tmp/agentspec/effyic-chatai
 kubectl cp openagno/examples/. "$CTRL_POD:/tmp/agentspec/effyic-chatai/"
 # 部署时设置 PACKAGE_URI=file:///tmp/agentspec/effyic-chatai
-```
-
-
-
-### 6.3 部署 Agno-Worker
-
-```bash
-cd helm/effyic/chatai
-
-# 默认使用 Nacos AgentSpec
-./apply-chatai.sh effyic-chatai default
-
-# 或本地 file:// 包
-PACKAGE_URI='file:///tmp/agentspec/effyic-chatai' ./apply-chatai.sh effyic-chatai default
-```
-
-
-
-### 6.4 验证 HTTP 聊天
-
-Controller 会自动为 `expose.port=8090` 创建 Higress 路由。查看 Worker 状态：
-
-```bash
-kubectl get worker.hiclaw.io effyic-chatai -o yaml
-kubectl get pods -l hiclaw.io/worker=effyic-chatai
-kubectl logs -l hiclaw.io/worker=effyic-chatai --tail=50
-```
-
-**健康检查**（集群内）：
-
-```bash
-kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
-  curl -sS http://effyic-chatai-chatai:8090/health
-```
-
-**聊天 API**（`POST /v1/chat`，需 Bearer Token = Controller 分配的 `HICLAW_WORKER_GATEWAY_KEY`）：
-
-```bash
-# 经 Higress 网关（域名见 Worker status.exposedPorts）
-curl -sS http://127.0.0.1/v1/chat \
-  -H 'Host: worker-effyic-chatai-8090-local.hiclaw.io' \
-  -H 'Authorization: Bearer <gateway-key>' \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"你好，我头痛三天了","session_id":"sess-001","user_id":"patient-1"}'
-```
-
-临时手动 Ingress 验证（可选）：
-
-```bash
-APPLY_INGRESS=1 ./apply-chatai.sh effyic-chatai default
-```
-
-## 7. 卸载
-
-```bash
-kubectl delete -f helm/effyic/chatai/chatai.yaml --ignore-not-found
-# 若曾用集群内 PG（可选）：kubectl delete -f helm/effyic/chatai/postgres.yaml --ignore-not-found
-
-# 卸载保留 PVC：
-helm uninstall effyic -n default --wait --timeout 15m
-
-# 卸载删 PVC
-helm uninstall effyic -n default --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n default --ignore-not-found
 ```
 
