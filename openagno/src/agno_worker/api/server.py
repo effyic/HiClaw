@@ -1,7 +1,8 @@
-"""HTTP API for chat and health probes."""
+"""HTTP API for chat, health probes, and optional AgentOS console."""
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -30,12 +31,20 @@ class AgnoAPIServer:
         token: str,
         chat_handler: Callable[[str, str, str], str],
         status_handler: Callable[[], dict[str, Any]],
+        *,
+        worker_name: str = "agno-worker",
+        enable_agentos: bool = False,
+        runtime: Any = None,
     ) -> None:
         self._bind = bind
         self._port = port
         self._token = token
         self._chat_handler = chat_handler
         self._status_handler = status_handler
+        self._worker_name = worker_name
+        self._enable_agentos = enable_agentos
+        self._runtime = runtime
+        self._agent_os: Any = None
         self._server: Optional[uvicorn.Server] = None
         self._app = self._build_app()
 
@@ -44,7 +53,17 @@ class AgnoAPIServer:
         host = self._bind if self._bind not in ("0.0.0.0", "") else "127.0.0.1"
         return f"http://{host}:{self._port}"
 
+    def resync_agentos(self) -> None:
+        if self._agent_os is not None:
+            self._agent_os.resync(self._app)
+
     def _build_app(self) -> FastAPI:
+        base_app = self._build_base_app()
+        if not self._enable_agentos or self._runtime is None:
+            return base_app
+        return self._wrap_with_agentos(base_app)
+
+    def _build_base_app(self) -> FastAPI:
         app = FastAPI(title="HiClaw Agno Worker", version="0.1.0")
 
         async def _auth(authorization: Optional[str] = Header(None)) -> None:
@@ -71,6 +90,32 @@ class AgnoAPIServer:
         async def reregister(_: None = Depends(_auth)) -> dict[str, str]:
             return {"status": "ok"}
 
+        return app
+
+    def _wrap_with_agentos(self, base_app: FastAPI) -> FastAPI:
+        from agno.os import AgentOS
+
+        runtime = self._runtime
+        agents = list(runtime.agents.values())
+        teams = [runtime.team] if runtime.team else None
+        workflows = [runtime.workflow] if runtime.workflow else None
+        dev_mode = os.environ.get("RUNTIME_ENV", "prd").lower() == "dev"
+
+        self._agent_os = AgentOS(
+            name=self._worker_name,
+            agents=agents,
+            teams=teams,
+            workflows=workflows,
+            db=runtime.db,
+            base_app=base_app,
+            on_route_conflict="preserve_base_app",
+            authorization=not dev_mode,
+        )
+        app = self._agent_os.get_app()
+        logger.info(
+            "AgentOS console enabled (dev_mode=%s). Connect UI at https://os.agno.com",
+            dev_mode,
+        )
         return app
 
     async def start(self) -> None:

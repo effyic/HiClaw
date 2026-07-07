@@ -41,6 +41,7 @@ def main() -> None:
             api_port=api_port,
             api_bind=config.api_bind,
             watch_interval=config.watch_interval,
+            enable_agentos=config.enable_agentos,
         )
         worker = Worker(config)
 

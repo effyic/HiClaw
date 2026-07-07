@@ -49,6 +49,10 @@ class AgnoRuntime:
     def workflow(self) -> Any:
         return self._workflow
 
+    @property
+    def db(self) -> Any:
+        return self._db
+
     def run(self, message: str, *, session_id: str, user_id: str = "") -> str:
         target = self._team or next(iter(self._agents.values()), None)
         if target is None:

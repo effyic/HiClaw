@@ -65,6 +65,9 @@ class Worker:
             token=token,
             chat_handler=self._handle_chat,
             status_handler=self._status,
+            worker_name=self.config.worker_name,
+            enable_agentos=self.config.enable_agentos,
+            runtime=self._runtime,
         )
         self._api_task = asyncio.create_task(self._api.start())
         self._watch_task = asyncio.create_task(self._watch_spec_loop())
@@ -109,6 +112,8 @@ class Worker:
                     spec = load_agentspec_from_dir(self.config.agentspec_dir)
                     if self._runtime:
                         self._runtime.reload(spec)
+                    if self._api:
+                        self._api.resync_agentos()
                     self._spec_fingerprint = fp
             except Exception as exc:
                 logger.warning("AgentSpec watch error: %s", exc)

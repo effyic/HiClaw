@@ -37,6 +37,8 @@ spec:
 | `AGNO_AGENTSPEC_DIR` | `/etc/hiclaw/agentspec` | Controller 挂载的 AgentSpec 目录 |
 | `AGNO_DB_URL` | `postgresql+psycopg://root:vector_store@localhost:5432/postgres` | 会话库 |
 | `AGNO_CONTROL_PORT` | `8090` | HTTP API 端口 |
+| `AGNO_ENABLE_AGENTOS` | `false` | 启用 Agno AgentOS API（供 [os.agno.com](https://os.agno.com) 控制台连接） |
+| `RUNTIME_ENV` | `prd` | 设为 `dev` 时本地开发免 JWT，便于连接控制台 |
 | `AGNO_SPEC_WATCH_INTERVAL` | `30` | ConfigMap 热更新检测间隔（秒） |
 
 ## 动态配置
@@ -50,3 +52,21 @@ docker build -f HiClaw/openagno/Dockerfile HiClaw/openagno
 ```
 
 镜像环境变量 `HICLAW_AGNO_WORKER_IMAGE`（controller 侧）默认为 `hiclaw/agno-worker:latest`。
+
+## Agent 控制台（AgentOS UI）
+
+agno-worker 可选启用 **AgentOS** 运行时 API，通过 Agno 官方 Web 控制台 [os.agno.com](https://os.agno.com) 连接本地实例，进行对话测试、会话/Trace 查看与调试。
+
+```bash
+# docker-compose 或 .env 中启用
+AGNO_ENABLE_AGENTOS=true
+RUNTIME_ENV=dev          # 本地免 JWT
+AGNO_CONTROL_PORT=8090
+```
+
+1. 启动 worker 后确认 `GET http://localhost:8090/agents` 返回 agent 列表
+2. 打开 [os.agno.com](https://os.agno.com) → **Connect OS** → **Local**
+3. 填入 `http://localhost:8090`（若 Docker 在远程机器，用宿主机 IP）
+4. 连接成功后可在控制台 Chat / Sessions / Traces 中调试 agent
+
+> HiClaw 的 `POST /v1/chat` 与 AgentOS API 并存；生产环境请设置 `RUNTIME_ENV=prd` 并在 os.agno.com 配置 JWT。
