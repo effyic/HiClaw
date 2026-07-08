@@ -7,9 +7,11 @@ import os
 from functools import partial
 from typing import Any, Callable, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 import uvicorn
+
+from agno_worker.api.identity import resolve_tenant_id, resolve_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +101,21 @@ class AgnoAPIServer:
             return self._status_handler()
 
         @app.post("/v1/chat", response_model=ChatResponse)
-        async def chat(req: ChatRequest, _: None = Depends(_auth)) -> ChatResponse:
+        async def chat(
+            req: ChatRequest,
+            request: Request,
+            _: None = Depends(_auth),
+        ) -> ChatResponse:
+            user_id = resolve_user_id(
+                body_user_id=req.user_id,
+                headers=request.headers,
+                query_user_id=request.query_params.get("user_id", ""),
+            )
+            tenant_id = resolve_tenant_id(
+                body_tenant_id=req.tenant_id,
+                headers=request.headers,
+                query_tenant_id=request.query_params.get("tenant_id", ""),
+            )
             try:
                 loop = asyncio.get_running_loop()
                 reply = await loop.run_in_executor(
@@ -108,8 +124,8 @@ class AgnoAPIServer:
                         self._chat_handler,
                         req.message,
                         req.session_id,
-                        req.user_id,
-                        req.tenant_id,
+                        user_id,
+                        tenant_id,
                     ),
                 )
             except Exception as exc:

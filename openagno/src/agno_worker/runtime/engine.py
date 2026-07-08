@@ -103,6 +103,8 @@ class AgnoRuntime:
     ) -> str:
         target = self._resolve_run_target()
         run_metadata: dict[str, Any] = {"session_id": session_id, **(metadata or {})}
+        if user_id:
+            run_metadata["user_id"] = user_id
         if tenant_id:
             run_metadata["tenant_id"] = tenant_id
         kwargs: dict[str, Any] = {
