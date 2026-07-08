@@ -8,15 +8,19 @@ from typing import Any, Callable
 from agno_worker.agentspec.schema import AgentDef, AgentSpec
 from agno_worker.data import MySQLDataContextProvider
 from agno_worker.hooks.compose import (
+    build_run_dependencies,
     has_hook_data,
+    normalize_knowledge_filters,
     pick_hook_or_spec,
     resolve_active_role,
     role_def,
+    spec_context_filters,
     spec_instructions,
     spec_system_prompt,
 )
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.mcp.loader import build_mcp_tools
+from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill_catalog_summary
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,7 @@ class AgentBuilder:
         self.spec = spec
         self.db = db
         self._data_provider = MySQLDataContextProvider(registry)
+        self._skills_manager = DynamicSkillsManager()
 
     def build_dynamic_agent(self) -> Any:
         """Build one Agent whose prompt/tools are resolved per run via hooks."""
@@ -49,16 +54,16 @@ class AgentBuilder:
             model=self._resolve_model(
                 (default_defn.model if default_defn else "") or self.spec.model
             ),
-            system_message=self._make_system_message(),
             instructions=self._make_instructions(),
             tools=self._make_tools(),
             db=self.db,
             pre_hooks=[self._make_pre_hook()],
             post_hooks=[self._make_post_hook()],
             add_history_to_context=True,
+            add_dependencies_to_context=True,
             markdown=True,
+            cache_callables=False,
             dependencies={
-                "user_profile": {},
                 "role_catalog": list(self.spec.agents.keys()),
             },
         )
@@ -66,30 +71,6 @@ class AgentBuilder:
     def build_agent(self, defn: AgentDef) -> Any:
         """Backward-compatible alias; always returns the single dynamic agent."""
         return self.build_dynamic_agent()
-
-    def _make_system_message(self) -> Callable[..., str]:
-        registry = self.registry
-        spec = self.spec
-
-        def _system_message(run_context: Any) -> str:
-            session_state = run_context.session_state or {}
-            active_role = resolve_active_role(session_state, spec)
-            defn = role_def(spec, active_role)
-
-            hook_value = registry.call(
-                "get_system_prompt_hook", run_context, session_state
-            )
-            spec_value = spec_system_prompt(defn)
-            resolved = pick_hook_or_spec(hook_value, spec_value)
-
-            if has_hook_data(hook_value):
-                logger.debug("system_message overridden by hook (role=%s)", active_role)
-            else:
-                logger.debug("system_message from AgentSpec role=%s", active_role)
-
-            return str(resolved or "")
-
-        return _system_message
 
     def _make_instructions(self) -> Callable[..., str]:
         registry = self.registry
@@ -101,24 +82,40 @@ class AgentBuilder:
             active_role = resolve_active_role(session_state, spec)
             defn = role_def(spec, active_role)
 
-            hook_value = registry.call(
+            hook_system = registry.call(
+                "get_system_prompt_hook", run_context, session_state
+            )
+            spec_system = spec_system_prompt(defn)
+            system_text = str(pick_hook_or_spec(hook_system, spec_system) or "")
+
+            hook_instr = registry.call(
                 "get_instructions_hook", run_context, user_profile
             )
-            spec_value = spec_instructions(defn)
-            resolved = pick_hook_or_spec(hook_value, spec_value)
+            spec_instr = spec_instructions(defn)
+            instr_text = str(pick_hook_or_spec(hook_instr, spec_instr) or "")
 
-            if has_hook_data(hook_value):
-                logger.debug("instructions overridden by hook (role=%s)", active_role)
+            parts = [part for part in (system_text, instr_text) if part.strip()]
+
+            catalog = normalize_skill_refs(
+                (run_context.dependencies or {}).get("skill_catalog")
+            )
+            summary = skill_catalog_summary(catalog)
+            if summary:
+                parts.append(summary)
+
+            if has_hook_data(hook_system) or has_hook_data(hook_instr):
+                logger.debug("prompt overridden by hook (role=%s)", active_role)
             else:
-                logger.debug("instructions from AgentSpec role=%s", active_role)
+                logger.debug("prompt from AgentSpec role=%s", active_role)
 
-            return str(resolved or "")
+            return "\n\n".join(parts)
 
         return _instructions
 
     def _make_tools(self) -> Callable[..., list[Any]]:
         registry = self.registry
         data_provider = self._data_provider
+        skills_manager = self._skills_manager
 
         def _tools(run_context: Any) -> list[Any]:
             session_state = run_context.session_state or {}
@@ -143,6 +140,29 @@ class AgentBuilder:
                         role_defn.tools,
                     )
 
+            catalog = normalize_skill_refs(
+                (run_context.dependencies or {}).get("skill_catalog")
+            )
+            if not catalog:
+                user_requirements = str(
+                    (run_context.metadata or {}).get("user_requirements") or ""
+                )
+                catalog = skills_manager.resolve_catalog(
+                    registry, run_context, user_requirements
+                )
+                if run_context.dependencies is None:
+                    run_context.dependencies = {}
+                run_context.dependencies["skill_catalog"] = [
+                    {
+                        "name": ref.name,
+                        "description": ref.description,
+                        "source_path": ref.source_path,
+                        "scripts": list(ref.scripts),
+                    }
+                    for ref in catalog
+                ]
+
+            tools.extend(skills_manager.build_tools(registry, run_context, catalog))
             tools.extend(data_provider.get_tools())
             filtered = registry.call("mcp_tool_filter_hook", run_context, tools)
             return filtered if filtered is not None else tools
@@ -152,6 +172,7 @@ class AgentBuilder:
     def _make_pre_hook(self) -> Callable[..., None]:
         registry = self.registry
         spec = self.spec
+        skills_manager = self._skills_manager
 
         def _pre_hook(run_input: Any, run_context: Any, session: Any = None, **_: Any) -> None:
             session_id = _extract_session_id(session, run_context)
@@ -168,9 +189,43 @@ class AgentBuilder:
             active_role = resolve_active_role(run_context.session_state, spec)
             run_context.session_state.setdefault("active_role", active_role)
 
+            user_requirements = _extract_user_message(run_input)
+            if user_requirements:
+                metadata = getattr(run_context, "metadata", None)
+                if metadata is None:
+                    run_context.metadata = {}
+                    metadata = run_context.metadata
+                metadata["user_requirements"] = user_requirements
+
             hook_filters = registry.call("get_context_filter_hook", run_context)
-            spec_filters = _spec_context_filters(active_role, spec)
-            run_context.knowledge_filters = pick_hook_or_spec(hook_filters, spec_filters)
+            spec_filters = spec_context_filters(active_role, spec)
+            merged = pick_hook_or_spec(hook_filters, spec_filters)
+            if not isinstance(merged, dict):
+                merged = spec_filters
+            normalized = normalize_knowledge_filters(merged)
+            run_context.knowledge_filters = normalized
+
+            if run_context.dependencies is None:
+                run_context.dependencies = {}
+            run_context.dependencies.update(build_run_dependencies(run_context, normalized))
+            run_context.dependencies.setdefault(
+                "role_catalog", list(spec.agents.keys())
+            )
+
+            catalog = skills_manager.resolve_catalog(
+                registry,
+                run_context,
+                user_requirements,
+            )
+            run_context.dependencies["skill_catalog"] = [
+                {
+                    "name": ref.name,
+                    "description": ref.description,
+                    "source_path": ref.source_path,
+                    "scripts": list(ref.scripts),
+                }
+                for ref in catalog
+            ]
 
         return _pre_hook
 
@@ -215,15 +270,6 @@ class AgentBuilder:
         return default_model
 
 
-def _spec_context_filters(active_role: str, spec: AgentSpec) -> dict[str, Any]:
-    defn = role_def(spec, active_role)
-    filters: dict[str, Any] = {"role": active_role}
-    if defn and defn.knowledge and defn.knowledge.knowledge_id:
-        filters["knowledge_id"] = defn.knowledge.knowledge_id
-        filters["provider"] = defn.knowledge.provider
-    return filters
-
-
 def _extract_session_id(session: Any, run_context: Any) -> str:
     if session is not None:
         for attr in ("session_id", "id"):
@@ -233,4 +279,16 @@ def _extract_session_id(session: Any, run_context: Any) -> str:
     metadata = getattr(run_context, "metadata", None) or {}
     if session_id := metadata.get("session_id"):
         return str(session_id)
+    return ""
+
+
+def _extract_user_message(run_input: Any) -> str:
+    if run_input is None:
+        return ""
+    for attr in ("input_content", "message", "content", "input"):
+        value = getattr(run_input, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if isinstance(run_input, str):
+        return run_input.strip()
     return ""

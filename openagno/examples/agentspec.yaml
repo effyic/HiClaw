@@ -1,0 +1,32 @@
+apiVersion: hiclaw.agno/v1
+runtime: agno
+name: tenant-demo-agent
+description: 租户动态 Agent 集成测试模板
+model: qwen3.6-plus
+
+db:
+  type: mysql
+  url: mysql+pymysql://root:mysql@192.168.49.1:3306/agno_worker
+  session_table: agno_sessions
+
+agents:
+  default:
+    role: 通用助手
+    instructions: |
+      你是 AgentSpec 模板中的默认助手（hook 未覆盖时使用）。
+    knowledge:
+      provider: weknora
+      knowledge_ids:
+        - spec-fallback-kb
+
+  sales:
+    role: 销售顾问
+    instructions: |
+      你是 AgentSpec 模板中的销售顾问（hook 未覆盖时使用）。
+    knowledge:
+      provider: weknora
+      knowledge_ids:
+        - spec-sales-kb
+
+metadata:
+  domain: integration-test

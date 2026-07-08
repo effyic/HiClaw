@@ -98,14 +98,16 @@ class AgnoRuntime:
         *,
         session_id: str,
         user_id: str = "",
+        tenant_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        target = self._team or self._primary_agent
-        if target is None:
-            raise RuntimeError("No Agno agent configured")
+        target = self._resolve_run_target()
+        run_metadata: dict[str, Any] = {"session_id": session_id, **(metadata or {})}
+        if tenant_id:
+            run_metadata["tenant_id"] = tenant_id
         kwargs: dict[str, Any] = {
             "session_id": session_id,
-            "metadata": {"session_id": session_id, **(metadata or {})},
+            "metadata": run_metadata,
         }
         if user_id:
             kwargs["user_id"] = user_id
@@ -113,6 +115,26 @@ class AgnoRuntime:
         if hasattr(response, "content"):
             return str(response.content)
         return str(response)
+
+    def _resolve_run_target(self) -> Any:
+        """Return the executor for chat runs.
+
+        Team/workflow blocks in AgentSpec are parsed but not fully orchestrated yet;
+        always use the single dynamic agent to avoid silently broken Team routing.
+        """
+        if self._primary_agent is None:
+            raise RuntimeError("No Agno agent configured")
+        if self._team is not None:
+            logger.debug(
+                "AgentSpec defines team mode=%s; using dynamic agent until multi-agent orchestration is wired",
+                getattr(self._spec.team, "mode", ""),
+            )
+        if self._workflow is not None and self._spec.workflow and self._spec.workflow.steps:
+            logger.debug(
+                "AgentSpec defines workflow steps=%d; using dynamic agent until workflow engine is wired",
+                len(self._spec.workflow.steps),
+            )
+        return self._primary_agent
 
     def _create_db(self) -> Any:
         if not self._db_url:

@@ -12,7 +12,7 @@ from agno_worker.hooks.protocols import HOOK_NAMES, HookFn, HookSet
 
 logger = logging.getLogger(__name__)
 
-_HOOK_MODULES = ("hooks", "prompt", "mcp", "session", "data")
+_HOOK_MODULES = ("hooks", "prompt", "mcp", "skills", "session", "data")
 
 
 class HookRegistry:
@@ -35,6 +35,10 @@ class HookRegistry:
     def reload(self) -> None:
         if not self.hooks_dir.is_dir():
             raise HookLoadError(f"Hooks directory not found: {self.hooks_dir}")
+
+        hooks_path = str(self.hooks_dir.resolve())
+        if hooks_path not in sys.path:
+            sys.path.insert(0, hooks_path)
 
         resolved: dict[str, HookFn] = {}
         sources: dict[str, str] = {}

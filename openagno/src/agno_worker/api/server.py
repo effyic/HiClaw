@@ -1,8 +1,10 @@
 """HTTP API for chat, health probes, and optional AgentOS console."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from functools import partial
 from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -16,6 +18,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = Field(..., min_length=1)
     user_id: str = ""
+    tenant_id: str = ""
 
 
 class ChatResponse(BaseModel):
@@ -29,7 +32,7 @@ class AgnoAPIServer:
         bind: str,
         port: int,
         token: str,
-        chat_handler: Callable[[str, str, str], str],
+        chat_handler: Callable[..., str],
         status_handler: Callable[[], dict[str, Any]],
         *,
         worker_name: str = "agno-worker",
@@ -45,6 +48,7 @@ class AgnoAPIServer:
         self._enable_agentos = enable_agentos
         self._runtime = runtime
         self._agent_os: Any = None
+        self._base_app: FastAPI | None = None
         self._server: Optional[uvicorn.Server] = None
         self._app = self._build_app()
 
@@ -54,14 +58,27 @@ class AgnoAPIServer:
         return f"http://{host}:{self._port}"
 
     def resync_agentos(self) -> None:
-        if self._agent_os is not None:
-            self._agent_os.resync(self._app)
+        if self._agent_os is None or self._base_app is None:
+            return
+        try:
+            if self._runtime is not None:
+                self._agent_os.agents = list(self._runtime.agents.values())
+                self._agent_os.teams = (
+                    [self._runtime.team] if self._runtime.team else None
+                )
+                self._agent_os.workflows = (
+                    [self._runtime.workflow] if self._runtime.workflow else None
+                )
+            # Must resync from base_app so /health /status /v1/chat routes stay mounted.
+            self._agent_os.resync(self._base_app)
+        except Exception as exc:
+            logger.warning("AgentOS resync failed: %s", exc)
 
     def _build_app(self) -> FastAPI:
-        base_app = self._build_base_app()
+        self._base_app = self._build_base_app()
         if not self._enable_agentos or self._runtime is None:
-            return base_app
-        return self._wrap_with_agentos(base_app)
+            return self._base_app
+        return self._wrap_with_agentos(self._base_app)
 
     def _build_base_app(self) -> FastAPI:
         app = FastAPI(title="HiClaw Agno Worker", version="0.1.0")
@@ -84,7 +101,17 @@ class AgnoAPIServer:
         @app.post("/v1/chat", response_model=ChatResponse)
         async def chat(req: ChatRequest, _: None = Depends(_auth)) -> ChatResponse:
             try:
-                reply = self._chat_handler(req.message, req.session_id, req.user_id)
+                loop = asyncio.get_running_loop()
+                reply = await loop.run_in_executor(
+                    None,
+                    partial(
+                        self._chat_handler,
+                        req.message,
+                        req.session_id,
+                        req.user_id,
+                        req.tenant_id,
+                    ),
+                )
             except Exception as exc:
                 from agno_worker.hooks.errors import HookExecutionError, HookLoadError
 
@@ -97,6 +124,7 @@ class AgnoAPIServer:
 
         @app.post("/agent/reregister")
         async def reregister(_: None = Depends(_auth)) -> dict[str, str]:
+            self.resync_agentos()
             return {"status": "ok"}
 
         return app

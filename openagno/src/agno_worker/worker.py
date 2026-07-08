@@ -8,7 +8,7 @@ from typing import Any, Optional
 from rich.console import Console
 from rich.panel import Panel
 
-from agno_worker.agentspec.loader import directory_fingerprint, load_agentspec_from_dir
+from agno_worker.agentspec.loader import directory_fingerprint, load_agentspec_or_default
 from agno_worker.api.server import AgnoAPIServer
 from agno_worker.config import WorkerConfig
 from agno_worker.hooks.registry import HookRegistry, hooks_directory_fingerprint
@@ -27,6 +27,7 @@ class Worker:
         self._api_task: Optional[asyncio.Task] = None
         self._watch_task: Optional[asyncio.Task] = None
         self._spec_fingerprint = ""
+        self._spec_from_file = False
         self._hooks_fingerprint = ""
         self._stopping = False
 
@@ -98,7 +99,11 @@ class Worker:
                 pass
 
     async def _load_runtime(self) -> None:
-        spec = load_agentspec_from_dir(self.config.agentspec_dir)
+        spec, from_file = load_agentspec_or_default(
+            self.config.agentspec_dir,
+            worker_name=self.config.worker_name,
+        )
+        self._spec_from_file = from_file
         db_url = self.config.db_url or spec.db.url
         self._registry = HookRegistry(self.config.hooks_dir)
         runtime = AgnoRuntime(
@@ -136,7 +141,11 @@ class Worker:
                         self._spec_fingerprint,
                         spec_fp,
                     )
-                    spec = load_agentspec_from_dir(self.config.agentspec_dir)
+                    spec, from_file = load_agentspec_or_default(
+                        self.config.agentspec_dir,
+                        worker_name=self.config.worker_name,
+                    )
+                    self._spec_from_file = from_file
                     if self._runtime:
                         self._runtime.reload(spec)
                     self._spec_fingerprint = spec_fp
@@ -147,19 +156,30 @@ class Worker:
                         hooks_fp,
                     )
                     self._runtime.reload_hooks()
-                    self._hooks_fingerprint = hooks_fp
+
+                # reload(spec) also reloads hooks; always sync hook fingerprint.
+                self._hooks_fingerprint = hooks_fp
 
                 if self._api:
                     self._api.resync_agentos()
-                if hooks_changed:
-                    self._hooks_fingerprint = hooks_fp
             except Exception as exc:
                 logger.warning("Watch loop error: %s", exc)
 
-    def _handle_chat(self, message: str, session_id: str, user_id: str) -> str:
+    def _handle_chat(
+        self,
+        message: str,
+        session_id: str,
+        user_id: str,
+        tenant_id: str = "",
+    ) -> str:
         if not self._runtime:
             raise RuntimeError("runtime not initialized")
-        return self._runtime.run(message, session_id=session_id, user_id=user_id)
+        return self._runtime.run(
+            message,
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
 
     def _status(self) -> dict[str, Any]:
         spec = self._runtime.spec if self._runtime else None
@@ -170,6 +190,7 @@ class Worker:
             "agentspecDir": str(self.config.agentspec_dir),
             "hooksDir": str(self.config.hooks_dir),
             "specFingerprint": self._spec_fingerprint,
+            "specFromFile": self._spec_from_file,
             "hooksFingerprint": self._hooks_fingerprint,
             "agents": list(spec.agents.keys()) if spec else [],
             "roleCatalog": self._runtime.role_catalog if self._runtime else [],

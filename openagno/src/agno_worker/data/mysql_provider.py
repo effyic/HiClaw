@@ -1,4 +1,4 @@
-"""MySQL-backed data context provider driven by data hooks."""
+"""MySQL-backed data hooks exposed as synchronous Agno tools."""
 from __future__ import annotations
 
 import logging
@@ -10,50 +10,26 @@ logger = logging.getLogger(__name__)
 
 
 class MySQLDataContextProvider:
-    """Wrap data hooks as an Agno ContextProvider-compatible tool source."""
+    """Wrap data hooks as sync tools compatible with Agent.run()."""
 
     def __init__(self, registry: HookRegistry, provider_id: str = "mysql_data") -> None:
         self.registry = registry
         self.provider_id = provider_id
-        self._provider: Any | None = None
 
     def get_tools(self) -> list[Any]:
-        provider = self._ensure_provider()
-        if provider is None:
-            return []
-        return provider.get_tools()
-
-    def _ensure_provider(self) -> Any | None:
-        if self._provider is not None:
-            return self._provider
         try:
-            from agno.context import Answer, ContextProvider, Status
+            from agno.tools import tool
         except ImportError:
-            logger.warning("agno.context unavailable; data provider disabled")
-            return None
+            logger.warning("agno.tools unavailable; data provider disabled")
+            return []
 
         registry = self.registry
         provider_id = self.provider_id
 
-        class _Provider(ContextProvider):
-            def __init__(self) -> None:
-                super().__init__(provider_id)
+        @tool(name=f"query_{provider_id}", description="Query tenant data via data hooks")
+        def query_data(question: str, run_context: Any = None) -> str:
+            raw = registry.call("data_query_hook", question, run_context)
+            processed = registry.call("result_processing_hook", raw, run_context)
+            return str(processed.get("text", raw))
 
-            def query(self, question: str, *, run_context=None) -> Answer:
-                raw = registry.call("data_query_hook", question, run_context)
-                processed = registry.call("result_processing_hook", raw, run_context)
-                return Answer(text=str(processed.get("text", raw)))
-
-            async def aquery(self, question: str, *, run_context=None) -> Answer:
-                return self.query(question, run_context=run_context)
-
-            def status(self) -> Status:
-                conn = registry.call("get_db_connection_hook", None)
-                ok = bool(conn.url)
-                return Status(ok=ok, detail=f"driver={conn.driver} configured={ok}")
-
-            async def astatus(self) -> Status:
-                return self.status()
-
-        self._provider = _Provider()
-        return self._provider
+        return [query_data]

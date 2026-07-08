@@ -10,7 +10,7 @@ import yaml
 @dataclass
 class KnowledgeRef:
     provider: str = "weknora"
-    knowledge_id: str = ""
+    knowledge_ids: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -84,6 +84,21 @@ class AgentSpec:
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def default_agentspec(name: str = "agno-worker") -> AgentSpec:
+    """Built-in template when no Nacos/ConfigMap AgentSpec is mounted."""
+    return AgentSpec(
+        name=name,
+        description="Dynamic tenant-aware agent",
+        agents={
+            "default": AgentDef(
+                name="default",
+                role="Assistant",
+                instructions="You are a helpful assistant.",
+            ),
+        },
+    )
+
+
 def parse_agentspec_yaml(text: str) -> AgentSpec:
     raw = yaml.safe_load(text) or {}
     if not isinstance(raw, dict):
@@ -103,9 +118,14 @@ def parse_agentspec_yaml(text: str) -> AgentSpec:
         kn_raw = cfg.get("knowledge")
         knowledge = None
         if isinstance(kn_raw, dict):
+            raw_ids = kn_raw.get("knowledge_ids") or []
+            if not isinstance(raw_ids, list):
+                raise ValueError(
+                    f"agents.{name}.knowledge.knowledge_ids must be a list of strings"
+                )
             knowledge = KnowledgeRef(
                 provider=str(kn_raw.get("provider", "weknora")),
-                knowledge_id=str(kn_raw.get("knowledge_id", "")),
+                knowledge_ids=[str(item).strip() for item in raw_ids if str(item).strip()],
                 metadata=dict(kn_raw.get("metadata") or {}),
             )
         agents[name] = AgentDef(
@@ -169,7 +189,7 @@ def _agent_to_dict(agent: AgentDef) -> dict[str, Any]:
     if agent.knowledge:
         out["knowledge"] = {
             "provider": agent.knowledge.provider,
-            "knowledge_id": agent.knowledge.knowledge_id,
+            "knowledge_ids": agent.knowledge.knowledge_ids,
         }
     return out
 

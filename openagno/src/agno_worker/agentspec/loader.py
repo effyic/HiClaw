@@ -8,9 +8,28 @@ from pathlib import Path
 
 import yaml
 
-from agno_worker.agentspec.schema import AgentSpec, parse_agentspec_yaml
+from agno_worker.agentspec.schema import AgentSpec, default_agentspec, parse_agentspec_yaml
 
 logger = logging.getLogger(__name__)
+
+
+def load_agentspec_or_default(
+    spec_dir: Path,
+    *,
+    worker_name: str = "agno-worker",
+) -> tuple[AgentSpec, bool]:
+    """Load AgentSpec from *spec_dir*, or built-in defaults when absent.
+
+    Returns ``(spec, from_file)`` where *from_file* is False for defaults.
+    """
+    try:
+        return load_agentspec_from_dir(spec_dir), True
+    except FileNotFoundError:
+        logger.info(
+            "No AgentSpec under %s; using built-in default template",
+            spec_dir,
+        )
+        return default_agentspec(worker_name), False
 
 
 def load_agentspec_from_dir(spec_dir: Path) -> AgentSpec:
