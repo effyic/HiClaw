@@ -10,6 +10,7 @@ from pathlib import Path
 class WorkerConfig:
     worker_name: str
     agentspec_dir: Path
+    hooks_dir: Path
     db_url: str
     api_port: int = 8090
     api_bind: str = "0.0.0.0"
@@ -28,6 +29,7 @@ class WorkerConfig:
             agentspec_dir=Path(
                 os.environ.get("AGNO_AGENTSPEC_DIR", "/etc/hiclaw/agentspec")
             ),
+            hooks_dir=Path(os.environ.get("AGNO_HOOKS_DIR", "/etc/hiclaw/hooks")),
             db_url=os.environ.get(
                 "AGNO_DB_URL",
                 "postgresql+psycopg://root:vector_store@localhost:5432/postgres",

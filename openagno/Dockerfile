@@ -51,6 +51,8 @@ RUN python -m venv /opt/venv/agno \
         "fastapi>=0.109" \
         "python-multipart>=0.0.9" \
         "pyjwt>=2.8" \
+        "pymysql>=1.1" \
+        "mcp>=1.0" \
         "pyyaml>=6.0" \
         "typer>=0.9" \
         "rich>=13.0" \
@@ -68,11 +70,12 @@ RUN ln -sf /opt/venv/agno/bin/agno-worker /usr/local/bin/agno-worker
 
 COPY --chmod=755 scripts/agno-worker-entrypoint.sh /opt/hiclaw/scripts/agno-worker-entrypoint.sh
 
-RUN mkdir -p /etc/hiclaw/agentspec /opt/agno-worker
+RUN mkdir -p /etc/hiclaw/agentspec /etc/hiclaw/hooks /opt/agno-worker
 
 WORKDIR /opt/agno-worker
 
 ENV AGNO_AGENTSPEC_DIR=/etc/hiclaw/agentspec \
+    AGNO_HOOKS_DIR=/etc/hiclaw/hooks \
     AGNO_DB_URL=postgresql+psycopg://root:vector_store@localhost:5432/postgres \
     AGNO_CONTROL_PORT=8090
 

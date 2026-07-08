@@ -37,6 +37,7 @@ def main() -> None:
         config = WorkerConfig(
             worker_name=name,
             agentspec_dir=config.agentspec_dir,
+            hooks_dir=config.hooks_dir,
             db_url=config.db_url,
             api_port=api_port,
             api_bind=config.api_bind,

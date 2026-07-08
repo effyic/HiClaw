@@ -83,7 +83,16 @@ class AgnoAPIServer:
 
         @app.post("/v1/chat", response_model=ChatResponse)
         async def chat(req: ChatRequest, _: None = Depends(_auth)) -> ChatResponse:
-            reply = self._chat_handler(req.message, req.session_id, req.user_id)
+            try:
+                reply = self._chat_handler(req.message, req.session_id, req.user_id)
+            except Exception as exc:
+                from agno_worker.hooks.errors import HookExecutionError, HookLoadError
+
+                if isinstance(exc, (HookLoadError, HookExecutionError)):
+                    logger.error("Hook error during chat: %s", exc)
+                    raise HTTPException(status_code=500, detail=str(exc)) from exc
+                logger.exception("Unhandled error during chat")
+                raise HTTPException(status_code=500, detail="Internal server error") from exc
             return ChatResponse(reply=reply, session_id=req.session_id)
 
         @app.post("/agent/reregister")
