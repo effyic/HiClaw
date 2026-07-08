@@ -1,9 +1,9 @@
-"""Build Agno Agent / Team / Workflow from AgentSpec and dynamic hooks."""
+"""Build a single dynamic Agno Agent from AgentSpec role catalog + hooks."""
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from agno_worker.agentspec.schema import AgentSpec
 from agno_worker.hooks.registry import HookRegistry
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgnoRuntime:
-    """Materialize Agno runtime objects from AgentSpec and hook registry."""
+    """Materialize one dynamic Agno Agent; spec.agents is a role fallback catalog."""
 
     def __init__(
         self,
@@ -28,6 +28,7 @@ class AgnoRuntime:
         self._hooks_dir = hooks_dir
         self._registry = registry or HookRegistry(hooks_dir)
         self._db: Any = None
+        self._primary_agent: Any = None
         self._agents: dict[str, Any] = {}
         self._team: Any = None
         self._workflow: Any = None
@@ -41,16 +42,29 @@ class AgnoRuntime:
     def registry(self) -> HookRegistry:
         return self._registry
 
+    @property
+    def primary_agent(self) -> Any:
+        return self._primary_agent
+
+    @property
+    def role_catalog(self) -> list[str]:
+        return list(self._spec.agents.keys())
+
     def build(self) -> None:
         self._db = self._create_db()
         self._builder = AgentBuilder(self._registry, self._spec, self._db)
-        self._agents = {
-            name: self._builder.build_agent(defn) for name, defn in self._spec.agents.items()
-        }
+        self._primary_agent = self._builder.build_dynamic_agent()
+        agent_name = self._primary_agent.name
+        self._agents = {agent_name: self._primary_agent}
         if self._spec.team:
             self._team = self._create_team()
         if self._spec.workflow:
             self._workflow = self._create_workflow()
+        logger.info(
+            "Dynamic agent built: name=%s roles=%s",
+            agent_name,
+            self.role_catalog,
+        )
 
     def reload(self, spec: AgentSpec | None = None) -> None:
         if spec is not None:
@@ -86,9 +100,9 @@ class AgnoRuntime:
         user_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        target = self._team or next(iter(self._agents.values()), None)
+        target = self._team or self._primary_agent
         if target is None:
-            raise RuntimeError("No Agno agent or team configured")
+            raise RuntimeError("No Agno agent configured")
         kwargs: dict[str, Any] = {
             "session_id": session_id,
             "metadata": {"session_id": session_id, **(metadata or {})},
@@ -126,12 +140,10 @@ class AgnoRuntime:
 
         team_def = self._spec.team
         assert team_def is not None
-        members = [self._agents[name] for name in team_def.members if name in self._agents]
-        leader = self._agents.get(team_def.leader) if team_def.leader else None
+        members = [self._primary_agent] if self._primary_agent else []
         return Team(
             name=self._spec.name or "orchestrator",
             members=members,
-            leader=leader,
             instructions=team_def.instructions,
             db=self._db,
             add_history_to_context=True,

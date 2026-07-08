@@ -172,6 +172,11 @@ class Worker:
             "specFingerprint": self._spec_fingerprint,
             "hooksFingerprint": self._hooks_fingerprint,
             "agents": list(spec.agents.keys()) if spec else [],
+            "roleCatalog": self._runtime.role_catalog if self._runtime else [],
+            "dynamicAgent": self._runtime.primary_agent.name
+            if self._runtime and self._runtime.primary_agent
+            else None,
+            "composePolicy": "hooks override AgentSpec when hook returns data",
             "hooks": registry.sources if registry else {},
             "dbConfigured": bool(self.config.db_url or (spec and spec.db.url)),
         }
