@@ -25,6 +25,25 @@ from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill
 logger = logging.getLogger(__name__)
 
 
+def _default_role_name(spec: AgentSpec) -> str:
+    return next(iter(spec.agents), "default")
+
+
+def _static_instructions_from_spec(
+    spec: AgentSpec,
+    role_name: str | None = None,
+) -> str:
+    """AgentSpec-only prompt for AgentOS UI introspection (no run_context)."""
+    active = role_name or _default_role_name(spec)
+    defn = role_def(spec, active)
+    parts = [
+        part
+        for part in (spec_system_prompt(defn), spec_instructions(defn))
+        if part.strip()
+    ]
+    return "\n\n".join(parts)
+
+
 class AgentBuilder:
     """Compose a single dynamic Agno Agent; spec.agents is a role catalog."""
 
@@ -76,7 +95,10 @@ class AgentBuilder:
         registry = self.registry
         spec = self.spec
 
-        def _instructions(run_context: Any) -> str:
+        def _instructions(run_context: Any = None, **_: Any) -> str:
+            if run_context is None:
+                return _static_instructions_from_spec(spec)
+
             session_state = run_context.session_state or {}
             user_profile = (run_context.dependencies or {}).get("user_profile") or {}
             active_role = resolve_active_role(session_state, spec)
@@ -117,10 +139,13 @@ class AgentBuilder:
         data_provider = self._data_provider
         skills_manager = self._skills_manager
 
-        def _tools(run_context: Any) -> list[Any]:
+        def _tools(run_context: Any = None, **_: Any) -> list[Any]:
+            if run_context is None:
+                return []
+
             session_state = run_context.session_state or {}
             active_role = resolve_active_role(session_state, self.spec)
-            scenario = (run_context.metadata or {}).get(
+            scenario = (getattr(run_context, "metadata", None) or {}).get(
                 "business_scenario", active_role
             )
 

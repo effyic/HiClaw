@@ -47,7 +47,7 @@ RUN python -m venv /opt/venv/agno \
         "openai>=1.0" \
         "sqlalchemy>=2.0" \
         "psycopg[binary]>=3.1" \
-        "uvicorn>=0.27" \
+        "uvicorn[standard]>=0.27" \
         "fastapi>=0.109" \
         "python-multipart>=0.0.9" \
         "pyjwt>=2.8" \

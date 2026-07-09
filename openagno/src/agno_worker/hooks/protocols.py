@@ -12,6 +12,7 @@ class MCPServerConfig:
     command: str = ""
     transport: str = "streamable-http"
     env: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
     include_tools: list[str] = field(default_factory=list)
     exclude_tools: list[str] = field(default_factory=list)
 

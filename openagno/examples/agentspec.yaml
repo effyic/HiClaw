@@ -18,15 +18,6 @@ agents:
       provider: weknora
       knowledge_ids:
         - spec-fallback-kb
-
-  sales:
-    role: 销售顾问
-    instructions: |
-      你是 AgentSpec 模板中的销售顾问（hook 未覆盖时使用）。
-    knowledge:
-      provider: weknora
-      knowledge_ids:
-        - spec-sales-kb
-
+        
 metadata:
   domain: integration-test

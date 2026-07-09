@@ -18,7 +18,7 @@ def build_mcp_tools(
         return []
 
     try:
-        from agno.tools.mcp import MCPTools
+        from agno.tools.mcp import MCPTools, StreamableHTTPClientParams
     except ImportError as exc:
         logger.warning("MCPTools unavailable (%s); skipping MCP servers", exc)
         return []
@@ -29,8 +29,14 @@ def build_mcp_tools(
             registry.call("mcp_connection_hook", server)
             kwargs: dict[str, Any] = {}
             if server.url:
-                kwargs["url"] = server.url
                 kwargs["transport"] = server.transport
+                if server.headers:
+                    kwargs["server_params"] = StreamableHTTPClientParams(
+                        url=server.url,
+                        headers=server.headers,
+                    )
+                else:
+                    kwargs["url"] = server.url
             elif server.command:
                 kwargs["command"] = server.command
             else:

@@ -171,7 +171,7 @@ class Worker:
         session_id: str,
         user_id: str,
         tenant_id: str = "",
-    ) -> str:
+    ) -> tuple[str, str]:
         if not self._runtime:
             raise RuntimeError("runtime not initialized")
         return self._runtime.run(

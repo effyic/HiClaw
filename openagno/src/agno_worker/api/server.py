@@ -8,19 +8,17 @@ from functools import partial
 from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import uvicorn
 
-from agno_worker.api.identity import resolve_tenant_id, resolve_user_id
+from agno_worker.api.identity import resolve_session_id, resolve_tenant_id, resolve_user_id
 
 logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str = Field(..., min_length=1)
     user_id: str = ""
-    tenant_id: str = ""
 
 
 class ChatResponse(BaseModel):
@@ -34,7 +32,7 @@ class AgnoAPIServer:
         bind: str,
         port: int,
         token: str,
-        chat_handler: Callable[..., str],
+        chat_handler: Callable[..., tuple[str, str]],
         status_handler: Callable[[], dict[str, Any]],
         *,
         worker_name: str = "agno-worker",
@@ -112,18 +110,21 @@ class AgnoAPIServer:
                 query_user_id=request.query_params.get("user_id", ""),
             )
             tenant_id = resolve_tenant_id(
-                body_tenant_id=req.tenant_id,
                 headers=request.headers,
                 query_tenant_id=request.query_params.get("tenant_id", ""),
             )
+            session_id = resolve_session_id(
+                headers=request.headers,
+                query_session_id=request.query_params.get("session_id", ""),
+            )
             try:
                 loop = asyncio.get_running_loop()
-                reply = await loop.run_in_executor(
+                reply, resolved_session_id = await loop.run_in_executor(
                     None,
                     partial(
                         self._chat_handler,
                         req.message,
-                        req.session_id,
+                        session_id,
                         user_id,
                         tenant_id,
                     ),
@@ -136,7 +137,7 @@ class AgnoAPIServer:
                     raise HTTPException(status_code=500, detail=str(exc)) from exc
                 logger.exception("Unhandled error during chat")
                 raise HTTPException(status_code=500, detail="Internal server error") from exc
-            return ChatResponse(reply=reply, session_id=req.session_id)
+            return ChatResponse(reply=reply, session_id=resolved_session_id)
 
         @app.post("/agent/reregister")
         async def reregister(_: None = Depends(_auth)) -> dict[str, str]:

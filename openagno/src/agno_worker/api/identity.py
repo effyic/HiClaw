@@ -6,6 +6,7 @@ from typing import Mapping
 # Align with aip-hub WebFrameworkUtils (tenant-id) and common gateway headers.
 USER_ID_HEADERS = ("user-id", "x-user-id")
 TENANT_ID_HEADERS = ("tenant-id", "x-tenant-id")
+SESSION_ID_HEADERS = ("session-id", "x-session-id")
 
 
 def _first_non_empty(*values: str | None) -> str:
@@ -40,13 +41,23 @@ def resolve_user_id(
 
 def resolve_tenant_id(
     *,
-    body_tenant_id: str = "",
     headers: Mapping[str, str] | None = None,
     query_tenant_id: str = "",
 ) -> str:
-    """Prefer gateway-injected headers, then body, then query string."""
+    """Prefer gateway-injected headers, then query string."""
     return _first_non_empty(
         _header_value(headers or {}, TENANT_ID_HEADERS),
-        body_tenant_id,
         query_tenant_id,
+    )
+
+
+def resolve_session_id(
+    *,
+    headers: Mapping[str, str] | None = None,
+    query_session_id: str = "",
+) -> str:
+    """Prefer gateway-injected headers, then query string."""
+    return _first_non_empty(
+        _header_value(headers or {}, SESSION_ID_HEADERS),
+        query_session_id,
     )

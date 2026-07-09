@@ -96,27 +96,32 @@ class AgnoRuntime:
         self,
         message: str,
         *,
-        session_id: str,
+        session_id: str = "",
         user_id: str = "",
         tenant_id: str = "",
         metadata: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> tuple[str, str]:
         target = self._resolve_run_target()
-        run_metadata: dict[str, Any] = {"session_id": session_id, **(metadata or {})}
+        run_metadata: dict[str, Any] = dict(metadata or {})
+        kwargs: dict[str, Any] = {"metadata": run_metadata}
+        if session_id:
+            run_metadata["session_id"] = session_id
+            kwargs["session_id"] = session_id
         if user_id:
             run_metadata["user_id"] = user_id
+            kwargs["user_id"] = user_id
         if tenant_id:
             run_metadata["tenant_id"] = tenant_id
-        kwargs: dict[str, Any] = {
-            "session_id": session_id,
-            "metadata": run_metadata,
-        }
-        if user_id:
-            kwargs["user_id"] = user_id
         response = target.run(message, **kwargs)
         if hasattr(response, "content"):
-            return str(response.content)
-        return str(response)
+            reply = str(response.content)
+        else:
+            reply = str(response)
+        resolved_session_id = (
+            str(getattr(response, "session_id", "") or "")
+            or session_id
+        )
+        return reply, resolved_session_id
 
     def _resolve_run_target(self) -> Any:
         """Return the executor for chat runs.
