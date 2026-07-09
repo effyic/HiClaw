@@ -50,6 +50,7 @@ def build_mcp_tools(
                 kwargs["include_tools"] = server.include_tools
             if server.exclude_tools:
                 kwargs["exclude_tools"] = server.exclude_tools
+            kwargs["refresh_connection"] = True
             tools.append(MCPTools(**kwargs))
         except Exception as exc:
             logger.warning("Failed to build MCPTools for %s: %s", server.name, exc)

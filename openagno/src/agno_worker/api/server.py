@@ -1,12 +1,10 @@
 """HTTP API for chat, health probes, and optional AgentOS console."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-from functools import partial
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +50,7 @@ class AgnoAPIServer:
         chat_handler: Callable[..., tuple[str, str]],
         status_handler: Callable[[], dict[str, Any]],
         *,
+        chat_handler_async: Callable[..., Awaitable[tuple[str, str]]] | None = None,
         worker_name: str = "agno-worker",
         enable_agentos: bool = False,
         runtime: Any = None,
@@ -60,6 +59,11 @@ class AgnoAPIServer:
         self._port = port
         self._token = token
         self._chat_handler = chat_handler
+        self._chat_handler_async = (
+            chat_handler_async
+            if chat_handler_async is not None
+            else self._default_async_chat_handler(chat_handler)
+        )
         self._status_handler = status_handler
         self._worker_name = worker_name
         self._enable_agentos = enable_agentos
@@ -73,6 +77,27 @@ class AgnoAPIServer:
     def base_url(self) -> str:
         host = self._bind if self._bind not in ("0.0.0.0", "") else "127.0.0.1"
         return f"http://{host}:{self._port}"
+
+    def _default_async_chat_handler(
+        self,
+        chat_handler: Callable[..., tuple[str, str]],
+    ) -> Callable[..., Awaitable[tuple[str, str]]]:
+        import asyncio
+        from functools import partial
+
+        async def _handler(
+            message: str,
+            session_id: str,
+            user_id: str,
+            tenant_id: str = "",
+        ) -> tuple[str, str]:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                partial(chat_handler, message, session_id, user_id, tenant_id),
+            )
+
+        return _handler
 
     def resync_agentos(self) -> None:
         if self._agent_os is None or self._base_app is None:
@@ -144,16 +169,11 @@ class AgnoAPIServer:
                 query_session_id=request.query_params.get("session_id", ""),
             )
             try:
-                loop = asyncio.get_running_loop()
-                reply, resolved_session_id = await loop.run_in_executor(
-                    None,
-                    partial(
-                        self._chat_handler,
-                        req.message,
-                        session_id,
-                        user_id,
-                        tenant_id,
-                    ),
+                reply, resolved_session_id = await self._chat_handler_async(
+                    req.message,
+                    session_id,
+                    user_id,
+                    tenant_id,
                 )
             except Exception as exc:
                 from agno_worker.hooks.errors import HookExecutionError, HookLoadError

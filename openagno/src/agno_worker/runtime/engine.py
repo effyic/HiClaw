@@ -1,6 +1,7 @@
 """Build a single dynamic Agno Agent from AgentSpec role catalog + hooks."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,26 @@ class AgnoRuntime:
         tenant_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> tuple[str, str]:
+        """Sync wrapper; MCP tools require the async agent run path."""
+        return asyncio.run(
+            self.arun(
+                message,
+                session_id=session_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                metadata=metadata,
+            )
+        )
+
+    async def arun(
+        self,
+        message: str,
+        *,
+        session_id: str = "",
+        user_id: str = "",
+        tenant_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
         target = self._resolve_run_target()
         run_metadata: dict[str, Any] = dict(metadata or {})
         kwargs: dict[str, Any] = {"metadata": run_metadata}
@@ -112,7 +133,7 @@ class AgnoRuntime:
             kwargs["user_id"] = user_id
         if tenant_id:
             run_metadata["tenant_id"] = tenant_id
-        response = target.run(message, **kwargs)
+        response = await target.arun(message, **kwargs)
         if hasattr(response, "content"):
             reply = str(response.content)
         else:

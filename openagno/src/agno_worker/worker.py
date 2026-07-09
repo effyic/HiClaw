@@ -69,6 +69,7 @@ class Worker:
             port=self.config.api_port,
             token=token,
             chat_handler=self._handle_chat,
+            chat_handler_async=self._handle_chat_async,
             status_handler=self._status,
             worker_name=self.config.worker_name,
             enable_agentos=self.config.enable_agentos,
@@ -175,6 +176,22 @@ class Worker:
         if not self._runtime:
             raise RuntimeError("runtime not initialized")
         return self._runtime.run(
+            message,
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+
+    async def _handle_chat_async(
+        self,
+        message: str,
+        session_id: str,
+        user_id: str,
+        tenant_id: str = "",
+    ) -> tuple[str, str]:
+        if not self._runtime:
+            raise RuntimeError("runtime not initialized")
+        return await self._runtime.arun(
             message,
             session_id=session_id,
             user_id=user_id,

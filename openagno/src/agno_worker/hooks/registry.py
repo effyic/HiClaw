@@ -37,8 +37,10 @@ class HookRegistry:
             raise HookLoadError(f"Hooks directory not found: {self.hooks_dir}")
 
         hooks_path = str(self.hooks_dir.resolve())
+        # Append (do not prepend): hooks/mcp.py must not shadow the PyPI ``mcp`` package
+        # required by agno.tools.mcp.MCPTools.
         if hooks_path not in sys.path:
-            sys.path.insert(0, hooks_path)
+            sys.path.append(hooks_path)
 
         resolved: dict[str, HookFn] = {}
         sources: dict[str, str] = {}
