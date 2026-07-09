@@ -2,18 +2,35 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from functools import partial
 from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
 from agno_worker.api.identity import resolve_session_id, resolve_tenant_id, resolve_user_id
 
 logger = logging.getLogger(__name__)
+
+
+def _cors_allow_origins() -> list[str]:
+    """Origins for browser-based static test pages calling /v1/chat directly."""
+    raw = os.environ.get("CORS_ORIGIN_LIST") or os.environ.get("AGNO_CORS_ORIGINS", "")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item).strip()]
+        except json.JSONDecodeError:
+            return [part.strip() for part in raw.split(",") if part.strip()]
+    if os.environ.get("RUNTIME_ENV", "prd").lower() == "dev":
+        return ["*"]
+    return []
 
 
 class ChatRequest(BaseModel):
@@ -82,6 +99,15 @@ class AgnoAPIServer:
 
     def _build_base_app(self) -> FastAPI:
         app = FastAPI(title="HiClaw Agno Worker", version="0.1.0")
+        origins = _cors_allow_origins()
+        if origins:
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=origins,
+                allow_credentials=False,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
 
         async def _auth(authorization: Optional[str] = Header(None)) -> None:
             if not self._token:
