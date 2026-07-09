@@ -105,11 +105,15 @@ class Worker:
             worker_name=self.config.worker_name,
         )
         self._spec_from_file = from_file
-        db_url = self.config.db_url or spec.db.url
+        db_url = self.config.db_url
         self._registry = HookRegistry(self.config.hooks_dir)
         runtime = AgnoRuntime(
             spec,
             db_url,
+            db_type=self.config.db_type,
+            db_schema=self.config.db_schema,
+            db_session_table=self.config.db_session_table,
+            db_create_schema=self.config.db_create_schema,
             hooks_dir=self.config.hooks_dir,
             registry=self._registry,
         )
@@ -216,7 +220,7 @@ class Worker:
             else None,
             "composePolicy": "hooks override AgentSpec when hook returns data",
             "hooks": registry.sources if registry else {},
-            "dbConfigured": bool(self.config.db_url or (spec and spec.db.url)),
+            "dbConfigured": bool(self.config.db_url),
         }
 
     def _mask_db_url(self) -> str:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agno_worker.agentspec.schema import AgentSpec
+from agno_worker.db import create_agno_db
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.runtime.builder import AgentBuilder
 
@@ -21,11 +22,19 @@ class AgnoRuntime:
         spec: AgentSpec,
         db_url: str,
         *,
+        db_type: str = "postgres",
+        db_schema: str = "",
+        db_session_table: str = "agno_sessions",
+        db_create_schema: bool = True,
         hooks_dir: Path | None = None,
         registry: HookRegistry | None = None,
     ) -> None:
         self._spec = spec
-        self._db_url = db_url or spec.db.url
+        self._db_url = db_url
+        self._db_type = db_type
+        self._db_schema = db_schema
+        self._db_session_table = db_session_table
+        self._db_create_schema = db_create_schema
         self._hooks_dir = hooks_dir
         self._registry = registry or HookRegistry(hooks_dir)
         self._db: Any = None
@@ -166,24 +175,14 @@ class AgnoRuntime:
 
     def _create_db(self) -> Any:
         if not self._db_url:
-            raise RuntimeError("AGNO_DB_URL or spec.db.url is required for session persistence")
-        db_type = self._spec.db.type.lower()
-        if db_type in ("postgres", "postgresql"):
-            from agno.db.postgres import PostgresDb
-
-            return PostgresDb(
-                db_url=self._db_url,
-                session_table=self._spec.db.session_table,
-            )
-        if db_type == "mysql":
-            from agno.db.mysql import MySQLDb
-
-            return MySQLDb(db_url=self._db_url, session_table=self._spec.db.session_table)
-        if db_type == "sqlite":
-            from agno.db.sqlite import SqliteDb
-
-            return SqliteDb(db_file=self._db_url.removeprefix("sqlite:///"))
-        raise RuntimeError(f"Unsupported database type: {db_type}")
+            raise RuntimeError("AGNO_DB_URL is required for session persistence")
+        return create_agno_db(
+            db_url=self._db_url,
+            db_type=self._db_type,
+            db_schema=self._db_schema,
+            session_table=self._db_session_table,
+            create_schema=self._db_create_schema,
+        )
 
     def _create_team(self) -> Any:
         from agno.team import Team

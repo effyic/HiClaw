@@ -4,11 +4,6 @@ name: tenant-demo-agent
 description: 租户动态 Agent 集成测试模板
 model: qwen3.6-plus
 
-db:
-  type: mysql
-  url: mysql+pymysql://root:mysql@192.168.49.1:3306/agno_worker
-  session_table: agno_sessions
-
 agents:
   default:
     role: 通用助手

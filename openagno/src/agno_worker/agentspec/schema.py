@@ -1,10 +1,13 @@
 """AgentSpec YAML schema for medical orchestration and general multi-agent setups."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,20 +51,12 @@ class WorkflowDef:
 
 
 @dataclass
-class DatabaseDef:
-    type: str = "postgres"
-    url: str = ""
-    session_table: str = "agno_sessions"
-
-
-@dataclass
 class AgentSpec:
     api_version: str = "hiclaw.agno/v1"
     runtime: str = "agno"
     name: str = ""
     description: str = ""
     model: str = ""
-    db: DatabaseDef = field(default_factory=DatabaseDef)
     agents: dict[str, AgentDef] = field(default_factory=dict)
     team: Optional[TeamDef] = None
     workflow: Optional[WorkflowDef] = None
@@ -77,7 +72,6 @@ class AgentSpec:
                 "team": _team_to_dict(self.team) if self.team else None,
                 "workflow": _workflow_to_dict(self.workflow) if self.workflow else None,
                 "model": self.model,
-                "db": _db_to_dict(self.db),
             },
             sort_keys=True,
         )
@@ -104,12 +98,10 @@ def parse_agentspec_yaml(text: str) -> AgentSpec:
     if not isinstance(raw, dict):
         raise ValueError("AgentSpec must be a YAML mapping")
 
-    db_raw = raw.get("db") or {}
-    db = DatabaseDef(
-        type=str(db_raw.get("type", "postgres")),
-        url=str(db_raw.get("url", "")),
-        session_table=str(db_raw.get("session_table", "agno_sessions")),
-    )
+    if raw.get("db"):
+        logger.warning(
+            "AgentSpec 'db' section is deprecated; configure AGNO_DB_URL via worker env instead"
+        )
 
     agents: dict[str, AgentDef] = {}
     for name, cfg in (raw.get("agents") or {}).items():
@@ -171,7 +163,6 @@ def parse_agentspec_yaml(text: str) -> AgentSpec:
         name=str(raw.get("name", "")),
         description=str(raw.get("description", "")),
         model=str(raw.get("model", "")),
-        db=db,
         agents=agents,
         team=team,
         workflow=workflow,
@@ -210,7 +201,3 @@ def _workflow_to_dict(workflow: WorkflowDef) -> dict[str, Any]:
             {"name": s.name, "agent": s.agent, "action": s.action} for s in workflow.steps
         ],
     }
-
-
-def _db_to_dict(db: DatabaseDef) -> dict[str, Any]:
-    return {"type": db.type, "url": db.url, "session_table": db.session_table}
