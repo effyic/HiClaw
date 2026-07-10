@@ -1,0 +1,13 @@
+{{- if and .Values.nacos.enabled (eq .Values.nacos.mode "managed") (eq (.Values.nacos.database.platform | default "mysql") "postgresql") (.Values.nacos.dbInit.enabled | default true) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hiclaw.nacos.fullname" . }}-sql
+  namespace: {{ include "hiclaw.namespace" . }}
+  labels:
+    {{- $comp := dict "root" . "component" "nacos" }}
+    {{- include "hiclaw.component.labels" $comp | nindent 4 }}
+data:
+  init.sql: |
+{{ .Files.Get "files/nacos-pg-schema.sql" | indent 4 }}
+{{- end }}

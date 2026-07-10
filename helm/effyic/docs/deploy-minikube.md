@@ -3,47 +3,29 @@
 ## 前置条件
 
 
-| 项          | 要求                                                                                                                                                                                                 |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 集群         | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                                                                                                                                         |
-| 工具         | Helm 3.14+                                                                                                                                                                                         |
-| LLM        | 通义千问 API Key（安装时通过 `--set` 传入）                                                                                                                                                                     |
-| PostgreSQL | 外部 PG 已建库并初始化：`nacos`（Nacos）、`vector_store`（会话）、`aip_hub_test`（租户配置）；`values.yaml` 默认 `host.minikube.internal` + `hostAliasIP`（Docker 网关 IP）。网关 IP：`docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'` |
-| 本地镜像       | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager`                                                                                                            |
-| inotify 限制 | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令                                                                                                                   |
+| 项          | 要求                                                                                                                                                                                                                                                                   |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 集群         | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                                                                                                                                                                                                           |
+| 工具         | Helm 3.14+                                                                                                                                                                                                                                                           |
+| LLM        | 通义千问 API Key（安装时通过 `--set` 传入）                                                                                                                                                                                                                                       |
+| PostgreSQL | 宿主机已运行 PostgreSQL（默认 `root:postgresql@127.0.0.1:5432`）；`values.yaml` 默认 `host.minikube.internal` + `hostAliasIP`（Docker 网关 IP）。Nacos 库由 Helm `nacos.dbInit` Job 自动建库并导入 schema；网关 IP：`docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'` |
+| 本地镜像       | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager`                                                                                                                                                                              |
+| inotify 限制 | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令                                                                                                                                                                                     |
 
 
 ```bash
 minikube ssh -- "echo -e 'fs.inotify.max_user_instances=1024\nfs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/99-inotify.conf && sudo sysctl --system"
 ```
 
-Nacos 使用 PostgreSQL 时需先建库并导入官方 schema（Nacos 不会自动建表），并写入默认管理员用户：
+Nacos 使用 PostgreSQL 时，**无需手动建库**——`helm upgrade --install` 会通过 `nacos.dbInit` Hook Job 自动完成：
 
-```bash
-psql "postgresql://root:postgresql@127.0.0.1:5432/postgres" -c "CREATE DATABASE nacos"
-docker run --rm --entrypoint sh nacos-registry.cn-hangzhou.cr.aliyuncs.com/nacos/nacos-server:v3.2.2 \
-  -c "unzip -p /home/nacos/plugins/nacos-datasource-plugin-postgresql-3.2.2.jar META-INF/pg-schema.sql" \
-  | psql "postgresql://root:postgresql@127.0.0.1:5432/nacos"
+1. 创建 `nacos` 数据库（若不存在）
+2. 导入官方 `pg-schema.sql`（仅首次，已存在表结构则跳过）
+3. 写入默认管理员用户（`nacos` / `nacos`，幂等）
 
-# pg-schema.sql 不含默认用户，需手动 seed（密码 nacos）：
-psql "postgresql://root:postgresql@127.0.0.1:5432/nacos" <<'SQL'
-INSERT INTO users (username, password, enabled) VALUES
-  ('nacos', '$2a$10$EuWPZHzz32dJN7jexM34MOeYirDdFAZm2kuWj7VEOJhhZkDrxfvUu', TRUE)
-ON CONFLICT DO NOTHING;
-INSERT INTO roles (username, role) VALUES ('nacos', 'ROLE_ADMIN') ON CONFLICT DO NOTHING;
-INSERT INTO permissions (role, resource, action) VALUES ('ROLE_ADMIN', '*:*:*', 'rw') ON CONFLICT DO NOTHING;
-SQL
-```
+SQL 脚本位于 `files/nacos-pg-schema.sql`（含 schema 与默认用户 seed）；可通过 `nacos.dbInit.enabled=false` 关闭自动初始化。
 
-ChatAI 所需 PostgreSQL 库（若尚未创建）：
-
-```bash
-psql "postgresql://root:postgresql@127.0.0.1:5432/postgres" -c "CREATE DATABASE aip_hub_test"
-```
-
-Agno 会话与租户配置均使用 `aip_hub_test` 库（由 Chart `postgres.database` 统一配置）。
-
-
+ChatAI 的 `aip_hub_test` 库由子 Chart `chatai` 的 `dbInit` Job 自动初始化（见 §6）。
 
 ## 1. 准备镜像
 
@@ -93,7 +75,7 @@ helm dependency build helm/effyic/
 
 ## 3. 安装
 
-默认命名空间为 **`effiyc`**（见 `values.yaml` 中 `global.namespace`）。
+默认命名空间为 `effiyc`（见 `values.yaml` 中 `global.namespace`）。
 
 ```bash
 export HICLAW_LLM_API_KEY="sk-your-qwen-api-key"
@@ -135,15 +117,11 @@ ChatAI **不在** `helm/effyic` 根 Chart 中安装，而是进入子目录 `cha
 - Nacos 已上传 AgentSpec `medical-orchestrator`（标签 `stable`；ZIP 须含 `manifest.json`）
 - 外部 PostgreSQL 库 `aip_hub_test` 可用（Agno 会话 + 租户配置共用）
 
+
+
 ### 6.2 安装 ChatAI
 
-```bash
-cd helm/effyic/chatai
-chmod +x install.sh
-./install.sh
-```
 
-或手动：
 
 ```bash
 GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
@@ -155,6 +133,8 @@ helm upgrade --install effyic-chatai helm/effyic/chatai \
   --set postgres.hostAliasIP="${GATEWAY_IP}"
 ```
 
+
+
 ### 6.3 验证
 
 ```bash
@@ -163,7 +143,7 @@ kubectl get ingress,wasmplugin -l app.kubernetes.io/component=chatai -n effiyc
 
 TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -n effiyc -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
 
-# 平台公共域名 + /effiyc 路径（无需 Host 头）
+# 平台公共域名 + /effiyc 路径
 curl -X POST http://localhost/effiyc/v1/chat \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "tenant-id: tenant-a" \

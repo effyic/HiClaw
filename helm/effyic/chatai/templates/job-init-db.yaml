@@ -51,6 +51,8 @@ spec:
             - -ec
             - |
               echo "Initializing agno_agent schema on ${PGHOST}:${PGPORT}/${PGDATABASE}..."
+              psql -d postgres -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname = '${PGDATABASE}'" | grep -q 1 \
+                || psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${PGDATABASE}\""
               psql -v ON_ERROR_STOP=1 -f /sql/init.sql
               echo "Done."
           volumeMounts:

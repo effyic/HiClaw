@@ -1,0 +1,71 @@
+{{- if and .Values.nacos.enabled (eq .Values.nacos.mode "managed") (eq (.Values.nacos.database.platform | default "mysql") "postgresql") (.Values.nacos.dbInit.enabled | default true) }}
+{{- $comp := dict "root" . "component" "nacos" }}
+{{- $db := .Values.nacos.database | default dict }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "hiclaw.nacos.fullname" . }}-db-init
+  namespace: {{ include "hiclaw.namespace" . }}
+  labels:
+    {{- include "hiclaw.component.labels" $comp | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.nacos.dbInit.backoffLimit | default 3 }}
+  activeDeadlineSeconds: {{ .Values.nacos.dbInit.activeDeadlineSeconds | default 600 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hiclaw.component.selectorLabels" $comp | nindent 8 }}
+        app.kubernetes.io/component: nacos-db-init
+    spec:
+      restartPolicy: OnFailure
+      {{- if $db.hostAliasIP }}
+      hostAliases:
+        - ip: {{ $db.hostAliasIP | quote }}
+          hostnames:
+            - {{ required "nacos.database.host is required when nacos.mode=managed" $db.host | quote }}
+      {{- end }}
+      containers:
+        - name: pg-init
+          image: {{ .Values.nacos.dbInit.image | default "postgres:16-alpine" | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGHOST
+              value: {{ required "nacos.database.host is required when nacos.mode=managed" $db.host | quote }}
+            - name: PGPORT
+              value: {{ $db.port | default 5432 | quote }}
+            - name: PGUSER
+              value: {{ $db.username | default "root" | quote }}
+            - name: PGPASSWORD
+              value: {{ $db.password | default "postgresql" | quote }}
+            - name: TARGET_DB
+              value: {{ $db.database | default "nacos" | quote }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              echo "Initializing Nacos PostgreSQL on ${PGHOST}:${PGPORT}/${TARGET_DB}..."
+              psql -d postgres -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname = '${TARGET_DB}'" | grep -q 1 \
+                || psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${TARGET_DB}\""
+              if ! psql -d "${TARGET_DB}" -v ON_ERROR_STOP=1 -tc \
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'config_info'" | grep -q 1; then
+                echo "Applying Nacos schema + seed..."
+                sed '/^-- >>> default admin user seed/,$d' /sql/init.sql | psql -d "${TARGET_DB}" -v ON_ERROR_STOP=1 -f -
+              else
+                echo "Nacos schema already present, skipping schema DDL"
+              fi
+              echo "Seeding default admin user..."
+              sed -n '/^-- >>> default admin user seed/,$p' /sql/init.sql | psql -d "${TARGET_DB}" -v ON_ERROR_STOP=1 -f -
+              echo "Done."
+          volumeMounts:
+            - name: sql
+              mountPath: /sql
+              readOnly: true
+      volumes:
+        - name: sql
+          configMap:
+            name: {{ include "hiclaw.nacos.fullname" . }}-sql
+{{- end }}

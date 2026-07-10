@@ -60,11 +60,16 @@ nacos:
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
+      memory: 1024Mi
     limits:
       cpu: "1"
-      memory: 1Gi
+      memory: 2Gi
   extraEnv: {}
+  dbInit:
+    enabled: true
+    image: postgres:16-alpine
+    backoffLimit: 3
+    activeDeadlineSeconds: 600
 
 # ── Matrix ────────────────────────────────────────────────────────────────
 matrix:
@@ -265,7 +270,7 @@ cms:
   serviceName: "hiclaw-manager"
   metricsEnabled: false
 
-# ── Worker defaults — 仅 hermes 使用本地镜像 ─────────────────────────────
+# ── Worker ───
 worker:
   defaultImage:
     openclaw:
