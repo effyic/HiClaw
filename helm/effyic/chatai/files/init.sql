@@ -44,7 +44,7 @@ INSERT INTO agno_agent (
   'default', 'default', '默认租户', '通用助手',
   '你是默认租户助手。', '提供通用帮助。',
   JSON_ARRAY('weknora-kb-general'), 0, NULL,
-  JSON_OBJECT('kind', 'default'), 1
+  NULL, 1
 ) ON DUPLICATE KEY UPDATE
   display_name = VALUES(display_name),
   system_prompt = VALUES(system_prompt),
@@ -62,7 +62,7 @@ INSERT INTO agno_agent (
   '你是医疗分诊助手。根据用户描述，从科室列表中选择最合适的 expert 路由。',
   '先了解症状，再给出科室建议；仅允许路由到白名单科室。',
   JSON_ARRAY('weknora-kb-triage'), 0, NULL,
-  JSON_OBJECT('kind', 'triage', 'phase', 'triage'), 1
+  NULL, 1
 ) ON DUPLICATE KEY UPDATE
   display_name = VALUES(display_name),
   system_prompt = VALUES(system_prompt),
@@ -78,7 +78,7 @@ INSERT INTO agno_agent (
   'tenant-a', 'expert_cardiology', '心内科专家', '心血管专科',
   '你是心内科专家助手。', '基于循证医学回答心血管相关问题，必要时建议线下就诊。',
   JSON_ARRAY('weknora-kb-cardiology'), 0, NULL,
-  JSON_OBJECT('kind', 'expert', 'route_key', 'cardiology', 'phase', 'consultation'), 1
+  NULL, 1
 ) ON DUPLICATE KEY UPDATE
   display_name = VALUES(display_name),
   system_prompt = VALUES(system_prompt),

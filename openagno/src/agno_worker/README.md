@@ -15,7 +15,7 @@ HTTP (/v1/chat, /v1/chat/stream)
   → runtime/engine.py         单一动态 Agent
   → runtime/builder.py        pre_hook / instructions / tools / post_hook
   → tenant/service.py         标准流水线编排 + run-scoped 缓存
-      ├── tenant/context.py   租户 / 角色 / workflow 解析
+      ├── tenant/context.py   租户 / 角色解析
       ├── tenant/store.py     agno_agent 配置（连接池 + TTL 缓存）
       ├── tenant/prompt.py    Prompt 与 knowledge_filters 组装
       ├── tenant/mcp.py       MCP 服务器配置
@@ -70,6 +70,7 @@ HTTP (/v1/chat, /v1/chat/stream)
 | `tenant_id`  | `tenant-id` / `x-tenant-id`   | Query `tenant_id` |
 | `user_id`    | `user-id` / `x-user-id`       | Body → Query      |
 | `session_id` | `session-id` / `x-session-id` | Query             |
+| `role_code`  | `role-code` / `x-role-code`   | Query `role_code` |
 
 
 请求示例：
@@ -81,7 +82,7 @@ curl -X POST http://localhost:8090/v1/chat/stream \
   -H "tenant-id: tenant-a" \
   -H "user-id: alice" \
   -H "session-id: conv-123" \
-  -H "role_code: default" \
+  -H "role-code: triage" \
   -d '{"message": "你好"}'
 ```
 
@@ -168,13 +169,46 @@ RequestFilterPipeline.apply_post_filter()  # request_post_filter_hook (可选)
 
 | 能力        | 实现                  | 说明                                                        |
 | --------- | ------------------- | --------------------------------------------------------- |
-| 租户/角色解析   | `tenant/context.py` | metadata → session_state → factory_input → `"default"`    |
-| 配置加载      | `tenant/store.py`   | 多级 fallback：tenant+role → expert route → triage → default |
+| 租户/角色解析   | `tenant/context.py` | `tenant_id`：metadata → session_state → factory → `"default"`；`role_code`：metadata → session_state → `"default"` |
+| 配置加载      | `tenant/store.py`   | `tenant_id` + `role_code` 精确匹配 → 同租户 `default` 行 → 全局 `default` 租户 |
 | Prompt 组装 | `tenant/prompt.py`  | system_prompt、instructions、context_filters                |
 | MCP 配置    | `tenant/mcp.py`     | 从 `mcp_config` 构建 MCPServerConfig 列表                      |
 | Skill 扫描  | `tenant/skills.py`  | 扫描 `AGNO_SKILLS_DIR`，按 tenant_ids 过滤                      |
-| 会话管理      | `tenant/session.py` | init_session、build_session_updates                        |
+| 会话管理      | `tenant/session.py` | init_session、build_session_updates（同步当前行的 `workflow`） |
 | 数据工具      | `tenant/data.py`    | `query_tenant_data`（当前为配置摘要 stub）                         |
+
+
+### 5.1 角色（Agent）解析 — 选定 `agno_agent` 行
+
+**Worker 不会根据 `workflow` JSON、`route_key` 或 `kind` 自动切换 Agent。** 每次 run 加载哪一行配置，仅由解析出的 `role_code` 决定：
+
+```
+HTTP role-code / x-role-code（或 query role_code）
+  → metadata.role_code
+  → session_state.role_code / active_role / role / agent
+  → "default"
+```
+
+`AgentStore.load_agent_resolved(tenant_id, role_code)` 的 DB fallback 链：
+
+1. `tenant_id` + 精确 `role_code`
+2. 同租户 `role_code = 'default'`
+3. 全局租户 `default` + `role_code = 'default'`
+
+多阶段业务（如分诊 → 问诊 → 病历）需在**调用方**切换 `role-code`，或在 `transform_session_state_hook` 中更新 `session_state.active_role` / `role_code`；框架本身不做阶段路由。
+
+### 5.2 `workflow` JSON 字段用途
+
+`agno_agent.workflow` 为可扩展 JSON 元数据。标准流水线**只读取以下字段**：
+
+| 字段 | 读取位置 | 作用 |
+| ---- | -------- | ---- |
+| `prompt_append` | `tenant/prompt.py` | 追加到 system prompt |
+| `instructions_append` | `tenant/prompt.py` | 追加到 instructions |
+| `phase` | `tenant/session.py` | 写入 `session_state.phase` |
+| `knowledge_provider` | `tenant/prompt.py` | 覆盖知识检索 provider |
+
+`kind`、`route_key`、`next_phase` 等自定义字段**不被标准流水线用于选 Agent 或自动流转**；可作为业务标注，或由 PVC Hook / 外部编排读取。`post_hook` 会将**当前已加载行**的 `workflow` 同步到 `session_state.workflow`。
 
 
 ---
@@ -232,8 +266,8 @@ def enrich_business_context_hook(
     base_context: dict[str, Any],
 ) -> dict[str, Any] | None:
     """
-    base_context 含: tenant_id, role_code, workflow_kind, route_key,
-                     agent_config, expert_agents
+    base_context 含: tenant_id, role_code, agent_config, agents
+    （agents 为同租户下 list_agents() 结果，每项含 role_code / workflow 等）
     返回 partial dict，合并进 business_context。
     """
 ```
@@ -302,7 +336,7 @@ def pick_hook_or_spec(hook_value, spec_value):
     # 否则 → 用 AgentSpec fallback
 ```
 
-**角色选择**：`session_state["active_role"]` → `role` → `phase` → `agent`，均需在 `spec.agents` 中存在，否则用第一个角色。
+**AgentSpec fallback 角色**（`hooks/compose.py` 的 `resolve_active_role`，仅在与 AgentSpec 合并 prompt/tools 时使用，**不决定** MySQL 加载哪一行）：`session_state["active_role"]` → `role` → `phase` → `agent`，均需在 `spec.agents` 中存在，否则用第一个角色。MySQL 行选择见 [§5.1](#51-角色agent解析--选定-agno_agent-行)。
 
 ---
 
