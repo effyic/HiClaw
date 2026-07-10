@@ -1,4 +1,4 @@
-"""Dynamic Agent builder: one Agent, N roles, hooks override AgentSpec."""
+"""Dynamic Agent builder: standard tenant pipeline + optional extension hooks."""
 from __future__ import annotations
 
 import logging
@@ -6,7 +6,6 @@ import os
 from typing import Any, Callable
 
 from agno_worker.agentspec.schema import AgentDef, AgentSpec
-from agno_worker.data import MySQLDataContextProvider
 from agno_worker.hooks.compose import (
     build_run_dependencies,
     has_hook_data,
@@ -21,6 +20,7 @@ from agno_worker.hooks.compose import (
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.mcp.loader import build_mcp_tools
 from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill_catalog_summary
+from agno_worker.tenant.service import TenantAgentService
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ def _static_instructions_from_spec(
     spec: AgentSpec,
     role_name: str | None = None,
 ) -> str:
-    """AgentSpec-only prompt for AgentOS UI introspection (no run_context)."""
     active = role_name or _default_role_name(spec)
     defn = role_def(spec, active)
     parts = [
@@ -45,22 +44,22 @@ def _static_instructions_from_spec(
 
 
 class AgentBuilder:
-    """Compose a single dynamic Agno Agent; spec.agents is a role catalog."""
+    """Compose a single dynamic Agno Agent using tenant DB config + AgentSpec fallback."""
 
     def __init__(
         self,
         registry: HookRegistry,
         spec: AgentSpec,
         db: Any,
+        tenant_service: TenantAgentService | None = None,
     ) -> None:
         self.registry = registry
         self.spec = spec
         self.db = db
-        self._data_provider = MySQLDataContextProvider(registry)
-        self._skills_manager = DynamicSkillsManager()
+        self.tenant = tenant_service or TenantAgentService(registry)
+        self._skills_manager = DynamicSkillsManager(self.tenant)
 
     def build_dynamic_agent(self) -> Any:
-        """Build one Agent whose prompt/tools are resolved per run via hooks."""
         from agno.agent import Agent
 
         agent_name = self.spec.name or "agent"
@@ -88,12 +87,11 @@ class AgentBuilder:
         )
 
     def build_agent(self, defn: AgentDef) -> Any:
-        """Backward-compatible alias; always returns the single dynamic agent."""
         return self.build_dynamic_agent()
 
     def _make_instructions(self) -> Callable[..., str]:
-        registry = self.registry
         spec = self.spec
+        tenant = self.tenant
 
         def _instructions(run_context: Any = None, **_: Any) -> str:
             if run_context is None:
@@ -104,17 +102,14 @@ class AgentBuilder:
             active_role = resolve_active_role(session_state, spec)
             defn = role_def(spec, active_role)
 
-            hook_system = registry.call(
-                "get_system_prompt_hook", run_context, session_state
-            )
-            spec_system = spec_system_prompt(defn)
-            system_text = str(pick_hook_or_spec(hook_system, spec_system) or "")
+            bundle = tenant.get_prompt_bundle(run_context, session_state)
+            system_text = str(bundle.get("system_prompt") or "")
+            instr_text = str(bundle.get("instructions") or "")
 
-            hook_instr = registry.call(
-                "get_instructions_hook", run_context, user_profile
-            )
+            spec_system = spec_system_prompt(defn)
             spec_instr = spec_instructions(defn)
-            instr_text = str(pick_hook_or_spec(hook_instr, spec_instr) or "")
+            system_text = str(pick_hook_or_spec(system_text, spec_system) or "")
+            instr_text = str(pick_hook_or_spec(instr_text, spec_instr) or "")
 
             parts = [part for part in (system_text, instr_text) if part.strip()]
 
@@ -125,18 +120,14 @@ class AgentBuilder:
             if summary:
                 parts.append(summary)
 
-            if has_hook_data(hook_system) or has_hook_data(hook_instr):
-                logger.debug("prompt overridden by hook (role=%s)", active_role)
-            else:
-                logger.debug("prompt from AgentSpec role=%s", active_role)
-
+            logger.debug("prompt from tenant pipeline (role=%s, tenant=%s)", active_role, user_profile.get("tenant_id"))
             return "\n\n".join(parts)
 
         return _instructions
 
     def _make_tools(self) -> Callable[..., list[Any]]:
-        registry = self.registry
-        data_provider = self._data_provider
+        spec = self.spec
+        tenant = self.tenant
         skills_manager = self._skills_manager
 
         def _tools(run_context: Any = None, **_: Any) -> list[Any]:
@@ -144,23 +135,17 @@ class AgentBuilder:
                 return []
 
             session_state = run_context.session_state or {}
-            active_role = resolve_active_role(session_state, self.spec)
-            scenario = (getattr(run_context, "metadata", None) or {}).get(
-                "business_scenario", active_role
-            )
+            active_role = resolve_active_role(session_state, spec)
 
-            hook_servers = registry.call(
-                "get_mcp_servers_hook", run_context, scenario
-            )
+            servers = tenant.get_mcp_servers(run_context)
             tools: list[Any] = []
 
-            if has_hook_data(hook_servers):
-                tools.extend(build_mcp_tools(hook_servers, registry))
-            elif role_defn := role_def(self.spec, active_role):
-                # AgentSpec tool names are declarative placeholders for now.
+            if has_hook_data(servers):
+                tools.extend(build_mcp_tools(servers, tenant))
+            elif role_defn := role_def(spec, active_role):
                 if role_defn.tools:
                     logger.debug(
-                        "MCP hook empty; spec role=%s declares tools=%s (no auto-load)",
+                        "No MCP servers for role=%s; spec declares tools=%s (no auto-load)",
                         active_role,
                         role_defn.tools,
                     )
@@ -172,9 +157,7 @@ class AgentBuilder:
                 user_requirements = str(
                     (run_context.metadata or {}).get("user_requirements") or ""
                 )
-                catalog = skills_manager.resolve_catalog(
-                    registry, run_context, user_requirements
-                )
+                catalog = tenant.get_skill_catalog(run_context, user_requirements)
                 if run_context.dependencies is None:
                     run_context.dependencies = {}
                 run_context.dependencies["skill_catalog"] = [
@@ -187,17 +170,15 @@ class AgentBuilder:
                     for ref in catalog
                 ]
 
-            tools.extend(skills_manager.build_tools(registry, run_context, catalog))
-            tools.extend(data_provider.get_tools())
-            filtered = registry.call("mcp_tool_filter_hook", run_context, tools)
-            return filtered if filtered is not None else tools
+            tools.extend(skills_manager.build_tools(run_context, catalog))
+            tools.extend(tenant.data.get_tools())
+            return tenant.filter_mcp_tools(run_context, tools)
 
         return _tools
 
     def _make_pre_hook(self) -> Callable[..., None]:
-        registry = self.registry
         spec = self.spec
-        skills_manager = self._skills_manager
+        tenant = self.tenant
 
         def _pre_hook(run_input: Any, run_context: Any, session: Any = None, **_: Any) -> None:
             session_id = _extract_session_id(session, run_context)
@@ -206,7 +187,7 @@ class AgentBuilder:
                 "session_id": session_id,
             }
             if session_id:
-                registry.call("session_init_hook", session_id, user_context)
+                tenant.session.init_session(session_id, user_context)
 
             if run_context.session_state is None:
                 run_context.session_state = {}
@@ -222,9 +203,16 @@ class AgentBuilder:
                     metadata = run_context.metadata
                 metadata["user_requirements"] = user_requirements
 
-            hook_filters = registry.call("get_context_filter_hook", run_context)
+            tenant.prepare_run_context(
+                run_context,
+                run_context.session_state,
+                user_requirements=user_requirements,
+                business_scenario=resolve_active_role(run_context.session_state, spec),
+            )
+            bundle = tenant.get_prompt_bundle(run_context, run_context.session_state)
             spec_filters = spec_context_filters(active_role, spec)
-            merged = pick_hook_or_spec(hook_filters, spec_filters)
+            tenant_filters = bundle.get("context_filters") or {}
+            merged = pick_hook_or_spec(tenant_filters, spec_filters)
             if not isinstance(merged, dict):
                 merged = spec_filters
             normalized = normalize_knowledge_filters(merged)
@@ -233,15 +221,11 @@ class AgentBuilder:
             if run_context.dependencies is None:
                 run_context.dependencies = {}
             run_context.dependencies.update(build_run_dependencies(run_context, normalized))
-            run_context.dependencies.setdefault(
-                "role_catalog", list(spec.agents.keys())
-            )
+            run_context.dependencies.setdefault("role_catalog", list(spec.agents.keys()))
+            run_context.dependencies["agent_config"] = bundle.get("agent_config") or {}
+            run_context.dependencies["business_context"] = bundle.get("business_context") or tenant.get_business_context(run_context)
 
-            catalog = skills_manager.resolve_catalog(
-                registry,
-                run_context,
-                user_requirements,
-            )
+            catalog = tenant.get_skill_catalog(run_context, user_requirements)
             run_context.dependencies["skill_catalog"] = [
                 {
                     "name": ref.name,
@@ -255,7 +239,7 @@ class AgentBuilder:
         return _pre_hook
 
     def _make_post_hook(self) -> Callable[..., None]:
-        registry = self.registry
+        tenant = self.tenant
 
         def _post_hook(
             run_output: Any,
@@ -265,9 +249,7 @@ class AgentBuilder:
         ) -> None:
             if run_context.session_state is None:
                 run_context.session_state = {}
-            updates = registry.call(
-                "session_update_hook", run_context.session_state, run_context
-            )
+            updates = tenant.build_session_updates(run_context.session_state, run_context)
             if isinstance(updates, dict) and updates:
                 run_context.session_state.update(updates)
 

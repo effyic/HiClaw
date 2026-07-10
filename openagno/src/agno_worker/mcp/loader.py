@@ -1,18 +1,21 @@
-"""Build Agno MCPTools instances from hook-provided server configs."""
+"""Build Agno MCPTools instances from tenant MCP server configs."""
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Protocol
 
 from agno_worker.hooks.protocols import MCPServerConfig
-from agno_worker.hooks.registry import HookRegistry
 
 logger = logging.getLogger(__name__)
 
 
+class MCPConnectionHandler(Protocol):
+    def on_mcp_connection(self, server_config: MCPServerConfig) -> None: ...
+
+
 def build_mcp_tools(
     servers: list[MCPServerConfig],
-    registry: HookRegistry,
+    connection_handler: MCPConnectionHandler | Any,
 ) -> list[Any]:
     if not servers:
         return []
@@ -26,7 +29,10 @@ def build_mcp_tools(
     tools: list[Any] = []
     for server in servers:
         try:
-            registry.call("mcp_connection_hook", server)
+            if hasattr(connection_handler, "on_mcp_connection"):
+                connection_handler.on_mcp_connection(server)
+            elif hasattr(connection_handler, "call"):
+                connection_handler.call("mcp_connection_hook", server)
             kwargs: dict[str, Any] = {}
             if server.url:
                 kwargs["transport"] = server.transport

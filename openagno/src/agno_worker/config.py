@@ -14,6 +14,7 @@ class WorkerConfig:
     agentspec_dir: Path
     hooks_dir: Path
     db_url: str
+    agent_db_url: str = ""
     db_type: str = "postgres"
     db_schema: str = "public"
     db_session_table: str = "agno_sessions"
@@ -22,6 +23,7 @@ class WorkerConfig:
     api_bind: str = "0.0.0.0"
     watch_interval: int = 30
     enable_agentos: bool = False
+    require_tenant_id: bool = False
 
     @classmethod
     def from_env(cls, worker_name: str) -> WorkerConfig:
@@ -44,6 +46,12 @@ class WorkerConfig:
             "true",
             "yes",
         )
+        agent_db_url = os.environ.get("AGNO_AGENT_DB_URL", "").strip()
+        require_tenant_id = os.environ.get("AGNO_REQUIRE_TENANT_ID", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         return cls(
             worker_name=worker_name,
             agentspec_dir=Path(
@@ -51,6 +59,7 @@ class WorkerConfig:
             ),
             hooks_dir=Path(os.environ.get("AGNO_HOOKS_DIR", "/etc/hiclaw/hooks")),
             db_url=db_url,
+            agent_db_url=agent_db_url,
             db_type=db_type,
             db_schema=db_schema,
             db_session_table=os.environ.get("AGNO_DB_SESSION_TABLE", "agno_sessions"),
@@ -59,4 +68,5 @@ class WorkerConfig:
             api_bind=os.environ.get("AGNO_CONTROL_BIND", "0.0.0.0"),
             watch_interval=int(os.environ.get("AGNO_SPEC_WATCH_INTERVAL", "30")),
             enable_agentos=enable_agentos,
+            require_tenant_id=require_tenant_id,
         )

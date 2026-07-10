@@ -20,6 +20,8 @@ spec:
     # 物理机 PostgreSQL（network_mode: host, 端口 5432）
     # 网关 IP 查询：docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'
     AGNO_DB_URL: postgresql+psycopg://root:postgresql@192.168.49.1:5432/vector_store
+    # 租户 Agent 配置（agno_agent 表），与 session 库分离
+    AGNO_AGENT_DB_URL: mysql+pymysql://root:mysql@192.168.0.111:3306/agno_worker
   expose:
     - port: 8090
       protocol: http

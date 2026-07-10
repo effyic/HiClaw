@@ -14,6 +14,8 @@ from pydantic import BaseModel
 import uvicorn
 
 from agno_worker.api.identity import resolve_session_id, resolve_tenant_id, resolve_user_id
+from agno_worker.hooks.filters import RequestRejectedError
+from agno_worker.hooks.protocols import UserContext
 
 logger = logging.getLogger(__name__)
 
@@ -114,18 +116,39 @@ class AgnoAPIServer:
 
         return _handler
 
+    def _build_user_context(
+        self,
+        request: Request,
+        *,
+        user_id: str,
+        tenant_id: str,
+        session_id: str,
+    ) -> UserContext:
+        return UserContext(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            headers={str(k): str(v) for k, v in request.headers.items()},
+        )
+
+    def _handle_api_error(self, exc: Exception) -> HTTPException:
+        from agno_worker.hooks.errors import HookExecutionError, HookLoadError
+
+        if isinstance(exc, RequestRejectedError):
+            logger.warning("Request rejected by pre-filter: %s", exc.reason)
+            return HTTPException(status_code=403, detail=exc.reason)
+        if isinstance(exc, (HookLoadError, HookExecutionError)):
+            logger.error("Hook error during chat: %s", exc)
+            return HTTPException(status_code=500, detail=str(exc))
+        logger.exception("Unhandled error during chat")
+        return HTTPException(status_code=500, detail="Internal server error")
+
     def resync_agentos(self) -> None:
         if self._agent_os is None or self._base_app is None:
             return
         try:
             if self._runtime is not None:
                 self._agent_os.agents = list(self._runtime.agents.values())
-                self._agent_os.teams = (
-                    [self._runtime.team] if self._runtime.team else None
-                )
-                self._agent_os.workflows = (
-                    [self._runtime.workflow] if self._runtime.workflow else None
-                )
             # Must resync from base_app so /health /status /v1/chat routes stay mounted.
             self._agent_os.resync(self._base_app)
         except Exception as exc:
@@ -183,21 +206,22 @@ class AgnoAPIServer:
                 headers=request.headers,
                 query_session_id=request.query_params.get("session_id", ""),
             )
+            user_context = self._build_user_context(
+                request,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                session_id=session_id,
+            )
             try:
                 reply, resolved_session_id = await self._chat_handler_async(
                     req.message,
                     session_id,
                     user_id,
                     tenant_id,
+                    user_context=user_context,
                 )
             except Exception as exc:
-                from agno_worker.hooks.errors import HookExecutionError, HookLoadError
-
-                if isinstance(exc, (HookLoadError, HookExecutionError)):
-                    logger.error("Hook error during chat: %s", exc)
-                    raise HTTPException(status_code=500, detail=str(exc)) from exc
-                logger.exception("Unhandled error during chat")
-                raise HTTPException(status_code=500, detail="Internal server error") from exc
+                raise self._handle_api_error(exc) from exc
             return ChatResponse(reply=reply, session_id=resolved_session_id)
 
         @app.post("/v1/chat/stream")
@@ -222,6 +246,12 @@ class AgnoAPIServer:
                 headers=request.headers,
                 query_session_id=request.query_params.get("session_id", ""),
             )
+            user_context = self._build_user_context(
+                request,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                session_id=session_id,
+            )
             stream_events = _truthy_query(
                 request.query_params.get("stream_events", "")
             )
@@ -233,20 +263,14 @@ class AgnoAPIServer:
                         session_id,
                         user_id,
                         tenant_id,
+                        user_context=user_context,
                         stream_events=stream_events,
                     ):
                         yield _format_sse(chunk)
                 except Exception as exc:
-                    from agno_worker.hooks.errors import HookExecutionError, HookLoadError
-
-                    if isinstance(exc, (HookLoadError, HookExecutionError)):
-                        logger.error("Hook error during chat stream: %s", exc)
-                        yield _format_sse({"event": "error", "message": str(exc)})
-                        return
-                    logger.exception("Unhandled error during chat stream")
-                    yield _format_sse(
-                        {"event": "error", "message": "Internal server error"}
-                    )
+                    http_exc = self._handle_api_error(exc)
+                    yield _format_sse({"event": "error", "message": http_exc.detail})
+                    return
 
             return StreamingResponse(
                 event_generator(),
@@ -270,15 +294,11 @@ class AgnoAPIServer:
 
         runtime = self._runtime
         agents = list(runtime.agents.values())
-        teams = [runtime.team] if runtime.team else None
-        workflows = [runtime.workflow] if runtime.workflow else None
         dev_mode = os.environ.get("RUNTIME_ENV", "prd").lower() == "dev"
 
         self._agent_os = AgentOS(
             name=self._worker_name,
             agents=agents,
-            teams=teams,
-            workflows=workflows,
             db=runtime.db,
             base_app=base_app,
             on_route_conflict="preserve_base_app",

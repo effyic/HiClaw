@@ -7,13 +7,29 @@ import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from agno_worker.hooks.protocols import SkillRef
-from agno_worker.hooks.registry import HookRegistry
 from agno_worker.skills.normalize import normalize_skill_refs
 
 logger = logging.getLogger(__name__)
+
+
+class SkillProvider(Protocol):
+    def resolve_skill_catalog(
+        self, run_context: Any, user_requirements: str = ""
+    ) -> list[SkillRef]: ...
+
+    def load_skill_instruction(self, skill_name: str, run_context: Any) -> str: ...
+
+    def load_skill_script(
+        self,
+        skill_name: str,
+        script_name: str,
+        run_context: Any,
+        *,
+        execute: bool = False,
+    ) -> Any: ...
 
 
 @dataclass
@@ -23,8 +39,6 @@ class _CacheEntry:
 
 
 class SkillCatalogCache:
-    """TTL cache for lightweight skill catalogs (metadata only)."""
-
     def __init__(self, *, max_entries: int = 256, ttl_seconds: float = 300.0) -> None:
         self._max_entries = max(1, max_entries)
         self._ttl_seconds = max(0.001, ttl_seconds)
@@ -77,7 +91,8 @@ class _LRUCache:
 class DynamicSkillsManager:
     """Resolve skill catalogs per run and expose lazy Agno tools."""
 
-    def __init__(self) -> None:
+    def __init__(self, skill_provider: SkillProvider) -> None:
+        self._provider = skill_provider
         ttl = float(os.environ.get("AGNO_SKILL_CATALOG_TTL", "300"))
         catalog_max = int(os.environ.get("AGNO_SKILL_CATALOG_CACHE_SIZE", "256"))
         instr_max = int(os.environ.get("AGNO_SKILL_INSTRUCTION_CACHE_SIZE", "128"))
@@ -93,7 +108,6 @@ class DynamicSkillsManager:
 
     def resolve_catalog(
         self,
-        registry: HookRegistry,
         run_context: Any,
         user_requirements: str = "",
     ) -> list[SkillRef]:
@@ -103,15 +117,14 @@ class DynamicSkillsManager:
             logger.debug("skill catalog cache hit key=%s count=%d", cache_key, len(cached))
             return cached
 
-        raw = registry.call("get_skills_hook", run_context, user_requirements or "")
-        catalog = normalize_skill_refs(raw)
+        catalog = self._provider.resolve_skill_catalog(run_context, user_requirements or "")
+        catalog = normalize_skill_refs(catalog)
         self._catalog_cache.set(cache_key, catalog)
         logger.debug("skill catalog loaded key=%s count=%d", cache_key, len(catalog))
         return catalog
 
     def build_tools(
         self,
-        registry: HookRegistry,
         run_context: Any,
         catalog: list[SkillRef],
     ) -> list[Any]:
@@ -126,6 +139,7 @@ class DynamicSkillsManager:
 
         allowed = {ref.name for ref in catalog}
         manager = self
+        provider = self._provider
 
         @tool(
             name="list_available_skills",
@@ -159,7 +173,7 @@ class DynamicSkillsManager:
             cached = manager._instruction_cache.get(cache_key)
             if cached is not None:
                 return cached
-            text = registry.call("skill_instruction_hook", skill_name, ctx)
+            text = provider.load_skill_instruction(skill_name, ctx)
             payload = json.dumps(
                 {"skill_name": skill_name, "instructions": str(text or "")},
                 ensure_ascii=False,
@@ -191,8 +205,7 @@ class DynamicSkillsManager:
                 cached = manager._script_cache.get(cache_key)
                 if cached is not None:
                     return cached
-            raw = registry.call(
-                "skill_script_hook",
+            raw = provider.load_skill_script(
                 skill_name,
                 script_name,
                 ctx,

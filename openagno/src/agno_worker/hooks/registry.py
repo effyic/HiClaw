@@ -1,4 +1,4 @@
-"""Load hook callables from PVC-mounted directory; fail fast on any error."""
+"""Load optional extension hooks from PVC-mounted directory."""
 from __future__ import annotations
 
 import importlib.util
@@ -8,15 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from agno_worker.hooks.errors import HookExecutionError, HookLoadError
-from agno_worker.hooks.protocols import HOOK_NAMES, HookFn, HookSet
+from agno_worker.hooks.protocols import EXTENSION_HOOK_NAMES, HookFn, HookSet
 
 logger = logging.getLogger(__name__)
 
-_HOOK_MODULES = ("hooks", "prompt", "mcp", "skills", "session", "data")
+_HOOK_MODULES = ("hooks", "filters", "transform", "business", "prompt", "mcp", "skills", "session", "data")
 
 
 class HookRegistry:
-    """Resolve hooks exclusively from the external hooks directory."""
+    """Resolve optional extension hooks from external hooks directory."""
 
     def __init__(self, hooks_dir: Path | None = None) -> None:
         self.hooks_dir = hooks_dir or Path("/etc/hiclaw/hooks")
@@ -33,39 +33,35 @@ class HookRegistry:
         return dict(self._sources)
 
     def reload(self) -> None:
-        if not self.hooks_dir.is_dir():
-            raise HookLoadError(f"Hooks directory not found: {self.hooks_dir}")
-
-        hooks_path = str(self.hooks_dir.resolve())
-        # Append (do not prepend): hooks/mcp.py must not shadow the PyPI ``mcp`` package
-        # required by agno.tools.mcp.MCPTools.
-        if hooks_path not in sys.path:
-            sys.path.append(hooks_path)
-
         resolved: dict[str, HookFn] = {}
         sources: dict[str, str] = {}
-        missing: list[str] = []
 
-        for name in HOOK_NAMES:
-            fn, source = self._resolve_hook(name)
-            if fn is None:
-                missing.append(name)
-                continue
-            resolved[name] = fn
-            sources[name] = source
+        if self.hooks_dir.is_dir():
+            hooks_path = str(self.hooks_dir.resolve())
+            if hooks_path not in sys.path:
+                sys.path.append(hooks_path)
 
-        if missing:
-            raise HookLoadError(
-                f"Missing hook implementations in {self.hooks_dir}: {', '.join(missing)}"
+            for name in EXTENSION_HOOK_NAMES:
+                fn, source = self._resolve_hook(name)
+                if fn is not None:
+                    resolved[name] = fn
+                    sources[name] = source
+        else:
+            logger.info(
+                "Extension hooks directory not found (%s); using standard tenant pipeline only",
+                self.hooks_dir,
             )
 
         self._hooks = HookSet(hooks=resolved)
         self._sources = sources
         logger.info(
-            "Hook registry loaded (%d hooks, dir=%s)",
+            "Extension hook registry loaded (%d hooks, dir=%s)",
             len(resolved),
             self.hooks_dir,
         )
+
+    def has(self, name: str) -> bool:
+        return self._hooks.has(name)
 
     def call(self, name: str, *args: Any, **kwargs: Any) -> Any:
         fn = self._hooks.get(name)
@@ -78,6 +74,11 @@ class HookRegistry:
         except Exception as exc:
             raise HookExecutionError(name, str(exc)) from exc
 
+    def call_optional(self, name: str, *args: Any, default: Any = None, **kwargs: Any) -> Any:
+        if not self.has(name):
+            return default
+        return self.call(name, *args, **kwargs)
+
     def _resolve_hook(self, name: str) -> tuple[HookFn | None, str]:
         for module_name in _HOOK_MODULES:
             module_path = self.hooks_dir / f"{module_name}.py"
@@ -86,7 +87,7 @@ class HookRegistry:
             module = self._import_module(module_path, f"agno_ext_hooks_{module_name}")
             fn = getattr(module, name, None)
             if callable(fn):
-                logger.debug("Loaded hook %s from %s", name, module_path)
+                logger.debug("Loaded extension hook %s from %s", name, module_path)
                 return fn, str(module_path)
 
         init_path = self.hooks_dir / "__init__.py"

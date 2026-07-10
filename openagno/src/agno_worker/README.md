@@ -1,49 +1,87 @@
-基于 Agno/hook/Mysql数据库，构建通用型 Agent 系统，需要实现以下功能：  
+# Agno Worker — 多租户动态智能体
 
-1. 动态钩子函数系统
-  设计并实现以下钩子函数接口：  
-   a) Prompt 动态组装钩子：  
-      - get_system_prompt_hook(run_context, session_state) -> str  
-      - get_instructions_hook(run_context, user_profile) -> str  
-      - get_context_filter_hook(run_context) -> Dict  
-   b) MCP 动态连接钩子：  
-      - get_mcp_servers_hook(run_context, business_scenario) -> List[MCPServerConfig]  
-      - mcp_tool_filter_hook(run_context, available_tools) -> List[Tool]  
-      - mcp_connection_hook(server_config) -> None  
-   c) Skills 动态加载钩子：  
-      - get_skills_hook(run_context, user_requirements) -> List[Skill]  
-      - skill_instruction_hook(skill_name, run_context) -> str  
-      - skill_script_hook(script_name, run_context) -> Any  
-   d) 数据源钩子：  
-      - get_db_connection_hook(run_context) -> DBConnection  
-      - data_query_hook(query, run_context) -> str  
-      - result_processing_hook(results, run_context) -> Dict  
-   e) 会话管理钩子：  
-      - session_init_hook(session_id, user_context) -> None  
-      - session_update_hook(session_state, run_context) -> Dict  
-      - session_cleanup_hook(session_id) -> None
-2. 钩子函数加载机制
-  - 当前先完成功能开发，最终需要做成镜像，因此这些函数最终能够通过 PVC 挂载出来，以实现动态加载 Python 模块
-3. 动态 Agent 构建器
-  - 基于钩子函数返回值动态配置 Agent 实例  
-  - 实时更新 tools、instructions、knowledge 等组件
-4. 执行流程集成
-  实现 Agent 执行流程：  
-   用户请求 → pre_hooks执行 → 动态指令生成 → MCP工具动态加载 →  Skills动态加载 → Agent执行 → post_hooks执行 → 响应返回
-5. Docker 部署支持
-  - 设计 Docker 镜像结构  
-  - 配置 PVC 挂载点用于钩子函数代码  
-  - 支持环境变量配置钩子函数目录  
-  - 实现健康检查和监控端点
+基于 Agno SDK 的通用型 Agent Worker：**内置标准租户流水线**（MySQL `agno_agent` 表驱动）负责 Prompt、MCP、Session 等核心逻辑；**可选 PVC 扩展 Hook** 负责业务数据 enrich 与 transform。
 
-技术规范：  
+## 架构分层
 
-- 使用 Agno SDK 的 Agent、pre_hooks、post_hooks 机制  
-- 利用 callable instructions 实现动态提示词  
-- 使用 MCPTools 集成外部 MCP 服务器  
-- 利用 Skills 系统提供领域专业知识  
-- 实现自定义 knowledge retriever 连接 MySQL  
-- 遵循 Agno 的 RunContext 和会话管理模式
+```
+HTTP (/v1/chat)
+  → api/identity.py           解析 tenant-id / user-id / session-id
+  → hooks/filters.py          tenant_id 必填校验（可配置）+ 可选 pre/post filter
+  → runtime/engine.py         单一动态 Agent
+  → runtime/builder.py        pre_hook / instructions / tools / post_hook
+  → tenant/service.py         标准流水线编排 + run-scoped 缓存
+      ├── tenant/store.py     agno_agent 配置（连接池 + TTL 缓存）
+      ├── tenant/prompt.py    Prompt 组装
+      ├── tenant/mcp.py       MCP 服务器配置
+      └── tenant/session.py   会话状态更新
+  → hooks/registry.py         可选 PVC 扩展 Hook（enrich / transform / filter）
+```
+
+
+
+## 配置来源优先级
+
+
+| 组件                           | 主配置源                                   | Fallback        |
+| ---------------------------- | -------------------------------------- | --------------- |
+| system_prompt / instructions | MySQL `agno_agent`                     | AgentSpec 角色目录  |
+| MCP 服务器                      | `agno_agent.mcp_config`                | 环境变量 WeKnora 默认 |
+| 业务上下文                        | 标准流水线 + `enrich_business_context_hook` | —               |
+
+
+
+
+## 扩展 Hook（PVC 可选，共 11 个）
+
+挂载目录：`AGNO_HOOKS_DIR`（默认 `/etc/hiclaw/hooks`）。目录不存在时 Worker 仍可启动，仅运行标准流水线。
+
+
+| Hook                           | 用途                      |
+| ------------------------------ | ----------------------- |
+| `enrich_business_context_hook` | 注入租户业务表数据（如 department） |
+| `transform_prompt_hook`        | Prompt 二次变换             |
+| `transform_mcp_servers_hook`   | MCP 列表变换                |
+| `transform_skills_hook`        | Skill catalog 变换        |
+| `transform_workflow_hook`      | 会话 workflow 变换          |
+| `transform_session_state_hook` | session_state 变换        |
+| `mcp_tool_filter_hook`         | 工具裁剪                    |
+| `mcp_connection_hook`          | MCP 连接前鉴权               |
+| `result_processing_hook`       | 数据查询结果格式化               |
+| `request_pre_filter_hook`      | 请求准入                    |
+| `request_post_filter_hook`     | 响应后处理                   |
+
+
+
+
+## 关键环境变量
+
+
+| 变量                            | 说明                               | 默认                  |
+| ----------------------------- | -------------------------------- | ------------------- |
+| `AGNO_AGENT_DB_URL`           | 租户配置 MySQL（`agno_agent` 表）       | 必填                  |
+| `AGNO_DB_URL`                 | 会话持久化 DB                         | Postgres            |
+| `AGNO_REQUIRE_TENANT_ID`      | 生产环境建议 `true`，缺失 tenant_id 时拒绝请求 | `false`             |
+| `AGNO_AGENT_CONFIG_CACHE_TTL` | agno_agent 配置 TTL 缓存（秒）          | `60`                |
+| `AGNO_AGENT_DB_POOL_SIZE`     | MySQL 连接池大小                      | `5`                 |
+| `AGNO_HOOKS_DIR`              | 扩展 Hook PVC 挂载路径                 | `/etc/hiclaw/hooks` |
+
+
+
+
+## 单次 Run 执行流程
+
+```
+pre_hook
+  → prepare_run_context()     一次性解析租户上下文、Prompt、MCP、Skill catalog
+  → 写入 run_context.dependencies / knowledge_filters
+instructions()                读取 run-scoped 缓存中的 prompt_bundle
+tools()                       读取缓存中的 mcp_servers / skill_catalog
+Agent 推理 + 工具调用
+post_hook                     更新 session_state（phase / role / workflow）
+```
+
+---
 
 
 
@@ -92,11 +130,11 @@ Agno Agent.run()
 ### 2.1 HTTP 入口
 
 
-| 端点              | 文件              | 说明                                     |
-| --------------- | --------------- | -------------------------------------- |
-| `POST /v1/chat` | `api/server.py` | 主对话入口，解析身份/会话后调用 `Worker._handle_chat` |
-| `GET /status`   | `api/server.py` | 返回 Hook 加载来源、指纹等运行时状态                  |
-| `GET /health`   | `api/server.py` | 健康检查                                   |
+| 端点                                     | 文件              | 说明                                     |
+| -------------------------------------- | --------------- | -------------------------------------- |
+| `POST /v1/chat``POST /v1/chat/stream` | `api/server.py` | 主对话入口，解析身份/会话后调用 `Worker._handle_chat` |
+| `GET /status`                          | `api/server.py` | 返回 Hook 加载来源、指纹等运行时状态                  |
+| `GET /health`                          | `api/server.py` | 健康检查                                   |
 
 
 
@@ -104,11 +142,12 @@ Agno Agent.run()
 ### 2.2 Hook 注册表入口
 
 
-| 组件             | 文件                   | 说明                                                                           |
-| -------------- | -------------------- | ---------------------------------------------------------------------------- |
-| `HookRegistry` | `hooks/registry.py`  | 从 PVC 目录加载全部 Hook，统一 `call(name, *args)` 调度                                  |
-| `AgentBuilder` | `runtime/builder.py` | 将 Hook 注入 Agno Agent 的 `pre_hooks` / `post_hooks` / `instructions` / `tools` |
-| `AgnoRuntime`  | `runtime/engine.py`  | 构建 Agent，在 `run()` 时把 HTTP 解析结果写入 metadata / run kwargs                      |
+| 组件                   | 文件                   | 说明                                                |
+| -------------------- | -------------------- | ------------------------------------------------- |
+| `HookRegistry`       | `hooks/registry.py`  | 从 PVC 目录加载**可选**扩展 Hook，统一 `call(name, *args)` 调度 |
+| `TenantAgentService` | `tenant/service.py`  | **标准租户流水线**（MySQL 驱动），扩展 Hook 仅做 enrich/transform |
+| `AgentBuilder`       | `runtime/builder.py` | 将流水线 + Hook 注入 Agno Agent 的四个 hook 点              |
+| `AgnoRuntime`        | `runtime/engine.py`  | 构建单一动态 Agent，在 `run()` 时把 HTTP 解析结果写入 metadata    |
 
 
 
@@ -117,7 +156,7 @@ Agno Agent.run()
 
 ```
 Worker.start()
-  → HookRegistry(hooks_dir)     # 启动时加载，缺任一 Hook 则 fail-fast
+  → HookRegistry(hooks_dir)     # 可选；目录缺失时仅标准流水线
   → AgnoRuntime.build()
   → AgentBuilder.build_dynamic_agent()
   → AgnoAPIServer 监听 HTTP
@@ -131,98 +170,6 @@ Hook 目录默认：`/etc/hiclaw/hooks`（环境变量 `AGNO_HOOKS_DIR`）。
 
 
 ## 3. HTTP 身份与会话解析
-
-
-
-### 3.1 租户 ID（tenant_id）
-
-文件：`api/identity.py`
-
-```python
-TENANT_ID_HEADERS = ("tenant-id", "x-tenant-id")
-```
-
-优先级（高 → 低）：
-
-1. **请求头**：`tenant-id` 或 `x-tenant-id`（与 aip-hub `WebFrameworkUtils` 对齐）
-2. **Query 参数**：`?tenant_id=...`
-
-对应代码路径：
-
-```
-api/server.py::chat()
-  → resolve_tenant_id(
-        headers=request.headers,
-        query_tenant_id=request.query_params.get("tenant_id"),
-    )
-  → Worker._handle_chat(..., tenant_id)
-  → AgnoRuntime.run(..., tenant_id=tenant_id)
-```
-
-
-
-### 3.2 用户 ID（user_id）
-
-文件：`api/identity.py`
-
-```python
-USER_ID_HEADERS = ("user-id", "x-user-id")
-```
-
-优先级（高 → 低）：
-
-1. **请求头**：`user-id` 或 `x-user-id`
-2. **请求体**：`{"user_id": "..."}`（可选，兼容旧调用方）
-3. **Query 参数**：`?user_id=...`
-
-对应代码路径：
-
-```
-api/server.py::chat()
-  → resolve_user_id(
-        body_user_id=req.user_id,
-        headers=request.headers,
-        query_user_id=request.query_params.get("user_id"),
-    )
-  → AgnoRuntime.run(..., user_id=user_id)
-```
-
-
-
-### 3.3 会话 ID（session_id）
-
-文件：`api/identity.py`
-
-```python
-SESSION_ID_HEADERS = ("session-id", "x-session-id")
-```
-
-优先级（高 → 低）：
-
-1. **请求头**：`session-id` 或 `x-session-id`
-2. **Query 参数**：`?session_id=...`
-
-**不在请求体中传递**（`ChatRequest` 仅含 `message` 与可选 `user_id`）。
-
-对应代码路径：
-
-```
-api/server.py::chat()
-  → resolve_session_id(
-        headers=request.headers,
-        query_session_id=request.query_params.get("session_id"),
-    )
-  → Worker._handle_chat(..., session_id)
-  → AgnoRuntime.run(..., session_id=session_id)
-  → ChatResponse(session_id=resolved_session_id)
-```
-
-未解析到 `session_id` 时的行为：
-
-1. `AgnoRuntime.run()` **不向** Agno 传入 `session_id` 参数（避免传入空字符串）
-2. Agno SDK `initialize_session()` 自动生成 `uuid4()` 作为会话 ID
-3. `RunOutput.session_id` 回传至 `ChatResponse.session_id`，客户端应在后续请求 Header 中带回以续聊
-4. `pre_hook` 通过 `_extract_session_id(session, run_context)` 优先从 Agno `session` 对象读取；若仍为空则跳过 `session_init_hook`
 
 请求示例：
 

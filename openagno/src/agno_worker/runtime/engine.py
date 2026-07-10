@@ -1,4 +1,4 @@
-"""Build a single dynamic Agno Agent from AgentSpec role catalog + hooks."""
+"""Build a single dynamic Agno Agent from AgentSpec role catalog + tenant pipeline."""
 from __future__ import annotations
 
 import asyncio
@@ -9,8 +9,12 @@ from typing import Any
 
 from agno_worker.agentspec.schema import AgentSpec
 from agno_worker.db import create_agno_db
+from agno_worker.hooks.filters import RequestFilterPipeline
+from agno_worker.hooks.protocols import UserContext
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.runtime.builder import AgentBuilder
+from agno_worker.tenant.service import TenantAgentService
+from agno_worker.tenant.store import clear_agent_store_cache
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +42,11 @@ class AgnoRuntime:
         self._db_create_schema = db_create_schema
         self._hooks_dir = hooks_dir
         self._registry = registry or HookRegistry(hooks_dir)
+        self._tenant_service = TenantAgentService(self._registry)
+        self._request_filters = RequestFilterPipeline(self._registry)
         self._db: Any = None
         self._primary_agent: Any = None
         self._agents: dict[str, Any] = {}
-        self._team: Any = None
-        self._workflow: Any = None
         self._builder: AgentBuilder | None = None
 
     @property
@@ -54,6 +58,10 @@ class AgnoRuntime:
         return self._registry
 
     @property
+    def tenant_service(self) -> TenantAgentService:
+        return self._tenant_service
+
+    @property
     def primary_agent(self) -> Any:
         return self._primary_agent
 
@@ -63,14 +71,15 @@ class AgnoRuntime:
 
     def build(self) -> None:
         self._db = self._create_db()
-        self._builder = AgentBuilder(self._registry, self._spec, self._db)
+        self._builder = AgentBuilder(
+            self._registry,
+            self._spec,
+            self._db,
+            tenant_service=self._tenant_service,
+        )
         self._primary_agent = self._builder.build_dynamic_agent()
         agent_name = self._primary_agent.name
         self._agents = {agent_name: self._primary_agent}
-        if self._spec.team:
-            self._team = self._create_team()
-        if self._spec.workflow:
-            self._workflow = self._create_workflow()
         logger.info(
             "Dynamic agent built: name=%s roles=%s",
             agent_name,
@@ -81,23 +90,19 @@ class AgnoRuntime:
         if spec is not None:
             self._spec = spec
         self._registry.reload()
+        self._tenant_service.clear_cache()
+        clear_agent_store_cache()
         self.build()
 
     def reload_hooks(self) -> None:
         self._registry.reload()
+        self._tenant_service.clear_cache()
+        clear_agent_store_cache()
         self.build()
-
-    @property
-    def team(self) -> Any:
-        return self._team
 
     @property
     def agents(self) -> dict[str, Any]:
         return self._agents
-
-    @property
-    def workflow(self) -> Any:
-        return self._workflow
 
     @property
     def db(self) -> Any:
@@ -111,8 +116,8 @@ class AgnoRuntime:
         user_id: str = "",
         tenant_id: str = "",
         metadata: dict[str, Any] | None = None,
+        user_context: UserContext | None = None,
     ) -> tuple[str, str]:
-        """Sync wrapper; MCP tools require the async agent run path."""
         return asyncio.run(
             self.arun(
                 message,
@@ -120,6 +125,7 @@ class AgnoRuntime:
                 user_id=user_id,
                 tenant_id=tenant_id,
                 metadata=metadata,
+                user_context=user_context,
             )
         )
 
@@ -131,13 +137,20 @@ class AgnoRuntime:
         user_id: str = "",
         tenant_id: str = "",
         metadata: dict[str, Any] | None = None,
+        user_context: UserContext | None = None,
     ) -> tuple[str, str]:
-        target = self._resolve_run_target()
-        kwargs = self._build_run_kwargs(
-            session_id=session_id,
+        ctx = user_context or UserContext(
             user_id=user_id,
             tenant_id=tenant_id,
-            metadata=metadata,
+            session_id=session_id,
+        )
+        run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
+        target = self._resolve_run_target()
+        kwargs = self._build_run_kwargs(
+            session_id=ctx.session_id or session_id,
+            user_id=ctx.user_id or user_id,
+            tenant_id=ctx.tenant_id or tenant_id,
+            metadata=run_metadata,
         )
         response = await target.arun(message, **kwargs)
         if hasattr(response, "content"):
@@ -146,9 +159,14 @@ class AgnoRuntime:
             reply = str(response)
         resolved_session_id = (
             str(getattr(response, "session_id", "") or "")
+            or ctx.session_id
             or session_id
         )
-        return reply, resolved_session_id
+        output = self._request_filters.apply_post_filter(
+            ctx,
+            {"reply": reply, "session_id": resolved_session_id},
+        )
+        return str(output.get("reply", reply)), str(output.get("session_id", resolved_session_id))
 
     async def astream(
         self,
@@ -158,21 +176,28 @@ class AgnoRuntime:
         user_id: str = "",
         tenant_id: str = "",
         metadata: dict[str, Any] | None = None,
+        user_context: UserContext | None = None,
         stream_events: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream Agno run events as JSON-serializable dicts for SSE consumers."""
         from agno.run.agent import RunEvent
 
-        target = self._resolve_run_target()
-        kwargs = self._build_run_kwargs(
-            session_id=session_id,
+        ctx = user_context or UserContext(
             user_id=user_id,
             tenant_id=tenant_id,
-            metadata=metadata,
+            session_id=session_id,
+        )
+        run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
+        target = self._resolve_run_target()
+        kwargs = self._build_run_kwargs(
+            session_id=ctx.session_id or session_id,
+            user_id=ctx.user_id or user_id,
+            tenant_id=ctx.tenant_id or tenant_id,
+            metadata=run_metadata,
             stream=True,
             stream_events=stream_events,
         )
-        resolved_session_id = session_id
+        resolved_session_id = ctx.session_id or session_id
+        final_reply_parts: list[str] = []
 
         async for event in target.arun(message, **kwargs):
             if sid := getattr(event, "session_id", None):
@@ -184,7 +209,9 @@ class AgnoRuntime:
             if event_name == RunEvent.run_content.value:
                 content = getattr(event, "content", None)
                 if content is not None and str(content):
-                    yield {"event": "content", "delta": str(content)}
+                    text = str(content)
+                    final_reply_parts.append(text)
+                    yield {"event": "content", "delta": text}
                 continue
 
             if event_name == RunEvent.run_error.value:
@@ -207,7 +234,12 @@ class AgnoRuntime:
                     payload["content"] = str(content)
                 yield payload
 
-        yield {"event": "done", "session_id": resolved_session_id}
+        reply = "".join(final_reply_parts)
+        output = self._request_filters.apply_post_filter(
+            ctx,
+            {"reply": reply, "session_id": resolved_session_id},
+        )
+        yield {"event": "done", "session_id": str(output.get("session_id", resolved_session_id))}
 
     def _build_run_kwargs(
         self,
@@ -236,23 +268,8 @@ class AgnoRuntime:
         return kwargs
 
     def _resolve_run_target(self) -> Any:
-        """Return the executor for chat runs.
-
-        Team/workflow blocks in AgentSpec are parsed but not fully orchestrated yet;
-        always use the single dynamic agent to avoid silently broken Team routing.
-        """
         if self._primary_agent is None:
             raise RuntimeError("No Agno agent configured")
-        if self._team is not None:
-            logger.debug(
-                "AgentSpec defines team mode=%s; using dynamic agent until multi-agent orchestration is wired",
-                getattr(self._spec.team, "mode", ""),
-            )
-        if self._workflow is not None and self._spec.workflow and self._spec.workflow.steps:
-            logger.debug(
-                "AgentSpec defines workflow steps=%d; using dynamic agent until workflow engine is wired",
-                len(self._spec.workflow.steps),
-            )
         return self._primary_agent
 
     def _create_db(self) -> Any:
@@ -265,24 +282,3 @@ class AgnoRuntime:
             session_table=self._db_session_table,
             create_schema=self._db_create_schema,
         )
-
-    def _create_team(self) -> Any:
-        from agno.team import Team
-
-        team_def = self._spec.team
-        assert team_def is not None
-        members = [self._primary_agent] if self._primary_agent else []
-        return Team(
-            name=self._spec.name or "orchestrator",
-            members=members,
-            instructions=team_def.instructions,
-            db=self._db,
-            add_history_to_context=True,
-        )
-
-    def _create_workflow(self) -> Any:
-        from agno.workflow import Workflow
-
-        wf = self._spec.workflow
-        assert wf is not None
-        return Workflow(name=wf.name or "workflow", db=self._db)

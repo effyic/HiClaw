@@ -11,6 +11,7 @@ from rich.panel import Panel
 from agno_worker.agentspec.loader import directory_fingerprint, load_agentspec_or_default
 from agno_worker.api.server import AgnoAPIServer
 from agno_worker.config import WorkerConfig
+from agno_worker.hooks.protocols import UserContext
 from agno_worker.hooks.registry import HookRegistry, hooks_directory_fingerprint
 from agno_worker.runtime.engine import AgnoRuntime
 
@@ -101,6 +102,11 @@ class Worker:
                 pass
 
     async def _load_runtime(self) -> None:
+        import os
+
+        if self.config.agent_db_url:
+            os.environ.setdefault("AGNO_AGENT_DB_URL", self.config.agent_db_url)
+
         spec, from_file = load_agentspec_or_default(
             self.config.agentspec_dir,
             worker_name=self.config.worker_name,
@@ -177,14 +183,21 @@ class Worker:
         session_id: str,
         user_id: str,
         tenant_id: str = "",
+        user_context: UserContext | None = None,
     ) -> tuple[str, str]:
         if not self._runtime:
             raise RuntimeError("runtime not initialized")
+        ctx = user_context or UserContext(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+        )
         return self._runtime.run(
             message,
             session_id=session_id,
             user_id=user_id,
             tenant_id=tenant_id,
+            user_context=ctx,
         )
 
     async def _handle_chat_async(
@@ -193,14 +206,21 @@ class Worker:
         session_id: str,
         user_id: str,
         tenant_id: str = "",
+        user_context: UserContext | None = None,
     ) -> tuple[str, str]:
         if not self._runtime:
             raise RuntimeError("runtime not initialized")
+        ctx = user_context or UserContext(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+        )
         return await self._runtime.arun(
             message,
             session_id=session_id,
             user_id=user_id,
             tenant_id=tenant_id,
+            user_context=ctx,
         )
 
     async def _handle_chat_stream_async(
@@ -210,15 +230,22 @@ class Worker:
         user_id: str,
         tenant_id: str = "",
         *,
+        user_context: UserContext | None = None,
         stream_events: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         if not self._runtime:
             raise RuntimeError("runtime not initialized")
+        ctx = user_context or UserContext(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+        )
         async for chunk in self._runtime.astream(
             message,
             session_id=session_id,
             user_id=user_id,
             tenant_id=tenant_id,
+            user_context=ctx,
             stream_events=stream_events,
         ):
             yield chunk
@@ -239,8 +266,9 @@ class Worker:
             "dynamicAgent": self._runtime.primary_agent.name
             if self._runtime and self._runtime.primary_agent
             else None,
-            "composePolicy": "hooks override AgentSpec when hook returns data",
-            "hooks": registry.sources if registry else {},
+            "composePolicy": "tenant DB config primary; AgentSpec fallback; extension hooks transform",
+            "extensionHooks": registry.sources if registry else {},
+            "agentDbConfigured": bool(self.config.agent_db_url),
             "dbConfigured": bool(self.config.db_url),
         }
 

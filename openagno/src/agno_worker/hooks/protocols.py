@@ -36,91 +36,96 @@ class DBConnection:
     options: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class UserContext:
+    """Caller identity resolved from HTTP headers and request body."""
+
+    user_id: str = ""
+    tenant_id: str = ""
+    session_id: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
 HookFn = Callable[..., Any]
+
+# Optional extension hooks loaded from PVC-mounted directory.
+# Tenant prompt/MCP/skills/workflow are built by standard pipeline first;
+# these hooks may transform the standard output.
+EXTENSION_HOOK_NAMES: tuple[str, ...] = (
+    "enrich_business_context_hook",
+    "transform_prompt_hook",
+    "transform_mcp_servers_hook",
+    "transform_skills_hook",
+    "transform_workflow_hook",
+    "transform_session_state_hook",
+    "mcp_tool_filter_hook",
+    "mcp_connection_hook",
+    "result_processing_hook",
+    "request_pre_filter_hook",
+    "request_post_filter_hook",
+)
 
 
 @runtime_checkable
-class PromptHooks(Protocol):
-    def get_system_prompt_hook(self, run_context: Any, session_state: dict[str, Any]) -> str: ...
+class BusinessContextHooks(Protocol):
+    def enrich_business_context_hook(
+        self, run_context: Any, base_context: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
 
-    def get_instructions_hook(self, run_context: Any, user_profile: dict[str, Any]) -> str: ...
 
-    # Expected shape for WeKnora MCP: tenant_id, provider, knowledge_ids[]
-    def get_context_filter_hook(self, run_context: Any) -> dict[str, Any]: ...
+@runtime_checkable
+class TransformHooks(Protocol):
+    def transform_prompt_hook(
+        self, run_context: Any, prompt_bundle: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    def transform_mcp_servers_hook(
+        self, run_context: Any, servers: list[MCPServerConfig]
+    ) -> list[MCPServerConfig] | None: ...
+
+    def transform_skills_hook(
+        self, run_context: Any, catalog: list[Any]
+    ) -> list[Any] | None: ...
+
+    def transform_workflow_hook(
+        self, run_context: Any, payload: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    def transform_session_state_hook(
+        self, run_context: Any, session_state: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+
+@runtime_checkable
+class RequestFilterHooks(Protocol):
+    def request_pre_filter_hook(
+        self, user_context: UserContext, metadata: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    def request_post_filter_hook(
+        self,
+        user_context: UserContext,
+        run_output: dict[str, Any],
+        run_context: Any = None,
+    ) -> dict[str, Any] | None: ...
 
 
 @runtime_checkable
 class MCPHooks(Protocol):
-    def get_mcp_servers_hook(
-        self, run_context: Any, business_scenario: str
-    ) -> list[MCPServerConfig]: ...
-
     def mcp_tool_filter_hook(self, run_context: Any, available_tools: list[Any]) -> list[Any]: ...
 
     def mcp_connection_hook(self, server_config: MCPServerConfig) -> None: ...
 
 
-@runtime_checkable
-class DataHooks(Protocol):
-    def get_db_connection_hook(self, run_context: Any) -> DBConnection: ...
-
-    def data_query_hook(self, query: str, run_context: Any) -> Any: ...
-
-    def result_processing_hook(self, results: Any, run_context: Any) -> dict[str, Any]: ...
-
-
-@runtime_checkable
-class SessionHooks(Protocol):
-    def session_init_hook(self, session_id: str, user_context: dict[str, Any]) -> None: ...
-
-    def session_update_hook(
-        self, session_state: dict[str, Any], run_context: Any
-    ) -> dict[str, Any]: ...
-
-    def session_cleanup_hook(self, session_id: str) -> None: ...
-
-
-@runtime_checkable
-class SkillHooks(Protocol):
-    def get_skills_hook(self, run_context: Any, user_requirements: str) -> list[Any]: ...
-
-    def skill_instruction_hook(self, skill_name: str, run_context: Any) -> str: ...
-
-    def skill_script_hook(
-        self,
-        skill_name: str,
-        script_name: str,
-        run_context: Any,
-        *,
-        execute: bool = False,
-    ) -> Any: ...
-
-
-# All hook names resolved by HookRegistry.
-HOOK_NAMES: tuple[str, ...] = (
-    "get_system_prompt_hook",
-    "get_instructions_hook",
-    "get_context_filter_hook",
-    "get_mcp_servers_hook",
-    "mcp_tool_filter_hook",
-    "mcp_connection_hook",
-    "get_skills_hook",
-    "skill_instruction_hook",
-    "skill_script_hook",
-    "get_db_connection_hook",
-    "data_query_hook",
-    "result_processing_hook",
-    "session_init_hook",
-    "session_update_hook",
-    "session_cleanup_hook",
-)
-
-
 @dataclass
 class HookSet:
-    """Resolved hook callables keyed by name."""
+    """Resolved optional extension hook callables keyed by name."""
 
     hooks: dict[str, HookFn] = field(default_factory=dict)
 
     def get(self, name: str) -> HookFn | None:
         return self.hooks.get(name)
+
+    def has(self, name: str) -> bool:
+        return name in self.hooks
