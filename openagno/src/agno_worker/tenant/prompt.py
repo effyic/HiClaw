@@ -1,14 +1,21 @@
 """Standard tenant prompt assembly from agno_agent configuration."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from agno_worker.tenant.context import TenantContext, TenantContextResolver
-from agno_worker.tenant.store import AgentStore, workflow_kind, workflow_route_key
+from agno_worker.tenant.store import AgentStore
+
+DEFAULT_KNOWLEDGE_PROVIDER = os.environ.get("AGNO_KNOWLEDGE_PROVIDER", "").strip()
 
 
 class TenantPromptBuilder:
-    """Build system prompt, instructions, and knowledge filters from DB config."""
+    """Build system prompt, instructions, and knowledge filters from DB config.
+
+    Scenario-specific text must come from agno_agent.workflow.prompt_append /
+    instructions_append, or enrich_business_context_hook via prompt_supplements.
+    """
 
     def __init__(
         self,
@@ -29,12 +36,11 @@ class TenantPromptBuilder:
         business = dict(business_context or {})
         state = session_state or getattr(run_context, "session_state", None) or {}
         workflow = cfg.get("workflow") or {}
-        kind = workflow_kind(workflow)
-        route_key = workflow_route_key(workflow)
-        role_label = self._resolve_role_label(cfg, route_key, business)
 
-        system_prompt = self._build_system_prompt(ctx, cfg, state, kind, role_label, business)
-        instructions = self._build_instructions(run_context, ctx, cfg, kind, route_key, role_label)
+        system_prompt = self._build_system_prompt(cfg, ctx, state, workflow, business)
+        instructions = self._build_instructions(
+            run_context, ctx, cfg, workflow, business
+        )
         context_filters = self._build_context_filters(run_context, ctx, cfg, state)
 
         return {
@@ -45,69 +51,74 @@ class TenantPromptBuilder:
             "business_context": business,
         }
 
-    def _resolve_role_label(
+    def _collect_prompt_supplements(
         self,
-        cfg: dict[str, Any],
-        route_key: str | None,
+        workflow: dict[str, Any],
         business: dict[str, Any],
-    ) -> str:
-        if name := business.get("department_name"):
-            return str(name)
-        if route_key:
-            return str(cfg.get("display_name") or route_key)
-        return str(cfg.get("display_name") or "")
+    ) -> dict[str, str]:
+        """Merge DB workflow append fields with hook-provided supplements."""
+        supplements: dict[str, str] = {}
+        for key in ("prompt_append", "instructions_append"):
+            if value := workflow.get(key):
+                target = "system_prompt_append" if key == "prompt_append" else key
+                supplements[target] = str(value).strip()
+        hook_supplements = business.get("prompt_supplements")
+        if isinstance(hook_supplements, dict):
+            for key, value in hook_supplements.items():
+                if value is not None and str(value).strip():
+                    supplements[key] = str(value).strip()
+        return supplements
 
     def _build_system_prompt(
         self,
-        ctx: TenantContext,
         cfg: dict[str, Any],
+        ctx: TenantContext,
         session_state: dict[str, Any],
-        kind: str,
-        role_label: str,
+        workflow: dict[str, Any],
         business: dict[str, Any],
     ) -> str:
-        base = cfg.get("system_prompt") or ""
-        if kind == "triage":
-            catalog = business.get("prompt_supplements", {}).get("triage_catalog")
-            if not catalog:
-                catalog = self._expert_catalog_prompt_block(business)
-            if catalog:
-                base = f"{base}\n\n{catalog}"
-        elif kind == "expert" and role_label:
-            expert_header = business.get("prompt_supplements", {}).get("expert_header")
-            if expert_header:
-                base = f"{base}\n\n{expert_header}"
-            else:
-                base = (
-                    f"{base}\n\n当前科室：{role_label}。"
-                    "请先阅读会话中分诊阶段的对话历史，再开始专科追问。"
-                )
-        role = session_state.get("active_role") or cfg.get("role_code", "default")
-        return f"{base}\n当前角色: {role}（{kind}）。"
+        base = str(cfg.get("system_prompt") or "").strip()
+        supplements = self._collect_prompt_supplements(workflow, business)
+
+        append_parts = [
+            supplements[key]
+            for key in ("system_prompt_append",)
+            if supplements.get(key)
+        ]
+        if append_parts:
+            base = "\n\n".join([base, *append_parts]) if base else "\n\n".join(append_parts)
+
+        role = ctx.role_code or session_state.get("role_code") or cfg.get("role_code", "default")
+        display = cfg.get("display_name") or role
+        role_line = f"当前角色: {display} ({role})。"
+        return f"{base}\n{role_line}" if base else role_line
 
     def _build_instructions(
         self,
         run_context: Any,
         ctx: TenantContext,
         cfg: dict[str, Any],
-        kind: str,
-        route_key: str | None,
-        role_label: str,
+        workflow: dict[str, Any],
+        business: dict[str, Any],
     ) -> str:
         metadata = getattr(run_context, "metadata", None) or {}
         deps = getattr(run_context, "dependencies", None) or {}
         user_profile = deps.get("user_profile") or {}
         tenant_id = user_profile.get("tenant_id") or metadata.get("tenant_id") or ctx.tenant_id
+        supplements = self._collect_prompt_supplements(workflow, business)
+
         parts = [
-            cfg.get("instructions") or "",
+            str(cfg.get("instructions") or "").strip(),
             f"租户标识: {tenant_id}",
-            f"工作流: {kind}",
+            f"角色: {ctx.role_code}",
         ]
-        if role_label and kind == "expert":
-            parts.append(f"当前科室: {role_label} ({route_key or ''})")
+        if route_label := business.get("route_label"):
+            parts.append(f"科室: {route_label}")
         kb = cfg.get("knowledge_ids") or []
         parts.append(f"可用知识库: {', '.join(kb) if kb else '（未启用）'}")
-        return "\n".join(parts)
+        if instructions_append := supplements.get("instructions_append"):
+            parts.append(instructions_append)
+        return "\n".join(part for part in parts if part)
 
     def _build_context_filters(
         self,
@@ -117,33 +128,18 @@ class TenantPromptBuilder:
         session_state: dict[str, Any],
     ) -> dict[str, Any]:
         metadata = getattr(run_context, "metadata", None) or {}
-        return {
-            "tenant_id": metadata.get("tenant_id") or ctx.tenant_id,
-            "provider": "weknora",
-            "knowledge_ids": list(cfg.get("knowledge_ids") or []),
-            "role": session_state.get("active_role") or cfg.get("role_code", "default"),
-            "workflow": cfg.get("workflow") or {},
-        }
-
-    def _expert_catalog_prompt_block(self, business: dict[str, Any]) -> str:
-        """Build triage catalog from expert agents; hook may override via triage_departments."""
-        items = business.get("triage_departments") or business.get("expert_agents") or []
-        if not items:
-            return "当前租户未配置任何专家 Agent，分诊阶段不得输出 departments 推荐。"
-        codes = ", ".join(
-            str(item.get("department_code") or item.get("route_key") or "")
-            for item in items
-            if item.get("department_code") or item.get("route_key")
+        workflow = cfg.get("workflow") or {}
+        provider = (
+            str(workflow.get("knowledge_provider") or "").strip()
+            or DEFAULT_KNOWLEDGE_PROVIDER
         )
-        lines = [
-            "已配置专家 Agent（分诊 **只能** 从下列科室推荐，禁止推荐列表外科室）：",
-            f"允许 department_code: {codes}",
-        ]
-        for item in items:
-            code = item.get("department_code") or item.get("route_key") or ""
-            name = item.get("department_name") or item.get("display_name") or code
-            lines.append(
-                f"- {code}: {name} "
-                f"(Agent: {item.get('role_code', '')}) — {item.get('description', '')}"
-            )
-        return "\n".join(lines)
+        filters: dict[str, Any] = {
+            "tenant_id": metadata.get("tenant_id") or ctx.tenant_id,
+            "knowledge_ids": list(cfg.get("knowledge_ids") or []),
+            "role": ctx.role_code or session_state.get("role_code") or cfg.get("role_code", "default"),
+            "role_code": ctx.role_code,
+            "workflow": workflow,
+        }
+        if provider:
+            filters["provider"] = provider
+        return filters

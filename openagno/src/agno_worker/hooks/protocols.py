@@ -43,6 +43,7 @@ class UserContext:
     user_id: str = ""
     tenant_id: str = ""
     session_id: str = ""
+    role_code: str = ""
     headers: dict[str, str] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 

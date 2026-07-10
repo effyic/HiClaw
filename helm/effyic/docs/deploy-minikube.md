@@ -95,42 +95,45 @@ kubectl get manager.hiclaw.io -n default
 
 浏览器打开 [http://localhost](http://localhost) ，用户名 `admin`，密码见 `values.yaml` 中 `credentials.adminPassword`（默认 `admin`）。
 
-## 6. Agno-Worker（ChatAi）
+## 6. ChatAI（独立 Chart，可选）
 
-Agno Worker 是独立对话运行时，通过 **Worker CR** 由 hiclaw-controller 部署，不依赖 Matrix / MinIO。医疗场景 AgentSpec 由 Controller 从 Nacos 拉取并写入 ConfigMap 挂载到 Pod。
+ChatAI **不在** `helm/effyic` 根 Chart 中安装，而是进入子目录 `chatai/` 单独部署（依赖已运行的 HiClaw 核心）。
 
-### 6.1 PostgreSQL（会话持久化）
+### 6.1 前置
 
-Agno Worker 需要 PostgreSQL 持久化对话，挂载外部数据源：
+- §3 核心安装已完成
+- Nacos 已上传 AgentSpec `medical-orchestrator`（标签 `stable`）
+- 宿主机 PostgreSQL（会话库）与 MySQL（`agno_worker` 库）可用
 
-```yaml
-# docker-compose 示例（network_mode: host）
-# POSTGRES_DB=vector_store  POSTGRES_USER=root  POSTGRES_PASSWORD=postgresql  端口 5432
-```
-
-Worker CR 中通过 `spec.env.AGNO_DB_URL` 指向宿主机 PG。minikube Pod 访问宿主机需使用 **Docker 网关 IP**（与 Nacos MySQL 相同）：
+### 6.2 安装 ChatAI
 
 ```bash
-# 查询网关 IP（通常为 192.168.49.1）
-docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'
+cd helm/effyic/chatai
+chmod +x install.sh
+
+GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
+export AGNO_DB_URL="postgresql+psycopg://root:postgresql@${GATEWAY_IP}:5432/vector_store"
+
+./install.sh
 ```
 
-
-
-### 6.2 注册 AgentSpec（二选一）
-
-**方式 A — Nacos（推荐）**
-
-在 Nacos 控制台（`kubectl port-forward svc/effyic-nacos 8848:8848`）上传 `openagno/examples/medical-orchestrator.agentspec.yaml` 为 AgentSpec `medical-orchestrator`，并发布 `stable` 标签。
-
-**方式 B — file:// 本地验证**
-
-将 AgentSpec 目录复制到 controller Pod，Worker CR 的 `package` 使用 `file://` URI：
+或手动：
 
 ```bash
-CTRL_POD=$(kubectl get pod -l app.kubernetes.io/name=effyic-controller -o jsonpath='{.items[0].metadata.name}')
-kubectl exec "$CTRL_POD" -- mkdir -p /tmp/agentspec/effyic-chatai
-kubectl cp openagno/examples/. "$CTRL_POD:/tmp/agentspec/effyic-chatai/"
-# 部署时设置 PACKAGE_URI=file:///tmp/agentspec/effyic-chatai
+helm upgrade --install effyic-chatai helm/effyic/chatai \
+  --namespace default \
+  --set hiclaw.releaseName=effyic \
+  --set globalEnv.AGNO_DB_URL="${AGNO_DB_URL}" \
+  --set dbInit.mysql.hostAliasIP="${GATEWAY_IP}"
 ```
+
+### 6.3 验证
+
+```bash
+kubectl get worker.hiclaw.io effyic-chatai
+kubectl get ingress,wasmplugin -l app.kubernetes.io/component=chatai
+kubectl get secret effyic-chatai-chatai-auth -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d ; echo
+```
+
+详见 [chatai/README.md](../chatai/README.md)。
 

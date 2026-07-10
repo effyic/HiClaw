@@ -1,0 +1,14 @@
+{{- if .Values.dbInit.enabled | default true }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chatai.fullname" . }}-sql
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: chatai
+data:
+  init.sql: |
+{{ .Files.Get "files/init.sql" | indent 4 }}
+{{- end }}

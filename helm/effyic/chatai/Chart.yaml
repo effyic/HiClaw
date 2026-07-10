@@ -1,0 +1,20 @@
+apiVersion: v2
+name: chatai
+description: ChatAI (Agno Worker) — deploy on top of an existing HiClaw / Effyic installation
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - agno
+  - chatai
+  - hiclaw
+  - ai-agent
+
+home: https://github.com/agentscope-ai/HiClaw
+sources:
+  - https://github.com/agentscope-ai/HiClaw
+
+maintainers:
+  - name: HiClaw Team
+    url: https://github.com/agentscope-ai/HiClaw

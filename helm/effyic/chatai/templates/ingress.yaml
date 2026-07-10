@@ -1,0 +1,28 @@
+{{- if .Values.gateway.enabled | default true }}
+{{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
+{{- $ctx := dict "root" $ "worker" $worker }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "chatai.ingressName" $ctx }}
+  namespace: {{ include "chatai.namespace" $ }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: chatai
+spec:
+  ingressClassName: {{ $.Values.gateway.ingressClassName | default "higress" | quote }}
+  rules:
+    - host: {{ include "chatai.gatewayHost" $ctx | quote }}
+      http:
+        paths:
+          - path: {{ $.Values.gateway.path | default "/" | quote }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "chatai.serviceName" $ctx }}
+                port:
+                  number: {{ $worker.servicePort | default 8090 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,87 @@
+# =============================================================================
+# ChatAI Helm Chart — values.yaml
+# =============================================================================
+# Prerequisite: HiClaw / Effyic core is already installed (helm install effyic …).
+# This chart deploys Agno Worker CR, MySQL schema, Higress route, and API token.
+# =============================================================================
+
+global:
+  namespace: ""  # defaults to .Release.Namespace; should match HiClaw release namespace
+
+# ── Reference to existing HiClaw installation ─────────────────────────────
+hiclaw:
+  releaseName: effyic
+  namespace: ""       # defaults to global.namespace
+  controllerName: ""  # defaults to {releaseName}-controller
+
+# ── Nacos (AgentSpec source; defaults to HiClaw-managed Nacos Service) ────
+nacos:
+  host: ""            # default: {hiclaw.releaseName}-nacos.{namespace}.svc.cluster.local
+  port: 8848
+  namespaceId: public
+  username: nacos
+  password: nacos
+
+agentspec:
+  dataId: medical-orchestrator
+  label: stable
+
+credentials:
+  defaultModel: qwen3.6-plus
+
+worker:
+  image:
+    repository: hiclaw/agno-worker
+    tag: latest
+
+# Shared env for all workers (workers[].env overrides)
+globalEnv:
+  AGNO_REQUIRE_TENANT_ID: "true"
+  AGNO_DB_URL: ""       # required — PostgreSQL session store
+  # AGNO_AGENT_DB_URL auto-built from dbInit.mysql when unset
+
+resources: {}
+
+auth:
+  token: ""             # leave empty to auto-generate (stored in Secret)
+  secretKey: CHATAI_API_TOKEN
+
+dbInit:
+  enabled: true
+  image: mysql:8.0
+  backoffLimit: 3
+  mysql:
+    host: host.minikube.internal
+    hostAliasIP: ""     # minikube: docker gateway IP for hostAliases on init Job
+    port: 3306
+    database: agno_worker
+    username: root
+    password: mysql
+
+gateway:
+  enabled: true
+  ingressClassName: higress
+  path: /
+  keyAuth:
+    enabled: true
+    allowQuery: true
+    headerKeys:
+      - Authorization
+      - x-api-key
+    pluginUrl: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/key-auth:1.0.0
+
+workers:
+  - name: effyic-chatai
+    model: ""
+    image: ""
+    package: ""
+    containerManaged: true
+    servicePort: 8090
+    targetPort: 8090
+    gatewayHost: ""
+    gatewayConsumer: ""
+    env: {}
+    resources: {}
+    expose:
+      - port: 8090
+        protocol: http

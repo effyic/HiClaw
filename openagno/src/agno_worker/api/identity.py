@@ -7,6 +7,7 @@ from typing import Mapping
 USER_ID_HEADERS = ("user-id", "x-user-id")
 TENANT_ID_HEADERS = ("tenant-id", "x-tenant-id")
 SESSION_ID_HEADERS = ("session-id", "x-session-id")
+ROLE_CODE_HEADERS = ("role-code", "x-role-code")
 
 
 def _first_non_empty(*values: str | None) -> str:
@@ -60,4 +61,16 @@ def resolve_session_id(
     return _first_non_empty(
         _header_value(headers or {}, SESSION_ID_HEADERS),
         query_session_id,
+    )
+
+
+def resolve_role_code(
+    *,
+    headers: Mapping[str, str] | None = None,
+    query_role_code: str = "",
+) -> str:
+    """Prefer gateway-injected headers, then query string."""
+    return _first_non_empty(
+        _header_value(headers or {}, ROLE_CODE_HEADERS),
+        query_role_code,
     )

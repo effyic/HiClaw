@@ -1,0 +1,35 @@
+{{- if and (.Values.gateway.enabled | default true) (.Values.gateway.keyAuth.enabled | default true) }}
+{{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
+{{- $ctx := dict "root" $ "worker" $worker }}
+{{- $consumer := $worker.gatewayConsumer | default $worker.name }}
+---
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: {{ include "chatai.wasmPluginName" $ctx }}
+  namespace: {{ include "chatai.namespace" $ }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: chatai
+spec:
+  defaultConfig:
+    global_auth: false
+    consumers:
+      - name: {{ $consumer | quote }}
+        credential: {{ include "chatai.authToken" $ctx | quote }}
+    keys:
+      {{- range $.Values.gateway.keyAuth.headerKeys | default (list "Authorization" "x-api-key") }}
+      - {{ . | quote }}
+      {{- end }}
+    in_header: true
+    in_query: {{ $.Values.gateway.keyAuth.allowQuery | default true }}
+  matchRules:
+    - ingress:
+        - {{ printf "%s/%s" (include "chatai.namespace" $) (include "chatai.ingressName" $ctx) | quote }}
+      config:
+        allow:
+          - {{ $consumer | quote }}
+  url: {{ $.Values.gateway.keyAuth.pluginUrl | default "oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/key-auth:1.0.0" | quote }}
+{{- end }}
+{{- end }}

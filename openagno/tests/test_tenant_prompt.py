@@ -26,7 +26,8 @@ def _agent_db_env() -> None:
     os.environ["AGNO_AGENT_DB_URL"] = AGENT_DB_URL
 
 
-def test_prompt_builder_includes_triage_catalog() -> None:
+def test_prompt_builder_without_hook_uses_agent_config_only() -> None:
+    """Standard flow must not inject scenario-specific catalog text."""
     from agno_worker.tenant.service import TenantAgentService
 
     service = TenantAgentService()
@@ -35,8 +36,39 @@ def test_prompt_builder_includes_triage_catalog() -> None:
         session_state={"active_role": "triage", "phase": "triage"},
     )
     bundle = service.build_prompt_bundle(ctx, ctx.session_state)
-    assert "cardiology" in bundle["system_prompt"]
+    assert "cardiology" not in bundle["system_prompt"]
+    assert "分诊" in bundle["system_prompt"] or "triage" in bundle["system_prompt"].lower()
     assert bundle["context_filters"]["tenant_id"] == "tenant-a"
+
+
+def test_prompt_supplements_via_business_context() -> None:
+    from agno_worker.tenant.context import TenantContext, TenantContextResolver
+    from unittest.mock import patch
+
+    builder = TenantPromptBuilder()
+    ctx = _FakeRunContext(
+        metadata={"tenant_id": "tenant-a"},
+        session_state={"active_role": "triage"},
+    )
+    fake_cfg = {
+        "system_prompt": "分诊助手",
+        "instructions": "请分诊",
+        "workflow": {"kind": "triage"},
+        "knowledge_ids": [],
+        "role_code": "triage",
+    }
+    fake_tenant_ctx = TenantContext(
+        tenant_id="tenant-a",
+        role_code="triage",
+        agent_config=fake_cfg,
+    )
+    business = {"prompt_supplements": {"system_prompt_append": "允许 department_code: cardiology"}}
+
+    with patch.object(TenantContextResolver, "resolve", return_value=fake_tenant_ctx):
+        bundle = builder.build_prompt_bundle(ctx, ctx.session_state, business_context=business)
+
+    assert "cardiology" in bundle["system_prompt"]
+    assert "分诊助手" in bundle["system_prompt"]
 
 
 def test_transform_prompt_hook_applied() -> None:

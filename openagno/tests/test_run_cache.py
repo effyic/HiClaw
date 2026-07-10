@@ -26,7 +26,7 @@ def test_prepare_run_context_caches_prompt_bundle() -> None:
         "mcp_enabled": False,
         "mcp_config": None,
     }
-    store.list_expert_agents.return_value = []
+    store.list_agents.return_value = []
 
     service = TenantAgentService(store=store)
     ctx = _FakeRunContext(metadata={"tenant_id": "tenant-a"})
@@ -53,7 +53,7 @@ def test_resolve_business_context_uses_run_cache() -> None:
         "mcp_enabled": False,
         "mcp_config": None,
     }
-    store.list_expert_agents.return_value = [{"route_key": "cardiology"}]
+    store.list_agents.return_value = [{"role_code": "expert_cardiology"}]
 
     service = TenantAgentService(store=store)
     ctx = _FakeRunContext(metadata={"tenant_id": "tenant-a"})
@@ -64,4 +64,4 @@ def test_resolve_business_context_uses_run_cache() -> None:
 
     assert business1["tenant_id"] == "tenant-a"
     assert business1 is business2
-    assert store.list_expert_agents.call_count == 1
+    assert store.list_agents.call_count == 1

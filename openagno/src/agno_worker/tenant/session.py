@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from agno_worker.tenant.context import TenantContextResolver
-from agno_worker.tenant.store import workflow_kind, workflow_phase
+from agno_worker.tenant.store import workflow_phase
 
 
 class TenantSessionManager:
@@ -41,8 +41,7 @@ class TenantSessionManager:
 
         ctx = self._resolver.resolve(run_context)
         cfg = ctx.agent_config
-        workflow = dict(cfg.get("workflow") or self._resolver.resolve_workflow(run_context))
-        kind = workflow_kind(workflow)
+        workflow = dict(cfg.get("workflow") or {})
         tenant_id = ctx.tenant_id
         role_code = ctx.role_code
 
@@ -52,11 +51,6 @@ class TenantSessionManager:
         merged["workflow"] = workflow
 
         phase = workflow_phase(workflow) or incoming.get("phase")
-        if not phase:
-            if kind == "expert":
-                phase = "consultation"
-            elif kind == "triage":
-                phase = "triage"
         if phase:
             merged["phase"] = phase
 

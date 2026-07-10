@@ -1,585 +1,304 @@
 # Agno Worker — 多租户动态智能体
 
-基于 Agno SDK 的通用型 Agent Worker：**内置标准租户流水线**（MySQL `agno_agent` 表驱动）负责 Prompt、MCP、Session 等核心逻辑；**可选 PVC 扩展 Hook** 负责业务数据 enrich 与 transform。
+基于 Agno SDK 的通用型 Agent Worker：**内置标准租户流水线**（MySQL `agno_agent` 表驱动）负责 Prompt、MCP、Session、Skill 等核心逻辑；**可选 PVC 扩展 Hook** 在标准流水线输出之上做 enrich / transform / filter。
 
-## 架构分层
+核心设计：**只构建一个动态 Agent**（`cache_callables=False`），每次 `run()` 通过 callable `instructions` / `tools` 按租户/会话/角色实时组装配置；AgentSpec 仅作角色目录 fallback。
+
+---
+
+## 1. 架构分层
 
 ```
-HTTP (/v1/chat)
+HTTP (/v1/chat, /v1/chat/stream)
   → api/identity.py           解析 tenant-id / user-id / session-id
   → hooks/filters.py          tenant_id 必填校验（可配置）+ 可选 pre/post filter
   → runtime/engine.py         单一动态 Agent
   → runtime/builder.py        pre_hook / instructions / tools / post_hook
   → tenant/service.py         标准流水线编排 + run-scoped 缓存
+      ├── tenant/context.py   租户 / 角色 / workflow 解析
       ├── tenant/store.py     agno_agent 配置（连接池 + TTL 缓存）
-      ├── tenant/prompt.py    Prompt 组装
+      ├── tenant/prompt.py    Prompt 与 knowledge_filters 组装
       ├── tenant/mcp.py       MCP 服务器配置
-      └── tenant/session.py   会话状态更新
-  → hooks/registry.py         可选 PVC 扩展 Hook（enrich / transform / filter）
-```
-
-
-
-## 配置来源优先级
-
-
-| 组件                           | 主配置源                                   | Fallback        |
-| ---------------------------- | -------------------------------------- | --------------- |
-| system_prompt / instructions | MySQL `agno_agent`                     | AgentSpec 角色目录  |
-| MCP 服务器                      | `agno_agent.mcp_config`                | 环境变量 WeKnora 默认 |
-| 业务上下文                        | 标准流水线 + `enrich_business_context_hook` | —               |
-
-
-
-
-## 扩展 Hook（PVC 可选，共 11 个）
-
-挂载目录：`AGNO_HOOKS_DIR`（默认 `/etc/hiclaw/hooks`）。目录不存在时 Worker 仍可启动，仅运行标准流水线。
-
-
-| Hook                           | 用途                      |
-| ------------------------------ | ----------------------- |
-| `enrich_business_context_hook` | 注入租户业务表数据（如 department） |
-| `transform_prompt_hook`        | Prompt 二次变换             |
-| `transform_mcp_servers_hook`   | MCP 列表变换                |
-| `transform_skills_hook`        | Skill catalog 变换        |
-| `transform_workflow_hook`      | 会话 workflow 变换          |
-| `transform_session_state_hook` | session_state 变换        |
-| `mcp_tool_filter_hook`         | 工具裁剪                    |
-| `mcp_connection_hook`          | MCP 连接前鉴权               |
-| `result_processing_hook`       | 数据查询结果格式化               |
-| `request_pre_filter_hook`      | 请求准入                    |
-| `request_post_filter_hook`     | 响应后处理                   |
-
-
-
-
-## 关键环境变量
-
-
-| 变量                            | 说明                               | 默认                  |
-| ----------------------------- | -------------------------------- | ------------------- |
-| `AGNO_AGENT_DB_URL`           | 租户配置 MySQL（`agno_agent` 表）       | 必填                  |
-| `AGNO_DB_URL`                 | 会话持久化 DB                         | Postgres            |
-| `AGNO_REQUIRE_TENANT_ID`      | 生产环境建议 `true`，缺失 tenant_id 时拒绝请求 | `false`             |
-| `AGNO_AGENT_CONFIG_CACHE_TTL` | agno_agent 配置 TTL 缓存（秒）          | `60`                |
-| `AGNO_AGENT_DB_POOL_SIZE`     | MySQL 连接池大小                      | `5`                 |
-| `AGNO_HOOKS_DIR`              | 扩展 Hook PVC 挂载路径                 | `/etc/hiclaw/hooks` |
-
-
-
-
-## 单次 Run 执行流程
-
-```
-pre_hook
-  → prepare_run_context()     一次性解析租户上下文、Prompt、MCP、Skill catalog
-  → 写入 run_context.dependencies / knowledge_filters
-instructions()                读取 run-scoped 缓存中的 prompt_bundle
-tools()                       读取缓存中的 mcp_servers / skill_catalog
-Agent 推理 + 工具调用
-post_hook                     更新 session_state（phase / role / workflow）
+      ├── tenant/skills.py    Skill 目录扫描
+      ├── tenant/session.py   会话状态更新
+      └── tenant/data.py      数据查询工具（当前 stub）
+  → hooks/registry.py         可选 PVC 扩展 Hook
 ```
 
 ---
 
 
 
-# Agno Worker Hook 执行链路
-
-本文档说明 `agno_worker` 中租户级动态智能体的 Hook 机制：入口、租户 ID 传递路径、全部 Hook 定义与调用时机，以及 Hook 与 AgentSpec 的合并策略。
-
----
+## 2. 配置来源
 
 
+| 组件                           | 主配置源                                   | Fallback                 |
+| ---------------------------- | -------------------------------------- | ------------------------ |
+| system_prompt / instructions | MySQL `agno_agent`                     | AgentSpec 当前角色           |
+| knowledge_filters            | `agno_agent.knowledge_ids`             | AgentSpec 角色 `knowledge` |
+| MCP 服务器                      | `agno_agent.mcp_config`                | 环境变量 WeKnora 默认          |
+| Skill catalog                | 文件系统 `AGNO_SKILLS_DIR`                 | —                        |
+| 业务上下文                        | 标准流水线 + `enrich_business_context_hook` | —                        |
 
-## 1. 总体架构
 
-```
-HTTP 请求 (/v1/chat)
-    │
-    ▼
-api/server.py          ← 解析 tenant-id / user-id / session-id 请求头
-    │
-    ▼
-worker.py              ← _handle_chat → runtime.run()
-    │
-    ▼
-runtime/engine.py      ← 写入 run_context.metadata（tenant_id / user_id / session_id）
-    │
-    ▼
-Agno Agent.run()
-    │
-    ├─ pre_hooks       ← AgentBuilder._make_pre_hook()
-    ├─ instructions()  ← 动态 Prompt（Hook + AgentSpec）
-    ├─ tools()         ← 动态 MCP / Skills / Data 工具
-    ├─ Agent 推理执行
-    └─ post_hooks      ← AgentBuilder._make_post_hook()
-```
-
-核心设计：**只构建一个动态 Agent**，每次 `run()` 通过 Hook 按租户/会话/角色实时决定 Prompt、工具、知识库过滤条件等，AgentSpec 仅作 fallback 角色目录。
+**合并规则**（`hooks/compose.py`）：租户流水线产出与 AgentSpec 通过 `pick_hook_or_spec()` 合并——流水线有数据则用流水线，否则用 AgentSpec。
 
 ---
 
 
 
-## 2. 入口与调用链
+## 3. HTTP 入口与身份解析
 
 
-
-### 2.1 HTTP 入口
-
-
-| 端点                                     | 文件              | 说明                                     |
-| -------------------------------------- | --------------- | -------------------------------------- |
-| `POST /v1/chat``POST /v1/chat/stream` | `api/server.py` | 主对话入口，解析身份/会话后调用 `Worker._handle_chat` |
-| `GET /status`                          | `api/server.py` | 返回 Hook 加载来源、指纹等运行时状态                  |
-| `GET /health`                          | `api/server.py` | 健康检查                                   |
-
-
-
-
-### 2.2 Hook 注册表入口
-
-
-| 组件                   | 文件                   | 说明                                                |
-| -------------------- | -------------------- | ------------------------------------------------- |
-| `HookRegistry`       | `hooks/registry.py`  | 从 PVC 目录加载**可选**扩展 Hook，统一 `call(name, *args)` 调度 |
-| `TenantAgentService` | `tenant/service.py`  | **标准租户流水线**（MySQL 驱动），扩展 Hook 仅做 enrich/transform |
-| `AgentBuilder`       | `runtime/builder.py` | 将流水线 + Hook 注入 Agno Agent 的四个 hook 点              |
-| `AgnoRuntime`        | `runtime/engine.py`  | 构建单一动态 Agent，在 `run()` 时把 HTTP 解析结果写入 metadata    |
+| 端点                     | 说明                   |
+| ---------------------- | -------------------- |
+| `POST /v1/chat`        | 同步对话                 |
+| `POST /v1/chat/stream` | SSE 流式对话             |
+| `GET /health`          | 健康检查                 |
+| `GET /status`          | 运行时状态（Hook 加载来源、指纹等） |
 
 
 
 
-### 2.3 Worker 启动流程
+### 3.1 请求头优先级
 
-```
-Worker.start()
-  → HookRegistry(hooks_dir)     # 可选；目录缺失时仅标准流水线
-  → AgnoRuntime.build()
-  → AgentBuilder.build_dynamic_agent()
-  → AgnoAPIServer 监听 HTTP
-  → _watch_loop()               # 每 30s 检测 Hook/AgentSpec 文件变更并热重载
-```
-
-Hook 目录默认：`/etc/hiclaw/hooks`（环境变量 `AGNO_HOOKS_DIR`）。
-
----
+文件：`api/identity.py`
 
 
+| 字段           | 请求头                           | 备选                |
+| ------------ | ----------------------------- | ----------------- |
+| `tenant_id`  | `tenant-id` / `x-tenant-id`   | Query `tenant_id` |
+| `user_id`    | `user-id` / `x-user-id`       | Body → Query      |
+| `session_id` | `session-id` / `x-session-id` | Query             |
 
-## 3. HTTP 身份与会话解析
 
 请求示例：
 
 ```bash
-curl -X POST http://localhost:8090/v1/chat \
+curl -X POST http://localhost:8090/v1/chat/stream \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
-  -H "session-id: conv-123" \
+  -H "tenant-id: tenant-a" \
   -H "user-id: alice" \
-  -H "tenant-id: t-001" \
+  -H "session-id: conv-123" \
+  -H "role_code: default" \
   -d '{"message": "你好"}'
 ```
 
 
 
-### 3.4 写入 RunContext
+### 3.2 tenant_id 必填校验
 
-文件：`runtime/engine.py`
+当 `AGNO_REQUIRE_TENANT_ID=true` 时，请求在扩展 Hook 之前即被拒绝（HTTP 403）。未设置时，缺失 tenant_id 会在租户解析阶段 fallback 到 `"default"`。
 
-```python
-run_metadata = dict(metadata or {})
-kwargs = {"metadata": run_metadata}
-if session_id:
-    run_metadata["session_id"] = session_id
-    kwargs["session_id"] = session_id
-if user_id:
-    run_metadata["user_id"] = user_id
-    kwargs["user_id"] = user_id
-if tenant_id:
-    run_metadata["tenant_id"] = tenant_id
-response = target.run(message, **kwargs)
-resolved_session_id = response.session_id or session_id
-return reply, resolved_session_id
-```
+### 3.3 写入 RunContext
 
-此后 Hook 通过以下方式读取租户 ID：
-
-
-| 读取位置                | 路径                                                      |
-| ------------------- | ------------------------------------------------------- |
-| 直接读 metadata        | `run_context.metadata["tenant_id"]`                     |
-| 读 dependencies      | `run_context.dependencies["tenant"]["tenant_id"]`       |
-| 读 user_profile      | `run_context.dependencies["user_profile"]["tenant_id"]` |
-| 读 knowledge_filters | `run_context.knowledge_filters.get("tenant_id")`        |
-
-
-
-
-### 3.5 dependencies 组装
-
-文件：`hooks/compose.py::build_run_dependencies()`
-
-在 `pre_hook` 阶段执行，将 metadata 与 knowledge_filters 合并：
+`runtime/engine.py` 将 HTTP 解析结果写入 `metadata` 和 Agno run kwargs：
 
 ```python
-tenant_id = metadata.get("tenant_id") or knowledge_filters.get("tenant_id") or ""
-run_context.dependencies = {
-    "tenant": {
-        "tenant_id": str(tenant_id),
-        "knowledge_ids": [...],
-        "provider": "weknora",
-    },
-    "user_profile": {
-        "user_id": "...",
-        "tenant_id": "...",
-    },
-}
+run_metadata["tenant_id"] = tenant_id   # 非空时
+run_metadata["user_id"] = user_id
+run_metadata["session_id"] = session_id
+run_metadata["role_code"] = role_code
 ```
 
-**注意**：Hook 也可在 `get_context_filter_hook` 返回值中设置 `tenant_id`，会进入 `knowledge_filters` 并参与上述合并。
+Hook 开发者可通过以下路径读取租户信息：
+
+
+| 读取位置              | 路径                                                      |
+| ----------------- | ------------------------------------------------------- |
+| metadata          | `run_context.metadata["tenant_id"]`                     |
+| dependencies      | `run_context.dependencies["tenant"]["tenant_id"]`       |
+| user_profile      | `run_context.dependencies["user_profile"]["tenant_id"]` |
+| knowledge_filters | `run_context.knowledge_filters.get("tenant_id")`        |
+
 
 ---
 
 
 
-## 4. Hook 加载机制
-
-
-
-### 4.1 模块扫描顺序
-
-`HookRegistry` 按以下文件名顺序查找 Hook 实现（找到即停）：
+## 4. 单次 Run 执行流程
 
 ```
-hooks.py → prompt.py → mcp.py → skills.py → session.py → data.py → __init__.py
+RequestFilterPipeline.apply_pre_filter()   # tenant_id 校验 + request_pre_filter_hook
+
+Agno Agent.run()
+  │
+  ├─ pre_hook (AgentBuilder._make_pre_hook)
+  │    ├─ TenantSessionManager.init_session()
+  │    ├─ TenantAgentService.prepare_run_context()   # 一次性解析，写入 run-scoped 缓存
+  │    │    ├─ TenantContextResolver → AgentStore (MySQL)
+  │    │    ├─ enrich_business_context_hook (可选)
+  │    │    ├─ TenantPromptBuilder → transform_prompt_hook (可选)
+  │    │    ├─ TenantMCPBuilder → transform_mcp_servers_hook (可选)
+  │    │    └─ TenantSkillCatalog → transform_skills_hook (可选)
+  │    ├─ knowledge_filters → run_context.knowledge_filters
+  │    └─ build_run_dependencies() → run_context.dependencies
+  │
+  ├─ instructions() (callable)
+  │    ├─ get_prompt_bundle()          # 读 run-scoped 缓存
+  │    └─ pick_hook_or_spec vs AgentSpec + skill_catalog_summary
+  │
+  ├─ tools() (callable)
+  │    ├─ get_mcp_servers()            # 读 run-scoped 缓存
+  │    ├─ build_mcp_tools + mcp_connection_hook (可选)
+  │    ├─ DynamicSkillsManager.build_tools
+  │    ├─ TenantDataProvider.get_tools
+  │    └─ mcp_tool_filter_hook (可选)
+  │
+  ├─ LLM 推理 + 工具调用
+  │
+  └─ post_hook
+       └─ TenantSessionManager.build_session_updates()
+            → transform_workflow_hook / transform_session_state_hook (可选)
+
+RequestFilterPipeline.apply_post_filter()  # request_post_filter_hook (可选)
 ```
 
-每个模块内以**同名函数**导出，例如 `prompt.py` 中定义 `get_system_prompt_hook`。
-
-### 4.2 必须实现的 Hook（15 个）
-
-启动时 **全部必须存在**，否则抛出 `HookLoadError` 并拒绝启动：
-
-
-| #   | Hook 名称                   | 协议分组    |
-| --- | ------------------------- | ------- |
-| 1   | `get_system_prompt_hook`  | Prompt  |
-| 2   | `get_instructions_hook`   | Prompt  |
-| 3   | `get_context_filter_hook` | Prompt  |
-| 4   | `get_mcp_servers_hook`    | MCP     |
-| 5   | `mcp_tool_filter_hook`    | MCP     |
-| 6   | `mcp_connection_hook`     | MCP     |
-| 7   | `get_skills_hook`         | Skills  |
-| 8   | `skill_instruction_hook`  | Skills  |
-| 9   | `skill_script_hook`       | Skills  |
-| 10  | `get_db_connection_hook`  | Data    |
-| 11  | `data_query_hook`         | Data    |
-| 12  | `result_processing_hook`  | Data    |
-| 13  | `session_init_hook`       | Session |
-| 14  | `session_update_hook`     | Session |
-| 15  | `session_cleanup_hook`    | Session |
-
-
-接口定义见 `hooks/protocols.py`。
-
-### 4.3 热重载
-
-`Worker._watch_loop()` 对 Hook 目录做 SHA256 指纹比对，变更时调用 `AgnoRuntime.reload_hooks()` 重新 import 并重建 Agent。
+同一次 run 内，`TenantContextResolver.resolve()` 与 `prepare_run_context()` 结果通过 run-scoped 缓存复用，避免 pre_hook 与 instructions/tools 重复查库。
 
 ---
 
 
 
-## 5. 单次对话执行流程
+## 5. 标准租户流水线（内置，不可通过 PVC 替换）
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API as api/server.py
-    participant Worker
-    participant Runtime as runtime/engine.py
-    participant Agent as Agno Agent
-    participant Pre as pre_hook
-    participant Instr as instructions()
-    participant Tools as tools()
-    participant Post as post_hook
-    participant Registry as HookRegistry
+以下逻辑由 `tenant/` 模块实现，**不**通过 PVC Hook 加载。如需定制，应修改 MySQL `agno_agent` 配置，或使用对应的 transform / enrich 扩展 Hook。
 
-    Client->>API: POST /v1/chat<br/>Header: tenant-id, user-id, session-id
-    API->>API: resolve_tenant_id() / resolve_user_id() / resolve_session_id()
-    API->>Worker: _handle_chat(msg, session, user, tenant)
-    Worker->>Runtime: run(..., session_id, user_id, tenant_id)
-    Runtime->>Agent: run(message, metadata={...}, session_id?, user_id?)
 
-    Agent->>Pre: _pre_hook
-    Pre->>Registry: session_init_hook (session_id 非空时)
-    Pre->>Registry: get_context_filter_hook
-    Pre->>Registry: get_skills_hook
-    Pre->>Pre: build_run_dependencies(tenant)
+| 能力        | 实现                  | 说明                                                        |
+| --------- | ------------------- | --------------------------------------------------------- |
+| 租户/角色解析   | `tenant/context.py` | metadata → session_state → factory_input → `"default"`    |
+| 配置加载      | `tenant/store.py`   | 多级 fallback：tenant+role → expert route → triage → default |
+| Prompt 组装 | `tenant/prompt.py`  | system_prompt、instructions、context_filters                |
+| MCP 配置    | `tenant/mcp.py`     | 从 `mcp_config` 构建 MCPServerConfig 列表                      |
+| Skill 扫描  | `tenant/skills.py`  | 扫描 `AGNO_SKILLS_DIR`，按 tenant_ids 过滤                      |
+| 会话管理      | `tenant/session.py` | init_session、build_session_updates                        |
+| 数据工具      | `tenant/data.py`    | `query_tenant_data`（当前为配置摘要 stub）                         |
 
-    Agent->>Instr: _instructions(run_context)
-    Instr->>Registry: get_system_prompt_hook
-    Instr->>Registry: get_instructions_hook
 
-    Agent->>Tools: _tools(run_context)
-    Tools->>Registry: get_mcp_servers_hook
-    Tools->>Registry: mcp_connection_hook (per server)
-    Tools->>Registry: skill_instruction_hook (按需)
-    Tools->>Registry: data_query_hook (Agent 调用工具时)
-    Tools->>Registry: mcp_tool_filter_hook
+---
 
-    Agent->>Agent: LLM 推理 + 工具调用
 
-    Agent->>Post: _post_hook
-    Post->>Registry: session_update_hook
-    Agent->>Client: {reply, session_id}
+
+## 6. 扩展 Hook（PVC 可选，共 11 个）
+
+挂载目录：`AGNO_HOOKS_DIR`（默认 `/etc/hiclaw/hooks`）。
+
+- 目录**不存在**时 Worker 正常启动，仅运行标准流水线
+- 每个 Hook **独立可选**，缺省不报错
+- 文件变更后约 30s 热重载（SHA256 指纹）
+
+
+
+### 6.1 加载机制
+
+`HookRegistry` 对每个 Hook 名按以下文件名顺序扫描，**找到即停**：
+
+```
+hooks.py → filters.py → transform.py → business.py → prompt.py
+→ mcp.py → skills.py → session.py → data.py → __init__.py
+```
+
+模块内以**同名函数**导出，例如 `business.py` 中定义 `enrich_business_context_hook`。
+
+接口定义与类型见 `hooks/protocols.py` 的 `EXTENSION_HOOK_NAMES`。
+
+### 6.2 Hook 一览
+
+
+| Hook                           | 调用时机                | 调用位置                                  | 作用                                          |
+| ------------------------------ | ------------------- | ------------------------------------- | ------------------------------------------- |
+| `enrich_business_context_hook` | prepare_run_context | `tenant/service.py`                   | 在标准 business_context 上注入业务表数据（如 department） |
+| `transform_prompt_hook`        | prepare_run_context | `tenant/service.py`                   | 变换标准 prompt_bundle                          |
+| `transform_mcp_servers_hook`   | prepare_run_context | `tenant/service.py`                   | 变换 MCP 服务器列表                                |
+| `transform_skills_hook`        | prepare_run_context | `tenant/service.py`                   | 变换 Skill catalog                            |
+| `transform_workflow_hook`      | post_hook           | `tenant/service.py`                   | 变换 workflow / session_state 更新              |
+| `transform_session_state_hook` | post_hook           | `tenant/service.py`                   | 变换 session_state 更新                         |
+| `mcp_connection_hook`          | MCP 连接前             | `tenant/service.py` → `mcp/loader.py` | 鉴权、env/headers 注入                           |
+| `mcp_tool_filter_hook`         | tools 组装后           | `tenant/service.py`                   | 裁剪最终工具列表                                    |
+| `result_processing_hook`       | 数据查询后               | `tenant/service.py`                   | 格式化 `query_tenant_data` 结果                  |
+| `request_pre_filter_hook`      | HTTP 请求前            | `hooks/filters.py`                    | 准入控制；返回 `{"allowed": False}` 拒绝             |
+| `request_post_filter_hook`     | HTTP 响应后            | `hooks/filters.py`                    | 修改 reply / session_id                       |
+
+
+**transform 类 Hook 返回值规则**：返回 `None` 表示不修改，使用标准流水线产出；返回非 `None` 则替换对应字段。
+
+### 6.3 enrich_business_context_hook
+
+```python
+def enrich_business_context_hook(
+    run_context: Any,
+    base_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    base_context 含: tenant_id, role_code, workflow_kind, route_key,
+                     agent_config, expert_agents
+    返回 partial dict，合并进 business_context。
+    """
+```
+
+参考实现：`examples/hooks/business.py`（department 表 enrich）。
+
+### 6.4 request_pre_filter_hook
+
+```python
+def request_pre_filter_hook(
+    user_context: UserContext,
+    metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    # 通过: return {"metadata": {...}} 或 return None
+    # 拒绝: return {"allowed": False, "reason": "..."}
 ```
 
 
 
----
+### 6.5 transform_prompt_hook
 
-
-
-## 6. 全部 Hook 详解
-
-
-
-### 6.1 Prompt 类（3 个）
-
-
-
-#### `get_system_prompt_hook(run_context, session_state) -> str`
-
-
-| 属性           | 值                                          |
-| ------------ | ------------------------------------------ |
-| **调用时机**     | 每次生成 instructions 时                        |
-| **调用位置**     | `runtime/builder.py::_make_instructions()` |
-| **作用**       | 返回租户/角色级 System Prompt                     |
-| **Fallback** | AgentSpec 当前角色的 `role` 字段                  |
-| **合并规则**     | Hook 返回非空字符串则覆盖 Spec                       |
-
-
-
-
-#### `get_instructions_hook(run_context, user_profile) -> str`
-
-
-| 属性                  | 值                                                                     |
-| ------------------- | --------------------------------------------------------------------- |
-| **调用时机**            | 每次生成 instructions 时                                                   |
-| **调用位置**            | `runtime/builder.py::_make_instructions()`                            |
-| **作用**              | 返回用户/租户相关的补充指令                                                        |
-| **入参 user_profile** | 来自 `run_context.dependencies["user_profile"]`，含 `tenant_id`、`user_id` |
-| **Fallback**        | AgentSpec 当前角色的 `instructions` 字段                                     |
-
-
-
-
-#### `get_context_filter_hook(run_context) -> dict`
-
-
-| 属性           | 值                                                                        |
-| ------------ | ------------------------------------------------------------------------ |
-| **调用时机**     | pre_hook 阶段（最早的数据面 Hook）                                                 |
-| **调用位置**     | `runtime/builder.py::_make_pre_hook()`                                   |
-| **作用**       | 设置知识库检索过滤条件，写入 `run_context.knowledge_filters`                           |
-| **期望返回格式**   | `{"tenant_id": "...", "provider": "weknora", "knowledge_ids": ["kb-1"]}` |
-| **Fallback** | AgentSpec 角色的 `knowledge` 配置                                             |
-
+```python
+def transform_prompt_hook(
+    run_context: Any,
+    prompt_bundle: dict[str, Any],
+) -> dict[str, Any] | None:
+    # prompt_bundle 含: system_prompt, instructions, context_filters,
+    #                   agent_config, business_context
+```
 
 ---
 
 
 
-### 6.2 MCP 类（3 个）
+## 7. PVC 挂载目录结构（推荐）
 
+与 `examples/hooks/` 对齐：
 
+```
+/etc/hiclaw/hooks/
+├── business.py     # enrich_business_context_hook
+├── transform.py    # transform_prompt/mcp/skills/workflow/session_state_hook
+├── filters.py      # request_pre/post_filter_hook
+├── mcp.py          # mcp_connection_hook, mcp_tool_filter_hook
+└── ...
+```
 
-#### `get_mcp_servers_hook(run_context, business_scenario) -> list[MCPServerConfig]`
+空实现（返回 `None`）即可，不影响标准流水线运行：
 
-
-| 属性                    | 值                                                       |
-| --------------------- | ------------------------------------------------------- |
-| **调用时机**              | 每次解析 tools 时                                            |
-| **调用位置**              | `runtime/builder.py::_make_tools()`                     |
-| **作用**                | 按租户/场景返回 MCP 服务器列表                                      |
-| **business_scenario** | 默认取 `metadata["business_scenario"]`，否则为当前 `active_role` |
-| **Fallback**          | Hook 为空时不加载 MCP（Spec 中 `tools` 字段仅为声明，不自动加载）            |
-
-
-
-
-#### `mcp_connection_hook(server_config) -> None`
-
-
-| 属性       | 值                                  |
-| -------- | ---------------------------------- |
-| **调用时机** | 每个 MCP Server 实例化前                 |
-| **调用位置** | `mcp/loader.py::build_mcp_tools()` |
-| **作用**   | 连接前钩子（鉴权、env 注入、连接预热等）             |
-
-
-
-
-#### `mcp_tool_filter_hook(run_context, available_tools) -> list`
-
-
-| 属性           | 值                                   |
-| ------------ | ----------------------------------- |
-| **调用时机**     | 所有工具组装完成后                           |
-| **调用位置**     | `runtime/builder.py::_make_tools()` |
-| **作用**       | 按租户过滤/裁剪最终工具列表（MCP + Skills + Data） |
-| **Fallback** | 返回 `None` 时使用原列表                    |
-
+```python
+def transform_prompt_hook(run_context, prompt_bundle):
+    return None
+```
 
 ---
 
 
 
-### 6.3 Skills 类（3 个）
-
-
-
-#### `get_skills_hook(run_context, user_requirements) -> list`
-
-
-| 属性       | 值                                      |
-| -------- | -------------------------------------- |
-| **调用时机** | pre_hook + tools 解析（catalog 为空时）       |
-| **调用位置** | `skills/manager.py::resolve_catalog()` |
-| **作用**   | 返回当前 run 可用的 Skill 元数据列表               |
-| **缓存**   | 按 `{tenant_id}                         |
-
-
-
-
-#### `skill_instruction_hook(skill_name, run_context) -> str`
-
-
-| 属性       | 值                                     |
-| -------- | ------------------------------------- |
-| **调用时机** | Agent 调用 `get_skill_instructions` 工具时 |
-| **调用位置** | `skills/manager.py`                   |
-| **作用**   | 按需加载 Skill 完整指令正文                     |
-
-
-
-
-#### `skill_script_hook(skill_name, script_name, run_context, *, execute=False) -> Any`
-
-
-| 属性       | 值                                   |
-| -------- | ----------------------------------- |
-| **调用时机** | Agent 调用 `get_skill_script` 工具时     |
-| **调用位置** | `skills/manager.py`                 |
-| **作用**   | 读取或执行 Skill 脚本（`execute=True` 时不缓存） |
-
-
----
-
-
-
-### 6.4 Data 类（3 个）
-
-
-
-#### `get_db_connection_hook(run_context) -> DBConnection`
-
-
-| 属性       | 值                                         |
-| -------- | ----------------------------------------- |
-| **调用时机** | ⚠️ **当前框架未主动调用**（仅要求加载）                   |
-| **协议定义** | `hooks/protocols.py`                      |
-| **预期用途** | 租户级 DB 连接配置，供 `data_query_hook` 内部或未来扩展使用 |
-
-
-
-
-#### `data_query_hook(query, run_context) -> Any`
-
-
-| 属性       | 值                               |
-| -------- | ------------------------------- |
-| **调用时机** | Agent 调用 `query_mysql_data` 工具时 |
-| **调用位置** | `data/mysql_provider.py`        |
-| **作用**   | 执行租户数据查询                        |
-
-
-
-
-#### `result_processing_hook(results, run_context) -> dict`
-
-
-| 属性       | 值                                |
-| -------- | -------------------------------- |
-| **调用时机** | `data_query_hook` 返回后立即调用        |
-| **调用位置** | `data/mysql_provider.py`         |
-| **作用**   | 格式化查询结果，期望含 `{"text": "..."}` 字段 |
-
-
----
-
-
-
-### 6.5 Session 类（3 个）
-
-
-
-#### `session_init_hook(session_id, user_context) -> None`
-
-
-| 属性               | 值                                      |
-| ---------------- | -------------------------------------- |
-| **调用时机**         | 每次 run 的 pre_hook 开头                   |
-| **调用位置**         | `runtime/builder.py::_make_pre_hook()` |
-| **user_context** | `{"user_id", "session_id"}`            |
-| **作用**           | 会话初始化（外部存储、租户上下文绑定等）                   |
-
-
-
-
-#### `session_update_hook(session_state, run_context) -> dict`
-
-
-| 属性       | 值                                                          |
-| -------- | ---------------------------------------------------------- |
-| **调用时机** | 每次 run 的 post_hook                                         |
-| **调用位置** | `runtime/builder.py::_make_post_hook()`                    |
-| **作用**   | 返回 dict 合并进 `run_context.session_state`（如切换 `active_role`） |
-
-
-
-
-#### `session_cleanup_hook(session_id) -> None`
-
-
-| 属性       | 值                       |
-| -------- | ----------------------- |
-| **调用时机** | ⚠️ **当前框架未主动调用**（仅要求加载） |
-| **预期用途** | 会话销毁/过期清理               |
-
-
----
-
-
-
-## 7. Hook 与 AgentSpec 合并策略
+## 8. AgentSpec 合并策略
 
 文件：`hooks/compose.py`
 
 ```python
-def has_hook_data(value):
-    # None → False
-    # "" → False
-    # 非空 str / dict / list → True
-
 def pick_hook_or_spec(hook_value, spec_value):
-    # Hook 有数据 → 用 Hook
+    # 租户流水线 / transform hook 有数据 → 用 hook_value
     # 否则 → 用 AgentSpec fallback
 ```
 
@@ -589,99 +308,103 @@ def pick_hook_or_spec(hook_value, spec_value):
 
 
 
-## 8. RunContext 关键字段（Hook 开发者参考）
+## 9. RunContext 关键字段
 
-Hook 函数收到的 `run_context` 是 Agno SDK 的 RunContext，pre_hook 执行后包含：
-
-
-| 字段                              | 来源               | 说明                                                       |
-| ------------------------------- | ---------------- | -------------------------------------------------------- |
-| `metadata["tenant_id"]`         | HTTP 解析          | 租户 ID；未提供时为空                                             |
-| `metadata["session_id"]`        | HTTP 解析 / Agno   | 请求携带时写入 metadata；未携带时由 Agno 生成，pre_hook 从 `session` 对象读取 |
-| `metadata["user_id"]`           | HTTP 解析          | 用户 ID；未提供时为空                                             |
-| `metadata["user_requirements"]` | pre_hook 从用户消息提取 | 用于 Skill 匹配                                              |
-| `user_id`                       | Agno run kwargs  | 同 metadata                                               |
-| `session_state`                 | Agno 持久化         | 含 `active_role` 等                                        |
-| `knowledge_filters`             | pre_hook 写入      | WeKnora MCP 知识检索参数                                       |
-| `dependencies["tenant"]`        | pre_hook 写入      | 租户结构化信息                                                  |
-| `dependencies["user_profile"]`  | pre_hook 写入      | 传给 instructions Hook                                     |
-| `dependencies["skill_catalog"]` | pre_hook 写入      | Skill 元数据列表                                              |
-| `dependencies["role_catalog"]`  | Agent 构建时写入      | 可用角色名列表                                                  |
+pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 
 
----
-
-
-
-## 9. 外部 Hook 实现示例（PVC 挂载）
-
-推荐目录结构：
-
-```
-/etc/hiclaw/hooks/
-├── prompt.py      # get_system_prompt_hook, get_instructions_hook, get_context_filter_hook
-├── mcp.py         # get_mcp_servers_hook, mcp_tool_filter_hook, mcp_connection_hook
-├── skills.py      # get_skills_hook, skill_instruction_hook, skill_script_hook
-├── data.py        # get_db_connection_hook, data_query_hook, result_processing_hook
-└── session.py     # session_init_hook, session_update_hook, session_cleanup_hook
-```
-
-`get_context_filter_hook` 租户示例：
-
-```python
-def get_context_filter_hook(run_context):
-    tenant_id = (run_context.metadata or {}).get("tenant_id", "")
-    # 按 tenant_id 查库或配置中心获取 knowledge_ids
-    return {
-        "tenant_id": tenant_id,
-        "provider": "weknora",
-        "knowledge_ids": lookup_knowledge_ids(tenant_id),
-    }
-```
-
-未实现但必须存在的 Hook 可提供空实现：
-
-```python
-def session_cleanup_hook(session_id: str) -> None:
-    pass
-
-def get_db_connection_hook(run_context):
-    from agno_worker.hooks.protocols import DBConnection
-    return DBConnection(url="", driver="mysql")
-```
-
----
-
-
-
-## 10. 错误处理
-
-
-| 异常                   | 触发场景                             | HTTP 响应                |
-| -------------------- | -------------------------------- | ---------------------- |
-| `HookLoadError`      | Hook 目录缺失、模块 import 失败、Hook 函数缺失 | 500（启动失败或 chat 时）      |
-| `HookExecutionError` | Hook 运行时抛错                       | 500，`detail` 含 hook 名称 |
+| 字段                                  | 来源               | 说明                                     |
+| ----------------------------------- | ---------------- | -------------------------------------- |
+| `metadata["tenant_id"]`             | HTTP 解析          | 租户 ID                                  |
+| `metadata["user_id"]`               | HTTP 解析          | 用户 ID                                  |
+| `metadata["session_id"]`            | HTTP / Agno      | 会话 ID                                  |
+| `metadata["user_requirements"]`     | pre_hook 从用户消息提取 | Skill 匹配                               |
+| `session_state`                     | Agno 持久化         | 含 `active_role`、`phase`、`workflow` 等   |
+| `knowledge_filters`                 | pre_hook 写入      | WeKnora MCP 知识检索参数                     |
+| `dependencies["tenant"]`            | pre_hook 写入      | `{tenant_id, knowledge_ids, provider}` |
+| `dependencies["user_profile"]`      | pre_hook 写入      | `{user_id, tenant_id}`                 |
+| `dependencies["skill_catalog"]`     | pre_hook 写入      | Skill 元数据列表                            |
+| `dependencies["business_context"]`  | pre_hook 写入      | 含 enrich hook 注入的业务数据                  |
+| `dependencies["_tenant_run_cache"]` | 内部               | run-scoped 缓存，勿依赖其结构                   |
 
 
 ---
 
 
 
-## 11. 关键源文件索引
+## 10. 环境变量
 
 
-| 文件                       | 职责                                          |
-| ------------------------ | ------------------------------------------- |
-| `api/identity.py`        | tenant / user / session ID 解析（请求头优先）        |
-| `api/server.py`          | HTTP 入口，`/v1/chat` 参数解析与响应封装                |
-| `worker.py`              | Worker 生命周期、热重载、chat 转发                     |
-| `runtime/engine.py`      | Agent 构建与 run，HTTP 身份字段 → metadata / kwargs |
-| `runtime/builder.py`     | **Hook 主要调用点**（pre/post/instructions/tools） |
-| `hooks/registry.py`      | Hook 加载与 `call()` 调度                        |
-| `hooks/protocols.py`     | Hook 接口与类型定义                                |
-| `hooks/compose.py`       | Hook/Spec 合并、tenant dependencies 组装         |
-| `mcp/loader.py`          | MCP 工具构建 + `mcp_connection_hook`            |
-| `skills/manager.py`      | Skill Hook 调用与缓存                            |
-| `data/mysql_provider.py` | Data Hook 封装为 Agno tool                     |
+| 变量                            | 说明                         | 默认                      |
+| ----------------------------- | -------------------------- | ----------------------- |
+| `AGNO_AGENT_DB_URL`           | 租户配置 MySQL（`agno_agent` 表） | 必填                      |
+| `AGNO_DB_URL`                 | 会话持久化 DB                   | Postgres                |
+| `AGNO_REQUIRE_TENANT_ID`      | 缺失 tenant_id 时拒绝请求         | `false`                 |
+| `AGNO_AGENT_CONFIG_CACHE_TTL` | agno_agent 配置 TTL 缓存（秒）    | `60`                    |
+| `AGNO_AGENT_DB_POOL_SIZE`     | MySQL 连接池大小                | `5`                     |
+| `AGNO_AGENT_DB_POOL_OVERFLOW` | 连接池 overflow               | `10`                    |
+| `AGNO_HOOKS_DIR`              | 扩展 Hook PVC 挂载路径           | `/etc/hiclaw/hooks`     |
+| `AGNO_AGENTSPEC_DIR`          | AgentSpec YAML 目录          | `/etc/hiclaw/agentspec` |
+| `AGNO_SKILLS_DIR`             | Skill 文件目录                 | `/etc/hiclaw/skills`    |
+| `AGNO_CONTROL_PORT`           | HTTP 端口                    | `8090`                  |
+| `AGNO_SPEC_WATCH_INTERVAL`    | AgentSpec/Hook 热重载间隔（秒）    | `30`                    |
+
+
+---
+
+
+
+## 11. Worker 启动与热重载
+
+```
+Worker.start()
+  → HookRegistry(hooks_dir)          # 可选；目录缺失时仅标准流水线
+  → AgnoRuntime.build()
+  → AgentBuilder.build_dynamic_agent()
+  → AgnoAPIServer 监听 HTTP
+  → _watch_loop()                    # 检测 AgentSpec / Hook 文件变更并热重载
+```
+
+热重载时清空 `AgentStore` TTL 缓存并重置 MySQL 连接池。
+
+---
+
+
+
+## 12. 错误处理
+
+
+| 异常                     | 触发场景                                                  | HTTP 响应                |
+| ---------------------- | ----------------------------------------------------- | ---------------------- |
+| `RequestRejectedError` | tenant_id 缺失（`AGNO_REQUIRE_TENANT_ID`）或 pre_filter 拒绝 | 403                    |
+| `HookLoadError`        | 代码主动 `registry.call()` 未加载的 Hook                      | 500                    |
+| `HookExecutionError`   | 扩展 Hook 运行时抛错                                         | 500，`detail` 含 hook 名称 |
+
+
+PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
+
+---
+
+
+
+## 13. 关键源文件索引
+
+
+| 文件                   | 职责                              |
+| -------------------- | ------------------------------- |
+| `api/identity.py`    | tenant / user / session ID 解析   |
+| `api/server.py`      | HTTP 入口                         |
+| `worker.py`          | Worker 生命周期、热重载                 |
+| `runtime/engine.py`  | 单一动态 Agent 构建与 run              |
+| `runtime/builder.py` | pre/post/instructions/tools 注入点 |
+| `tenant/service.py`  | 标准流水线编排 + 扩展 Hook 调度            |
+| `tenant/context.py`  | 租户上下文解析（含 run-scoped 缓存）        |
+| `tenant/store.py`    | MySQL agno_agent 配置             |
+| `tenant/db.py`       | MySQL 连接池                       |
+| `hooks/registry.py`  | PVC 扩展 Hook 加载                  |
+| `hooks/protocols.py` | Hook 接口与类型定义                    |
+| `hooks/compose.py`   | 流水线/Spec 合并、dependencies 组装     |
+| `hooks/filters.py`   | 请求 pre/post filter              |
+| `examples/hooks/`    | PVC Hook 参考实现                   |
 
 

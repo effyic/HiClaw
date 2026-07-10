@@ -150,6 +150,7 @@ class AgnoRuntime:
             session_id=ctx.session_id or session_id,
             user_id=ctx.user_id or user_id,
             tenant_id=ctx.tenant_id or tenant_id,
+            role_code=ctx.role_code,
             metadata=run_metadata,
         )
         response = await target.arun(message, **kwargs)
@@ -192,6 +193,7 @@ class AgnoRuntime:
             session_id=ctx.session_id or session_id,
             user_id=ctx.user_id or user_id,
             tenant_id=ctx.tenant_id or tenant_id,
+            role_code=ctx.role_code,
             metadata=run_metadata,
             stream=True,
             stream_events=stream_events,
@@ -247,6 +249,7 @@ class AgnoRuntime:
         session_id: str = "",
         user_id: str = "",
         tenant_id: str = "",
+        role_code: str = "",
         metadata: dict[str, Any] | None = None,
         stream: bool = False,
         stream_events: bool = False,
@@ -265,6 +268,8 @@ class AgnoRuntime:
             kwargs["user_id"] = user_id
         if tenant_id:
             run_metadata["tenant_id"] = tenant_id
+        if role_code:
+            run_metadata["role_code"] = role_code
         return kwargs
 
     def _resolve_run_target(self) -> Any:

@@ -37,27 +37,23 @@ def test_store_loads_default_tenant() -> None:
 
 def test_store_loads_tenant_a_triage() -> None:
     store = AgentStore()
-    cfg = store.load_agent_resolved("tenant-a", role_code="triage", kind="triage")
+    cfg = store.load_agent_resolved("tenant-a", role_code="triage")
     assert cfg["role_code"] == "triage"
-    assert cfg["workflow"]["kind"] == "triage"
 
 
-def test_store_lists_expert_agents() -> None:
+def test_store_lists_agents() -> None:
     store = AgentStore()
-    experts = store.list_expert_agents("tenant-a")
-    codes = {item["route_key"] for item in experts}
-    assert "cardiology" in codes
+    agents = store.list_agents("tenant-a")
+    role_codes = {item["role_code"] for item in agents}
+    assert "expert_cardiology" in role_codes
 
 
-def test_context_resolver_loads_expert_by_route() -> None:
+def test_context_resolver_loads_expert_by_role_code() -> None:
     resolver = TenantContextResolver()
     ctx = _FakeRunContext(
-        metadata={"tenant_id": "tenant-a"},
-        session_state={
-            "workflow": {"kind": "expert", "route_key": "cardiology", "phase": "consultation"},
-            "role_code": "expert_cardiology",
-        },
+        metadata={"tenant_id": "tenant-a", "role_code": "expert_cardiology"},
     )
     resolved = resolver.resolve(ctx)
     assert resolved.tenant_id == "tenant-a"
-    assert resolved.agent_config["workflow"]["kind"] == "expert"
+    assert resolved.role_code == "expert_cardiology"
+    assert resolved.agent_config["role_code"] == "expert_cardiology"

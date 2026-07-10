@@ -7,19 +7,17 @@ from typing import Any
 import pymysql.cursors
 
 from agno_worker.tenant.cache import TTLCache, _MISSING
-from agno_worker.tenant.db import agent_db_connection, agent_db_url, mysql_settings, reset_engine
-
-DEFAULT_WORKFLOW: dict[str, Any] = {"kind": "default"}
+from agno_worker.tenant.db import agent_db_connection, agent_db_url, reset_engine
 
 DEFAULT_ROW: dict[str, Any] = {
     "tenant_id": "default",
     "role_code": "default",
-    "workflow": dict(DEFAULT_WORKFLOW),
+    "workflow": {},
     "display_name": "默认租户",
     "description": "",
     "system_prompt": "你是默认租户助手。",
     "instructions": "提供通用帮助。",
-    "knowledge_ids": ["weknora-kb-general"],
+    "knowledge_ids": [],
     "mcp_enabled": False,
     "mcp_config": None,
 }
@@ -48,19 +46,7 @@ def _parse_json_object(raw: Any) -> dict[str, Any]:
 
 
 def parse_workflow(raw: Any) -> dict[str, Any]:
-    workflow = _parse_json_object(raw)
-    kind = str(workflow.get("kind") or "default").strip() or "default"
-    workflow["kind"] = kind
-    return workflow
-
-
-def workflow_kind(workflow: dict[str, Any] | None) -> str:
-    return str((workflow or {}).get("kind") or "default")
-
-
-def workflow_route_key(workflow: dict[str, Any] | None) -> str | None:
-    key = (workflow or {}).get("route_key")
-    return str(key).strip() if key else None
+    return _parse_json_object(raw)
 
 
 def workflow_phase(workflow: dict[str, Any] | None) -> str | None:
@@ -106,21 +92,6 @@ def _row_to_config(row: dict[str, Any], tenant_id: str | None = None) -> dict[st
     }
 
 
-def _expert_agent_summary(row: dict[str, Any], tenant_id: str) -> dict[str, Any] | None:
-    workflow = parse_workflow(row.get("workflow"))
-    route_key = workflow_route_key(workflow)
-    if not route_key:
-        return None
-    return {
-        "tenant_id": tenant_id,
-        "role_code": str(row.get("role_code") or ""),
-        "route_key": route_key,
-        "display_name": str(row.get("display_name") or route_key),
-        "description": str(row.get("description") or ""),
-        "workflow": workflow,
-    }
-
-
 class AgentStore:
     """MySQL-backed tenant agent configuration store (agno_agent table only)."""
 
@@ -138,21 +109,14 @@ class AgentStore:
         tenant_id: str,
         *,
         role_code: str = "default",
-        kind: str | None = None,
-        route_key: str | None = None,
     ) -> dict[str, Any]:
-        cache_key = f"agent:{tenant_id}:{role_code}:{kind}:{route_key}"
+        cache_key = f"agent:{tenant_id}:{role_code}"
         cached = self._cache.get(cache_key)
         if cached is not _MISSING:
             return cached
 
         try:
-            config = _load_agent_resolved_uncached(
-                tenant_id,
-                role_code=role_code,
-                kind=kind,
-                route_key=route_key,
-            )
+            config = _load_agent_resolved_uncached(tenant_id, role_code=role_code)
         except Exception as exc:
             raise RuntimeError(
                 f"connect agent database failed ({agent_db_url()}): {exc}"
@@ -160,17 +124,6 @@ class AgentStore:
 
         self._cache.set(cache_key, config)
         return config
-
-    def list_expert_agents(self, tenant_id: str) -> list[dict[str, Any]]:
-        """List enabled expert agents for triage routing (from agno_agent only)."""
-        cache_key = f"experts:{tenant_id}"
-        cached = self._cache.get(cache_key)
-        if cached is not _MISSING:
-            return cached
-
-        experts = list_expert_agents(tenant_id)
-        self._cache.set(cache_key, experts)
-        return experts
 
     def list_enabled_tenants(self) -> list[str]:
         return list_enabled_tenants()
@@ -183,8 +136,6 @@ def _load_agent_resolved_uncached(
     tenant_id: str,
     *,
     role_code: str = "default",
-    kind: str | None = None,
-    route_key: str | None = None,
 ) -> dict[str, Any]:
     with agent_db_connection() as conn:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
@@ -193,31 +144,6 @@ def _load_agent_resolved_uncached(
                 cur.execute(
                     f"{_AGENT_SELECT} AND tenant_id = %s AND role_code = %s LIMIT 1",
                     (tenant_id, role_code),
-                )
-                row = cur.fetchone()
-
-            if row is None and route_key and (
-                kind == "expert" or role_code.startswith("expert")
-            ):
-                cur.execute(
-                    f"{_AGENT_SELECT} AND tenant_id = %s "
-                    "AND JSON_UNQUOTE(JSON_EXTRACT(workflow, '$.kind')) = 'expert' "
-                    "AND JSON_UNQUOTE(JSON_EXTRACT(workflow, '$.route_key')) = %s LIMIT 1",
-                    (tenant_id, route_key),
-                )
-                row = cur.fetchone()
-                if row is None:
-                    cur.execute(
-                        f"{_AGENT_SELECT} AND tenant_id = %s AND role_code = %s LIMIT 1",
-                        (tenant_id, f"expert_{route_key}"),
-                    )
-                    row = cur.fetchone()
-
-            if row is None and kind == "triage":
-                cur.execute(
-                    f"{_AGENT_SELECT} AND tenant_id = %s "
-                    "AND JSON_UNQUOTE(JSON_EXTRACT(workflow, '$.kind')) = 'triage' LIMIT 1",
-                    (tenant_id,),
                 )
                 row = cur.fetchone()
 
@@ -235,27 +161,6 @@ def _load_agent_resolved_uncached(
         return _row_to_config(dict(DEFAULT_ROW))
 
     return _row_to_config(row, tenant_id=tenant_id)
-
-
-def list_expert_agents(tenant_id: str) -> list[dict[str, Any]]:
-    with agent_db_connection() as conn:
-        with conn.cursor(pymysql.cursors.DictCursor) as cur:
-            cur.execute(
-                f"""
-                {_AGENT_SELECT}
-                  AND tenant_id = %s
-                  AND JSON_UNQUOTE(JSON_EXTRACT(workflow, '$.kind')) = 'expert'
-                ORDER BY JSON_UNQUOTE(JSON_EXTRACT(workflow, '$.route_key')), role_code
-                """,
-                (tenant_id,),
-            )
-            rows = cur.fetchall()
-            result: list[dict[str, Any]] = []
-            for row in rows:
-                summary = _expert_agent_summary(row, tenant_id)
-                if summary is not None:
-                    result.append(summary)
-            return result
 
 
 def list_enabled_tenants() -> list[str]:
@@ -296,29 +201,16 @@ def list_agents(tenant_id: str | None = None) -> list[dict[str, Any]]:
                     """
                 )
             rows = cur.fetchall()
-            result = []
-            for row in rows:
-                workflow = parse_workflow(row.get("workflow"))
-                tid = str(row["tenant_id"])
-                result.append(
-                    {
-                        "tenant_id": tid,
-                        "role_code": str(row.get("role_code") or "default"),
-                        "workflow": workflow,
-                        "display_name": str(row.get("display_name") or row["tenant_id"]),
-                        "description": str(row.get("description") or ""),
-                    }
-                )
-            kind_order = {"triage": 0, "expert": 1, "default": 2, "general": 3}
-            result.sort(
-                key=lambda item: (
-                    item["tenant_id"],
-                    kind_order.get(workflow_kind(item["workflow"]), 9),
-                    workflow_route_key(item["workflow"]) or "",
-                    item["role_code"],
-                )
-            )
-            return result
+            return [
+                {
+                    "tenant_id": str(row["tenant_id"]),
+                    "role_code": str(row.get("role_code") or "default"),
+                    "workflow": parse_workflow(row.get("workflow")),
+                    "display_name": str(row.get("display_name") or row["tenant_id"]),
+                    "description": str(row.get("description") or ""),
+                }
+                for row in rows
+            ]
 
 
 def clear_agent_store_cache() -> None:

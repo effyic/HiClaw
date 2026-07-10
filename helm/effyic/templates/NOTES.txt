@@ -35,6 +35,11 @@ Namespace: {{ include "hiclaw.namespace" . }}
    Console (Nacos 3.x): http://localhost:{{ .Values.nacos.service.consolePort | default 8080 }}  ({{ .Values.nacos.auth.username }}/{{ .Values.nacos.auth.password }})
 {{- end }}
 
+5. Optional — ChatAI (Agno Worker, separate chart):
+
+   cd helm/effyic/chatai && ./install.sh
+   See chatai/README.md
+
 ========================================================================
 Uninstalling
 ========================================================================

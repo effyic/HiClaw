@@ -152,10 +152,8 @@ class TenantAgentService:
         base: dict[str, Any] = {
             "tenant_id": ctx.tenant_id,
             "role_code": ctx.role_code,
-            "workflow_kind": ctx.workflow_kind,
-            "route_key": ctx.route_key,
             "agent_config": ctx.agent_config,
-            "expert_agents": self._store.list_expert_agents(ctx.tenant_id),
+            "agents": self._store.list_agents(ctx.tenant_id),
         }
         if not self.registry.has("enrich_business_context_hook"):
             return base

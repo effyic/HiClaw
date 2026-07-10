@@ -1,0 +1,7 @@
+{{- if not (.Values.globalEnv.AGNO_DB_URL | default "") -}}
+{{- fail "globalEnv.AGNO_DB_URL is required (PostgreSQL session store for Agno Worker)" -}}
+{{- end -}}
+
+{{- if not (.Values.hiclaw.releaseName | default "") -}}
+{{- fail "hiclaw.releaseName is required (name of the existing HiClaw Helm release)" -}}
+{{- end -}}

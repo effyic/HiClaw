@@ -1,12 +1,12 @@
 """Hook vs AgentSpec merge rules: hooks override spec when they return data."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from agno_worker.agentspec.schema import AgentDef, AgentSpec
 
-# WeKnora MCP tools should read ``run_context.knowledge_filters`` using this shape:
-# {"tenant_id": "...", "provider": "weknora", "knowledge_ids": ["kb-1", "kb-2"], ...}
+DEFAULT_KNOWLEDGE_PROVIDER = os.environ.get("AGNO_KNOWLEDGE_PROVIDER", "").strip()
 
 
 def has_hook_data(value: Any) -> bool:
@@ -60,23 +60,28 @@ def spec_instructions(defn: AgentDef | None) -> str:
 
 
 def spec_context_filters(active_role: str, spec: AgentSpec) -> dict[str, Any]:
-    """AgentSpec fallback filters; knowledge retrieval is via MCP, not prompt text."""
+    """AgentSpec fallback filters for knowledge-aware MCP tools."""
     defn = role_def(spec, active_role)
     filters: dict[str, Any] = {
         "role": active_role,
-        "provider": "weknora",
         "knowledge_ids": [],
     }
+    provider = DEFAULT_KNOWLEDGE_PROVIDER
     if defn and defn.knowledge:
-        filters["provider"] = defn.knowledge.provider or "weknora"
+        provider = defn.knowledge.provider or provider
         filters["knowledge_ids"] = list(defn.knowledge.knowledge_ids)
+    if provider:
+        filters["provider"] = provider
     return filters
 
 
 def normalize_knowledge_filters(raw: dict[str, Any] | None) -> dict[str, Any]:
-    """Normalize hook/spec filters for WeKnora MCP consumption."""
+    """Normalize knowledge filter payload for MCP consumption."""
     if not raw:
-        return {"provider": "weknora", "knowledge_ids": []}
+        out: dict[str, Any] = {"knowledge_ids": []}
+        if DEFAULT_KNOWLEDGE_PROVIDER:
+            out["provider"] = DEFAULT_KNOWLEDGE_PROVIDER
+        return out
 
     out = dict(raw)
     ids: list[str] = []
@@ -86,7 +91,10 @@ def normalize_knowledge_filters(raw: dict[str, Any] | None) -> dict[str, Any]:
 
     out["knowledge_ids"] = ids
     out.pop("knowledge_id", None)
-    out.setdefault("provider", "weknora")
+    if provider := str(out.get("provider") or DEFAULT_KNOWLEDGE_PROVIDER).strip():
+        out["provider"] = provider
+    elif "provider" in out:
+        out.pop("provider")
     return out
 
 
@@ -99,11 +107,12 @@ def build_run_dependencies(
     user_id = getattr(run_context, "user_id", None) or metadata.get("user_id") or ""
     tenant_id = metadata.get("tenant_id") or knowledge_filters.get("tenant_id") or ""
 
-    tenant = {
+    tenant: dict[str, Any] = {
         "tenant_id": str(tenant_id) if tenant_id else "",
         "knowledge_ids": list(knowledge_filters.get("knowledge_ids") or []),
-        "provider": knowledge_filters.get("provider", "weknora"),
     }
+    if provider := knowledge_filters.get("provider"):
+        tenant["provider"] = provider
 
     user_profile: dict[str, Any] = {
         "user_id": str(user_id) if user_id else "",

@@ -1,0 +1,33 @@
+========================================================================
+ChatAI — {{ .Chart.Name }} / {{ .Release.Name }}
+========================================================================
+
+Prerequisite: HiClaw core release "{{ .Values.hiclaw.releaseName }}" in namespace {{ include "chatai.namespace" . }}.
+
+Namespace: {{ include "chatai.namespace" . }}
+Controller: {{ include "chatai.hiclaw.controllerName" . }}
+
+{{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
+{{- $ctx := dict "root" $ "worker" $worker }}
+
+Worker: {{ $worker.name }}
+Host:   {{ include "chatai.gatewayHost" $ctx }}
+Token:
+  kubectl get secret {{ include "chatai.authSecretName" $ctx }} \
+    -n {{ include "chatai.namespace" $ }} \
+    -o jsonpath='{.data.{{ $.Values.auth.secretKey | default "CHATAI_API_TOKEN" }}}' | base64 -d ; echo
+
+Example (port-forward higress-gateway 80:80 first):
+  curl -X POST http://localhost/v1/chat \
+    -H "Host: {{ include "chatai.gatewayHost" $ctx }}" \
+    -H "Authorization: Bearer <token>" \
+    -H "tenant-id: tenant-a" \
+    -H "Content-Type: application/json" \
+    -d '{"message":"你好"}'
+{{- end }}
+
+Uninstall:
+  helm uninstall {{ .Release.Name }} -n {{ include "chatai.namespace" $ }}
+
+Note: uninstalling this chart removes Worker CR / Ingress / DB init Job only.
+HiClaw core (effyic) remains installed.

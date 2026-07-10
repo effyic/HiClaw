@@ -1,0 +1,23 @@
+{{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
+{{- $ctx := dict "root" $ "worker" $worker }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "chatai.serviceName" $ctx }}
+  namespace: {{ include "chatai.namespace" $ }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: chatai
+    hiclaw.io/worker: {{ $worker.name | quote }}
+spec:
+  type: ClusterIP
+  selector:
+    hiclaw.io/worker: {{ $worker.name | quote }}
+  ports:
+    - name: api
+      port: {{ $worker.servicePort | default 8090 }}
+      targetPort: {{ $worker.targetPort | default 8090 }}
+      protocol: TCP
+{{- end }}

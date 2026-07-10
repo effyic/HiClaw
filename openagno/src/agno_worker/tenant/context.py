@@ -1,4 +1,4 @@
-"""Resolve tenant / role / workflow from run context and request metadata."""
+"""Resolve tenant / role from run context and request metadata."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agno_worker.tenant.cache import ensure_run_cache
-from agno_worker.tenant.store import AgentStore, parse_workflow, workflow_kind, workflow_route_key
+from agno_worker.tenant.store import AgentStore
 
 
 def _factory_input(run_context: Any) -> dict[str, Any]:
@@ -45,17 +45,18 @@ def _metadata(run_context: Any) -> dict[str, Any]:
     return merged
 
 
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
 @dataclass
 class TenantContext:
     tenant_id: str
     role_code: str
-    workflow_kind: str
-    route_key: str | None
     agent_config: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def workflow(self) -> dict[str, Any]:
-        return dict(self.agent_config.get("workflow") or {})
 
 
 class TenantContextResolver:
@@ -72,19 +73,10 @@ class TenantContextResolver:
 
         tenant_id = self.resolve_tenant_id(run_context)
         role_code = self.resolve_role_code(run_context)
-        kind = self.resolve_workflow_kind(run_context)
-        route_key = self.resolve_route_key(run_context)
-        agent_config = self._store.load_agent_resolved(
-            tenant_id,
-            role_code=role_code,
-            kind=kind,
-            route_key=route_key,
-        )
+        agent_config = self._store.load_agent_resolved(tenant_id, role_code=role_code)
         ctx = TenantContext(
             tenant_id=tenant_id,
             role_code=role_code,
-            workflow_kind=kind,
-            route_key=route_key,
             agent_config=agent_config,
         )
         cache["tenant_context"] = ctx
@@ -103,73 +95,21 @@ class TenantContextResolver:
         )
         return str(tenant_id)
 
-    def resolve_workflow(self, run_context: Any) -> dict[str, Any]:
-        session_state = _session_state(run_context)
-        metadata = _metadata(run_context)
-        for source in (session_state, metadata):
-            raw = source.get("workflow")
-            if isinstance(raw, dict):
-                return parse_workflow(raw)
-        return parse_workflow({})
-
-    def resolve_route_key(self, run_context: Any) -> str | None:
-        workflow = self.resolve_workflow(run_context)
-        route_key = workflow_route_key(workflow)
-        if route_key:
-            return route_key
-        session_state = _session_state(run_context)
-        metadata = _metadata(run_context)
-        for source in (session_state, metadata):
-            for key in ("active_role", "role_code", "role"):
-                value = source.get(key)
-                if value and str(value).startswith("expert_"):
-                    return str(value)[len("expert_") :]
-        return None
-
-    def resolve_workflow_kind(self, run_context: Any) -> str:
-        workflow = self.resolve_workflow(run_context)
-        kind = workflow_kind(workflow)
-        if kind != "default" or workflow.get("kind"):
-            return kind
-        session_state = _session_state(run_context)
-        metadata = _metadata(run_context)
-        for source in (session_state, metadata):
-            phase = source.get("phase")
-            if phase == "triage":
-                return "triage"
-            if phase in ("consultation", "expert"):
-                return "expert"
-        for source in (session_state, metadata):
-            for key in ("active_role", "role_code", "role"):
-                value = source.get(key)
-                if value == "triage":
-                    return "triage"
-                if value and str(value).startswith("expert"):
-                    return "expert"
-        return "default"
-
     def resolve_role_code(self, run_context: Any) -> str:
-        session_state = _session_state(run_context)
+        """Prefer request metadata (HTTP header), then session state."""
         metadata = _metadata(run_context)
-        for source in (session_state, metadata):
-            for key in ("active_role", "role_code", "role", "agent"):
-                candidate = source.get(key)
-                if candidate and str(candidate) not in ("default", ""):
-                    return str(candidate)
-                if candidate == "triage":
-                    return "triage"
-        kind = self.resolve_workflow_kind(run_context)
-        route_key = self.resolve_route_key(run_context)
-        if kind == "triage":
-            return "triage"
-        if kind == "expert" and route_key:
-            return f"expert_{route_key}"
-        for source in (session_state, metadata):
-            for key in ("active_role", "role_code", "role", "agent"):
-                candidate = source.get(key)
-                if candidate:
-                    return str(candidate)
-        return "default"
+        session_state = _session_state(run_context)
+        role_code = _first_non_empty(
+            metadata.get("role_code"),
+            session_state.get("role_code"),
+            session_state.get("active_role"),
+            metadata.get("active_role"),
+            session_state.get("role"),
+            metadata.get("role"),
+            session_state.get("agent"),
+            metadata.get("agent"),
+        )
+        return role_code or "default"
 
 
 _default_resolver = TenantContextResolver()

@@ -1,0 +1,36 @@
+{{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
+{{- $ctx := dict "root" $ "worker" $worker }}
+---
+apiVersion: hiclaw.io/v1beta1
+kind: Worker
+metadata:
+  name: {{ $worker.name | quote }}
+  namespace: {{ include "chatai.namespace" $ }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: chatai
+    hiclaw.io/controller: {{ include "chatai.hiclaw.controllerName" $ }}
+spec:
+  runtime: agno
+  model: {{ $worker.model | default $.Values.credentials.defaultModel | quote }}
+  image: {{ include "chatai.workerImage" $ctx | quote }}
+  containerManaged: {{ $worker.containerManaged | default true }}
+  package: {{ $worker.package | default (include "chatai.defaultPackageURI" $) | quote }}
+  expose:
+    {{- if $worker.expose }}
+    {{- toYaml $worker.expose | nindent 4 }}
+    {{- else }}
+    - port: 8090
+      protocol: http
+    {{- end }}
+  env:
+    {{- include "chatai.workerEnv" $ctx | nindent 4 }}
+  {{- if $worker.resources }}
+  resources:
+    {{- toYaml $worker.resources | nindent 4 }}
+  {{- else if $.Values.resources }}
+  resources:
+    {{- toYaml $.Values.resources | nindent 4 }}
+  {{- end }}
+{{- end }}

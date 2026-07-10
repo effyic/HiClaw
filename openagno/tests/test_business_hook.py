@@ -28,12 +28,12 @@ def _mock_store() -> MagicMock:
         "mcp_enabled": False,
         "mcp_config": None,
     }
-    store.list_expert_agents.return_value = [
+    store.list_agents.return_value = [
         {
             "role_code": "expert_cardiology",
-            "route_key": "cardiology",
             "display_name": "心内科",
             "description": "",
+            "workflow": {},
         }
     ]
     return store
@@ -47,15 +47,10 @@ def test_enrich_business_context_hook_merges(tmp_path: Path) -> None:
             """
             def enrich_business_context_hook(run_context, base_context):
                 return {
-                    "department_name": "心内科（业务库）",
-                    "triage_departments": [
-                        {
-                            "department_code": "cardiology",
-                            "department_name": "心内科（业务库）",
-                            "role_code": "expert_cardiology",
-                            "description": "来自 department 表",
-                        }
-                    ],
+                    "route_label": "心内科（业务库）",
+                    "prompt_supplements": {
+                        "system_prompt_append": "允许 department_code: cardiology\\n- cardiology: 心内科（业务库）",
+                    },
                 }
             """
         ),
@@ -68,9 +63,9 @@ def test_enrich_business_context_hook_merges(tmp_path: Path) -> None:
         session_state={"active_role": "triage", "phase": "triage"},
     )
     business = service.resolve_business_context(ctx)
-    assert business["department_name"] == "心内科（业务库）"
-    assert business["triage_departments"][0]["department_name"] == "心内科（业务库）"
-    assert "expert_agents" in business
+    assert business["route_label"] == "心内科（业务库）"
+    assert "agents" in business
 
     bundle = service.build_prompt_bundle(ctx, ctx.session_state)
     assert "心内科（业务库）" in bundle["system_prompt"]
+    assert "cardiology" in bundle["system_prompt"]
