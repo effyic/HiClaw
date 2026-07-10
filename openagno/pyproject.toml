@@ -14,7 +14,6 @@ dependencies = [
     "openai>=1.0",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.1",
-    "pymysql>=1.1",
     "mcp>=1.0",
     "typer>=0.9",
     "rich>=13.0",

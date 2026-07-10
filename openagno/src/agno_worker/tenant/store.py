@@ -1,10 +1,10 @@
-"""Load tenant agent configuration from MySQL agno_agent table."""
+"""Load tenant agent configuration from PostgreSQL agno_agent table."""
 from __future__ import annotations
 
 import json
 from typing import Any
 
-import pymysql.cursors
+from sqlalchemy import text
 
 from agno_worker.tenant.cache import TTLCache, _MISSING
 from agno_worker.tenant.db import agent_db_connection, agent_db_url, reset_engine
@@ -27,8 +27,23 @@ _AGENT_SELECT = """
            display_name, description, system_prompt, instructions,
            knowledge_ids, mcp_enabled, mcp_config, workflow
     FROM agno_agent
-    WHERE enabled = 1
+    WHERE enabled IS TRUE
 """
+
+
+def _row_mapping(row: Any) -> dict[str, Any]:
+    return dict(row)
+
+
+def _fetch_one(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    result = conn.execute(text(sql), params)
+    row = result.mappings().first()
+    return _row_mapping(row) if row else None
+
+
+def _fetch_all(conn: Any, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    result = conn.execute(text(sql), params or {})
+    return [_row_mapping(row) for row in result.mappings()]
 
 
 def _parse_json_object(raw: Any) -> dict[str, Any]:
@@ -93,7 +108,7 @@ def _row_to_config(row: dict[str, Any], tenant_id: str | None = None) -> dict[st
 
 
 class AgentStore:
-    """MySQL-backed tenant agent configuration store (agno_agent table only)."""
+    """PostgreSQL-backed tenant agent configuration store (agno_agent table only)."""
 
     def __init__(self) -> None:
         self._cache = TTLCache()
@@ -138,21 +153,20 @@ def _load_agent_resolved_uncached(
     role_code: str = "default",
 ) -> dict[str, Any]:
     with agent_db_connection() as conn:
-        with conn.cursor(pymysql.cursors.DictCursor) as cur:
-            row = None
-            if role_code:
-                cur.execute(
-                    f"{_AGENT_SELECT} AND tenant_id = %s AND role_code = %s LIMIT 1",
-                    (tenant_id, role_code),
-                )
-                row = cur.fetchone()
+        row = None
+        if role_code:
+            row = _fetch_one(
+                conn,
+                f"{_AGENT_SELECT} AND tenant_id = :tenant_id AND role_code = :role_code LIMIT 1",
+                {"tenant_id": tenant_id, "role_code": role_code},
+            )
 
-            if row is None and role_code != "default":
-                cur.execute(
-                    f"{_AGENT_SELECT} AND tenant_id = %s AND role_code = 'default' LIMIT 1",
-                    (tenant_id,),
-                )
-                row = cur.fetchone()
+        if row is None and role_code != "default":
+            row = _fetch_one(
+                conn,
+                f"{_AGENT_SELECT} AND tenant_id = :tenant_id AND role_code = 'default' LIMIT 1",
+                {"tenant_id": tenant_id},
+            )
 
     if row is None and tenant_id != "default":
         return _load_agent_resolved_uncached("default", role_code="default")
@@ -165,52 +179,51 @@ def _load_agent_resolved_uncached(
 
 def list_enabled_tenants() -> list[str]:
     with agent_db_connection() as conn:
-        with conn.cursor(pymysql.cursors.DictCursor) as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT tenant_id
-                FROM agno_agent
-                WHERE enabled = 1
-                ORDER BY tenant_id
-                """
-            )
-            rows = cur.fetchall()
-            return [str(row["tenant_id"]) for row in rows]
+        rows = _fetch_all(
+            conn,
+            """
+            SELECT DISTINCT tenant_id
+            FROM agno_agent
+            WHERE enabled IS TRUE
+            ORDER BY tenant_id
+            """,
+        )
+        return [str(row["tenant_id"]) for row in rows]
 
 
 def list_agents(tenant_id: str | None = None) -> list[dict[str, Any]]:
     with agent_db_connection() as conn:
-        with conn.cursor(pymysql.cursors.DictCursor) as cur:
-            if tenant_id:
-                cur.execute(
-                    """
-                    SELECT tenant_id, role_code, display_name, description, workflow
-                    FROM agno_agent
-                    WHERE enabled = 1 AND tenant_id = %s
-                    ORDER BY role_code
-                    """,
-                    (tenant_id,),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT tenant_id, role_code, display_name, description, workflow
-                    FROM agno_agent
-                    WHERE enabled = 1
-                    ORDER BY tenant_id, role_code
-                    """
-                )
-            rows = cur.fetchall()
-            return [
-                {
-                    "tenant_id": str(row["tenant_id"]),
-                    "role_code": str(row.get("role_code") or "default"),
-                    "workflow": parse_workflow(row.get("workflow")),
-                    "display_name": str(row.get("display_name") or row["tenant_id"]),
-                    "description": str(row.get("description") or ""),
-                }
-                for row in rows
-            ]
+        if tenant_id:
+            rows = _fetch_all(
+                conn,
+                """
+                SELECT tenant_id, role_code, display_name, description, workflow
+                FROM agno_agent
+                WHERE enabled IS TRUE AND tenant_id = :tenant_id
+                ORDER BY role_code
+                """,
+                {"tenant_id": tenant_id},
+            )
+        else:
+            rows = _fetch_all(
+                conn,
+                """
+                SELECT tenant_id, role_code, display_name, description, workflow
+                FROM agno_agent
+                WHERE enabled IS TRUE
+                ORDER BY tenant_id, role_code
+                """,
+            )
+        return [
+            {
+                "tenant_id": str(row["tenant_id"]),
+                "role_code": str(row.get("role_code") or "default"),
+                "workflow": parse_workflow(row.get("workflow")),
+                "display_name": str(row.get("display_name") or row["tenant_id"]),
+                "description": str(row.get("description") or ""),
+            }
+            for row in rows
+        ]
 
 
 def clear_agent_store_cache() -> None:

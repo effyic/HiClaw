@@ -24,7 +24,7 @@ export AGNO_AGENTSPEC_DIR AGNO_HOOKS_DIR AGNO_DB_URL AGNO_AGENT_DB_URL AGNO_CONT
 log "Starting agno-worker: ${WORKER_NAME}"
 log "  AgentSpec dir: ${AGNO_AGENTSPEC_DIR}"
 log "  Hooks dir: ${AGNO_HOOKS_DIR} (optional extension hooks)"
-log "  Agent DB: ${AGNO_AGENT_DB_URL:-<from AGNO_DB_URL if MySQL>}"
+log "  Agent DB: ${AGNO_AGENT_DB_URL:-<from AGNO_DB_URL>}"
 log "  API port: ${AGNO_CONTROL_PORT}"
 
 exec /opt/venv/agno/bin/agno-worker --name "${WORKER_NAME}" --api-port "${AGNO_CONTROL_PORT}"

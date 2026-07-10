@@ -2,17 +2,27 @@
 # ChatAI Helm Chart — values.yaml
 # =============================================================================
 # Prerequisite: HiClaw / Effyic core is already installed (helm install effyic …).
-# This chart deploys Agno Worker CR, MySQL schema, Higress route, and API token.
+# This chart deploys Agno Worker CR, PG schema, Higress route, and API token.
 # =============================================================================
 
 global:
-  namespace: ""  # defaults to .Release.Namespace; should match HiClaw release namespace
+  namespace: effiyc  # must match HiClaw release namespace
 
 # ── Reference to existing HiClaw installation ─────────────────────────────
 hiclaw:
   releaseName: effyic
   namespace: ""       # defaults to global.namespace
   controllerName: ""  # defaults to {releaseName}-controller
+
+# ── External PostgreSQL (session + tenant share one database) ─────────────
+postgres:
+  host: host.minikube.internal
+  hostAliasIP: ""     # minikube: docker gateway IP for hostAliases on init Job
+  port: 5432
+  database: aip_hub_test
+  username: root
+  password: postgresql
+  # url: ""           # optional full URL override (postgresql+psycopg://…)
 
 # ── Nacos (AgentSpec source; defaults to HiClaw-managed Nacos Service) ────
 nacos:
@@ -37,8 +47,6 @@ worker:
 # Shared env for all workers (workers[].env overrides)
 globalEnv:
   AGNO_REQUIRE_TENANT_ID: "true"
-  AGNO_DB_URL: ""       # required — PostgreSQL session store
-  # AGNO_AGENT_DB_URL auto-built from dbInit.mysql when unset
 
 resources: {}
 
@@ -48,15 +56,9 @@ auth:
 
 dbInit:
   enabled: true
-  image: mysql:8.0
+  image: postgres:16-alpine
   backoffLimit: 3
-  mysql:
-    host: host.minikube.internal
-    hostAliasIP: ""     # minikube: docker gateway IP for hostAliases on init Job
-    port: 3306
-    database: agno_worker
-    username: root
-    password: mysql
+  activeDeadlineSeconds: 600
 
 gateway:
   enabled: true

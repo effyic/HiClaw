@@ -14,6 +14,7 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: {{ .Values.dbInit.backoffLimit | default 3 }}
+  activeDeadlineSeconds: {{ .Values.dbInit.activeDeadlineSeconds | default 600 }}
   template:
     metadata:
       labels:
@@ -22,33 +23,35 @@ spec:
         app.kubernetes.io/component: chatai-db-init
     spec:
       restartPolicy: OnFailure
-      {{- $hostAliasIP := .Values.dbInit.mysql.hostAliasIP }}
-      {{- $mysqlHost := include "chatai.mysql.host" . }}
-      {{- if and $hostAliasIP $mysqlHost }}
+      {{- $hostAliasIP := include "chatai.postgres.hostAliasIP" . }}
+      {{- $pgHost := include "chatai.postgres.host" . }}
+      {{- if and $hostAliasIP $pgHost }}
       hostAliases:
         - ip: {{ $hostAliasIP | quote }}
           hostnames:
-            - {{ $mysqlHost | quote }}
+            - {{ $pgHost | quote }}
       {{- end }}
       containers:
-        - name: mysql-init
-          image: {{ .Values.dbInit.image | default "mysql:8.0" | quote }}
+        - name: pg-init
+          image: {{ .Values.dbInit.image | default "postgres:16-alpine" | quote }}
           imagePullPolicy: IfNotPresent
           env:
-            - name: MYSQL_HOST
-              value: {{ $mysqlHost | quote }}
-            - name: MYSQL_PORT
-              value: {{ include "chatai.mysql.port" . | quote }}
-            - name: MYSQL_USER
-              value: {{ include "chatai.mysql.username" . | quote }}
-            - name: MYSQL_PASSWORD
-              value: {{ include "chatai.mysql.password" . | quote }}
+            - name: PGHOST
+              value: {{ $pgHost | quote }}
+            - name: PGPORT
+              value: {{ include "chatai.postgres.port" . | quote }}
+            - name: PGUSER
+              value: {{ include "chatai.postgres.username" . | quote }}
+            - name: PGPASSWORD
+              value: {{ include "chatai.postgres.password" . | quote }}
+            - name: PGDATABASE
+              value: {{ include "chatai.postgres.database" . | quote }}
           command:
             - /bin/sh
             - -ec
             - |
-              echo "Initializing agno_worker schema on ${MYSQL_HOST}:${MYSQL_PORT}..."
-              mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" < /sql/init.sql
+              echo "Initializing agno_agent schema on ${PGHOST}:${PGPORT}/${PGDATABASE}..."
+              psql -v ON_ERROR_STOP=1 -f /sql/init.sql
               echo "Done."
           volumeMounts:
             - name: sql

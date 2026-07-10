@@ -3,7 +3,7 @@
 # =============================================================================
 
 global:
-  namespace: ""  # defaults to .Release.Namespace
+  namespace: effiyc  # all chart resources target this namespace
   imageRegistry: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
   imageTag: ""
 

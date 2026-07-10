@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import pymysql.cursors
+from sqlalchemy import text
 
 from agno_worker.tenant.db import agent_db_connection
 
@@ -15,25 +15,26 @@ from agno_worker.tenant.db import agent_db_connection
 def _list_departments(tenant_id: str) -> list[dict[str, Any]]:
     try:
         with agent_db_connection() as conn:
-            with conn.cursor(pymysql.cursors.DictCursor) as cur:
-                cur.execute(
+            result = conn.execute(
+                text(
                     """
                     SELECT department_code, department_name, description, sort_order
                     FROM department
-                    WHERE tenant_id = %s AND enabled = 1
+                    WHERE tenant_id = :tenant_id AND enabled IS TRUE
                     ORDER BY sort_order, department_code
-                    """,
-                    (tenant_id,),
-                )
-                return [
-                    {
-                        "department_code": str(row["department_code"]),
-                        "department_name": str(row["department_name"]),
-                        "description": str(row.get("description") or ""),
-                        "sort_order": int(row.get("sort_order") or 0),
-                    }
-                    for row in cur.fetchall()
-                ]
+                    """
+                ),
+                {"tenant_id": tenant_id},
+            )
+            return [
+                {
+                    "department_code": str(row["department_code"]),
+                    "department_name": str(row["department_name"]),
+                    "description": str(row.get("description") or ""),
+                    "sort_order": int(row.get("sort_order") or 0),
+                }
+                for row in result.mappings()
+            ]
     except Exception:
         return []
 

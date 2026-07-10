@@ -1,5 +1,5 @@
-{{- if not (.Values.globalEnv.AGNO_DB_URL | default "") -}}
-{{- fail "globalEnv.AGNO_DB_URL is required (PostgreSQL session store for Agno Worker)" -}}
+{{- if not (.Values.postgres.database | default "") -}}
+{{- fail "postgres.database is required (shared PostgreSQL database for Agno session + tenant config)" -}}
 {{- end -}}
 
 {{- if not (.Values.hiclaw.releaseName | default "") -}}

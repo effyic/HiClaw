@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from agno_worker.tenant.context import TenantContextResolver
-from agno_worker.tenant.store import agent_db_url
+from agno_worker.tenant.db import agent_db_driver, agent_db_url
 
 
 class TenantDataProvider:
@@ -27,7 +27,7 @@ class TenantDataProvider:
         return {"text": str(results)}
 
     def db_connection_info(self) -> dict[str, str]:
-        return {"url": agent_db_url(), "driver": "mysql"}
+        return {"url": agent_db_url(), "driver": agent_db_driver()}
 
     def get_tools(self) -> list[Any]:
         try:

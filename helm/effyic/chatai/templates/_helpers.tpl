@@ -15,7 +15,7 @@ ChatAI standalone chart helpers (requires HiClaw core already installed).
 {{- end }}
 
 {{- define "chatai.namespace" -}}
-{{- default .Release.Namespace (.Values.global.namespace | default .Values.hiclaw.namespace) -}}
+{{- .Values.global.namespace | default .Values.hiclaw.namespace | default .Release.Namespace | default "effiyc" -}}
 {{- end }}
 
 {{- define "chatai.hiclaw.controllerName" -}}
@@ -82,33 +82,41 @@ http://localhost
 {{- printf "%s%s/v1/chat" $base $path -}}
 {{- end }}
 
-{{- define "chatai.mysql.host" -}}
-{{- .Values.dbInit.mysql.host | default "host.minikube.internal" -}}
+{{- define "chatai.postgres.host" -}}
+{{- .Values.postgres.host | default "host.minikube.internal" -}}
 {{- end }}
 
-{{- define "chatai.mysql.port" -}}
-{{- .Values.dbInit.mysql.port | default 3306 -}}
+{{- define "chatai.postgres.port" -}}
+{{- .Values.postgres.port | default 5432 -}}
 {{- end }}
 
-{{- define "chatai.mysql.username" -}}
-{{- .Values.dbInit.mysql.username | default "root" -}}
+{{- define "chatai.postgres.username" -}}
+{{- .Values.postgres.username | default "root" -}}
 {{- end }}
 
-{{- define "chatai.mysql.password" -}}
-{{- .Values.dbInit.mysql.password | default "mysql" -}}
+{{- define "chatai.postgres.password" -}}
+{{- .Values.postgres.password | default "postgresql" -}}
 {{- end }}
 
-{{- define "chatai.mysql.database" -}}
-{{- .Values.dbInit.mysql.database | default "agno_worker" -}}
+{{- define "chatai.postgres.database" -}}
+{{- .Values.postgres.database | default "aip_hub_test" -}}
 {{- end }}
 
-{{- define "chatai.agentDbUrl" -}}
-{{- $user := include "chatai.mysql.username" . -}}
-{{- $pass := include "chatai.mysql.password" . -}}
-{{- $host := include "chatai.mysql.host" . -}}
-{{- $port := include "chatai.mysql.port" . | int -}}
-{{- $db := include "chatai.mysql.database" . -}}
-{{- printf "mysql+pymysql://%s:%s@%s:%d/%s" $user $pass $host $port $db -}}
+{{- define "chatai.postgres.hostAliasIP" -}}
+{{- .Values.postgres.hostAliasIP | default "" -}}
+{{- end }}
+
+{{- define "chatai.postgres.url" -}}
+{{- if .Values.postgres.url -}}
+{{- .Values.postgres.url -}}
+{{- else -}}
+{{- $user := include "chatai.postgres.username" . -}}
+{{- $pass := include "chatai.postgres.password" . -}}
+{{- $host := include "chatai.postgres.host" . -}}
+{{- $port := include "chatai.postgres.port" . | int -}}
+{{- $db := include "chatai.postgres.database" . -}}
+{{- printf "postgresql+psycopg://%s:%s@%s:%d/%s" $user $pass $host $port $db -}}
+{{- end -}}
 {{- end }}
 
 {{- define "chatai.defaultPackageURI" -}}
@@ -156,8 +164,12 @@ http://localhost
 {{- if not (hasKey $workerEnv "AGNO_CONTROL_TOKEN") -}}
 {{- $_ := set $merged "AGNO_CONTROL_TOKEN" $authToken -}}
 {{- end -}}
-{{- if not (hasKey $merged "AGNO_AGENT_DB_URL") -}}
-{{- $_ := set $merged "AGNO_AGENT_DB_URL" (include "chatai.agentDbUrl" $root) -}}
+{{- $pgUrl := include "chatai.postgres.url" $root -}}
+{{- if not (index $merged "AGNO_DB_URL" | default "") -}}
+{{- $_ := set $merged "AGNO_DB_URL" $pgUrl -}}
+{{- end -}}
+{{- if not (index $merged "AGNO_AGENT_DB_URL" | default "") -}}
+{{- $_ := set $merged "AGNO_AGENT_DB_URL" (index $merged "AGNO_DB_URL") -}}
 {{- end -}}
 {{- $merged | toYaml -}}
 {{- end }}

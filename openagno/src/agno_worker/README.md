@@ -371,7 +371,7 @@ pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 
 | 变量                            | 说明                         | 默认                      |
 | ----------------------------- | -------------------------- | ----------------------- |
-| `AGNO_AGENT_DB_URL`           | 租户配置 MySQL（`agno_agent` 表） | 必填                      |
+| `AGNO_AGENT_DB_URL`           | 租户配置 PostgreSQL（`agno_agent` 表） | 必填（`postgresql+psycopg://…`） |
 | `AGNO_DB_URL`                 | 会话持久化 DB                   | Postgres                |
 | `AGNO_REQUIRE_TENANT_ID`      | 缺失 tenant_id 时拒绝请求         | `false`                 |
 | `AGNO_AGENT_CONFIG_CACHE_TTL` | agno_agent 配置 TTL 缓存（秒）    | `60`                    |

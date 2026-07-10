@@ -51,7 +51,6 @@ RUN python -m venv /opt/venv/agno \
         "fastapi>=0.109" \
         "python-multipart>=0.0.9" \
         "pyjwt>=2.8" \
-        "pymysql>=1.1" \
         "mcp>=1.0" \
         "pyyaml>=6.0" \
         "typer>=0.9" \
