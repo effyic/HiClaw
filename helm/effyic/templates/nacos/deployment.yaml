@@ -95,9 +95,9 @@ spec:
             {{- fail (printf "nacos.database.platform must be postgresql or mysql, got %q" $platform) }}
             {{- end }}
             - name: NACOS_AUTH_ENABLE
-              value: {{ .Values.nacos.auth.enabled | default true | toString | quote }}
+              value: {{ if hasKey .Values.nacos.auth "enabled" }}{{ .Values.nacos.auth.enabled | toString | quote }}{{ else }}"true"{{ end }}
             - name: NACOS_CORE_AUTH_ENABLED
-              value: {{ .Values.nacos.auth.enabled | default true | toString | quote }}
+              value: {{ if hasKey .Values.nacos.auth "enabled" }}{{ .Values.nacos.auth.enabled | toString | quote }}{{ else }}"true"{{ end }}
             - name: NACOS_AUTH_TOKEN
               value: {{ .Values.nacos.auth.token | quote }}
             - name: NACOS_AUTH_IDENTITY_KEY
