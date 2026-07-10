@@ -1,5 +1,7 @@
 {{- if and .Values.nacos.enabled (eq .Values.nacos.mode "managed") }}
 {{- $comp := dict "root" . "component" "nacos" }}
+{{- $db := .Values.nacos.database | default dict }}
+{{- $platform := $db.platform | default "mysql" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,11 +23,11 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.nacos.mysql.hostAliasIP }}
+      {{- if $db.hostAliasIP }}
       hostAliases:
-        - ip: {{ .Values.nacos.mysql.hostAliasIP | quote }}
+        - ip: {{ $db.hostAliasIP | quote }}
           hostnames:
-            - {{ .Values.nacos.mysql.host | quote }}
+            - {{ required "nacos.database.host is required when nacos.mode=managed" $db.host | quote }}
       {{- end }}
       containers:
         - name: nacos
@@ -50,25 +52,48 @@ spec:
             - name: PREFER_HOST_MODE
               value: hostname
             - name: SPRING_DATASOURCE_PLATFORM
-              value: mysql
+              value: {{ $platform | quote }}
+            {{- if eq $platform "postgresql" }}
+            - name: EMBEDDED_STORAGE
+              value: "false"
+            - name: DB_NUM
+              value: "1"
+            - name: DB_URL_0
+              value: {{ printf "jdbc:postgresql://%s:%d/%s?%s" (required "nacos.database.host is required when nacos.mode=managed" $db.host) ($db.port | default 5432 | int) ($db.database | default "nacos") ($db.jdbcParams | default "currentSchema=public&useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&reWriteBatchedInserts=true&ApplicationName=nacos_java") | quote }}
+            - name: DB_USER_0
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hiclaw.nacos.fullname" . }}
+                  key: DB_USER
+            - name: DB_PASSWORD_0
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hiclaw.nacos.fullname" . }}
+                  key: DB_PASSWORD
+            - name: DB_POOL_CONFIG_DRIVERCLASSNAME
+              value: org.postgresql.Driver
+            {{- else if eq $platform "mysql" }}
             - name: MYSQL_SERVICE_HOST
-              value: {{ required "nacos.mysql.host is required when nacos.mode=managed" .Values.nacos.mysql.host | quote }}
+              value: {{ required "nacos.database.host is required when nacos.mode=managed" $db.host | quote }}
             - name: MYSQL_SERVICE_PORT
-              value: {{ .Values.nacos.mysql.port | default 3306 | quote }}
+              value: {{ $db.port | default 3306 | quote }}
             - name: MYSQL_SERVICE_DB_NAME
-              value: {{ .Values.nacos.mysql.database | default "nacos" | quote }}
+              value: {{ $db.database | default "nacos" | quote }}
             - name: MYSQL_SERVICE_DB_PARAM
-              value: {{ .Values.nacos.mysql.dbParam | quote }}
+              value: {{ $db.dbParam | quote }}
             - name: MYSQL_SERVICE_USER
               valueFrom:
                 secretKeyRef:
                   name: {{ include "hiclaw.nacos.fullname" . }}
-                  key: MYSQL_SERVICE_USER
+                  key: DB_USER
             - name: MYSQL_SERVICE_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "hiclaw.nacos.fullname" . }}
-                  key: MYSQL_SERVICE_PASSWORD
+                  key: DB_PASSWORD
+            {{- else }}
+            {{- fail (printf "nacos.database.platform must be postgresql or mysql, got %q" $platform) }}
+            {{- end }}
             - name: NACOS_AUTH_ENABLE
               value: {{ .Values.nacos.auth.enabled | default true | toString | quote }}
             - name: NACOS_CORE_AUTH_ENABLED

@@ -12,7 +12,7 @@ helm upgrade --install effyic ../ \
 ```
 
 1. Nacos 中已上传 AgentSpec（如 `medical-orchestrator`，标签 `stable`）
-2. 宿主机 PostgreSQL 可访问（minikube 场景见 `docs/deploy-minikube.md`）
+2. 宿主机 PostgreSQL 可访问（minikube 场景见 `../docs/deploy-minikube.md`）
 
 
 

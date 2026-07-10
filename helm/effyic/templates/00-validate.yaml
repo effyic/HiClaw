@@ -74,8 +74,12 @@ Validate public values at render time. Supported combinations:
 {{- end -}}
 
 {{- if and .Values.nacos.enabled (eq (.Values.nacos.mode | default "") "managed") -}}
-  {{- if not (.Values.nacos.mysql.host | default "") -}}
-  {{- fail "nacos.mysql.host is required when nacos.mode=managed" -}}
+  {{- if not ((.Values.nacos.database | default dict).host | default "") -}}
+  {{- fail "nacos.database.host is required when nacos.mode=managed" -}}
+  {{- end -}}
+  {{- $platform := (.Values.nacos.database | default dict).platform | default "mysql" -}}
+  {{- if and (ne $platform "postgresql") (ne $platform "mysql") -}}
+  {{- fail (printf "nacos.database.platform must be postgresql or mysql, got %q" $platform) -}}
   {{- end -}}
 {{- end -}}
 {{- if and .Values.nacos.enabled (eq (.Values.nacos.mode | default "") "existing") -}}

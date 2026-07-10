@@ -8,13 +8,22 @@
 | 集群         | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                                                                                                                                         |
 | 工具         | Helm 3.14+                                                                                                                                                                                         |
 | LLM        | 通义千问 API Key（安装时通过 `--set` 传入）                                                                                                                                                                     |
-| MySQL      | 宿主机 MySQL 已建库 `nacos`；`values.yaml` 默认 `host.minikube.internal` + `hostAliasIP`（Docker 网关 IP，不随局域网 IP 变化）。网关 IP 查询：`docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'` |
+| PostgreSQL | 宿主机 PG 已建库 `nacos` 并初始化 schema（见下方命令）；`values.yaml` 默认 `host.minikube.internal` + `hostAliasIP`（Docker 网关 IP）。网关 IP：`docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'` |
 | 本地镜像       | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager`                                                                                                            |
 | inotify 限制 | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令                                                                                                                   |
 
 
 ```bash
 minikube ssh -- "echo -e 'fs.inotify.max_user_instances=1024\nfs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/99-inotify.conf && sudo sysctl --system"
+```
+
+Nacos 使用 PostgreSQL 时需先建库并导入官方 schema（Nacos 不会自动建表）：
+
+```bash
+psql "postgresql://root:postgresql@127.0.0.1:5432/postgres" -c "CREATE DATABASE nacos"
+docker run --rm --entrypoint sh nacos-registry.cn-hangzhou.cr.aliyuncs.com/nacos/nacos-server:v3.2.2 \
+  -c "unzip -p /home/nacos/plugins/nacos-datasource-plugin-postgresql-3.2.2.jar META-INF/pg-schema.sql" \
+  | psql "postgresql://root:postgresql@127.0.0.1:5432/nacos"
 ```
 
 

@@ -4,6 +4,7 @@
 *.tmp
 *.orig
 *~
+docs/
 .git/
 .gitignore
 .idea/

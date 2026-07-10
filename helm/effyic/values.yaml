@@ -42,14 +42,18 @@ nacos:
     token: "SecretKey012345678901234567890123456789012345678901234567890123456789"
     identityKey: serverIdentity
     identityValue: security
-  mysql:
-    host: "host.minikube.internal"  # host MySQL via minikube gateway; stable across host LAN IP changes
+  database:
+    platform: postgresql          # postgresql | mysql — official nacos-server image supports both (v3.2+)
+    host: "host.minikube.internal"  # host DB via minikube gateway; stable across host LAN IP changes
     hostAliasIP: "192.168.49.1"     # minikube docker gateway; docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'
-    port: 3306
+    port: 5432
     database: nacos
     username: root
-    password: mysql
+    password: postgresql
+    # MySQL-only JDBC params (ignored when platform=postgresql)
     dbParam: "characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+    # PostgreSQL JDBC params (ignored when platform=mysql)
+    jdbcParams: "currentSchema=public&useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&reWriteBatchedInserts=true&ApplicationName=nacos_java"
   existing:
     host: ""
     port: 8848
