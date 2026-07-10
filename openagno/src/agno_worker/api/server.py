@@ -24,9 +24,11 @@ from agno_worker.hooks.protocols import UserContext
 
 logger = logging.getLogger(__name__)
 
+CHAT_API_PREFIX = "/effiyc"
+
 
 def _cors_allow_origins() -> list[str]:
-    """Origins for browser-based static test pages calling /v1/chat directly."""
+    """Origins for browser-based static test pages calling chat API directly."""
     raw = os.environ.get("CORS_ORIGIN_LIST") or os.environ.get("AGNO_CORS_ORIGINS", "")
     if raw:
         try:
@@ -156,7 +158,7 @@ class AgnoAPIServer:
         try:
             if self._runtime is not None:
                 self._agent_os.agents = list(self._runtime.agents.values())
-            # Must resync from base_app so /health /status /v1/chat routes stay mounted.
+            # Must resync from base_app so /health /status / chat routes stay mounted.
             self._agent_os.resync(self._base_app)
         except Exception as exc:
             logger.warning("AgentOS resync failed: %s", exc)
@@ -194,7 +196,7 @@ class AgnoAPIServer:
         async def status(_: None = Depends(_auth)) -> dict[str, Any]:
             return self._status_handler()
 
-        @app.post("/v1/chat", response_model=ChatResponse)
+        @app.post(f"{CHAT_API_PREFIX}/v1/chat", response_model=ChatResponse)
         async def chat(
             req: ChatRequest,
             request: Request,
@@ -236,7 +238,7 @@ class AgnoAPIServer:
                 raise self._handle_api_error(exc) from exc
             return ChatResponse(reply=reply, session_id=resolved_session_id)
 
-        @app.post("/v1/chat/stream")
+        @app.post(f"{CHAT_API_PREFIX}/v1/chat/stream")
         async def chat_stream(
             req: ChatRequest,
             request: Request,

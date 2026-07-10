@@ -17,13 +17,10 @@ spec:
   image: {{ include "chatai.workerImage" $ctx | quote }}
   containerManaged: {{ $worker.containerManaged | default true }}
   package: {{ $worker.package | default (include "chatai.defaultPackageURI" $) | quote }}
+  {{- with $worker.expose }}
   expose:
-    {{- if $worker.expose }}
-    {{- toYaml $worker.expose | nindent 4 }}
-    {{- else }}
-    - port: 8090
-      protocol: http
-    {{- end }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   env:
     {{- include "chatai.workerEnv" $ctx | nindent 4 }}
   {{- if $worker.resources }}

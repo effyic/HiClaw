@@ -132,7 +132,15 @@ helm upgrade --install effyic-chatai helm/effyic/chatai \
 ```bash
 kubectl get worker.hiclaw.io effyic-chatai
 kubectl get ingress,wasmplugin -l app.kubernetes.io/component=chatai
-kubectl get secret effyic-chatai-chatai-auth -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d ; echo
+
+TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
+
+# 平台公共域名 + /effiyc 路径（无需 Host 头）
+curl -X POST http://localhost/effiyc/v1/chat \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "tenant-id: tenant-a" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"你好"}'
 ```
 
 详见 [chatai/README.md](../chatai/README.md)。

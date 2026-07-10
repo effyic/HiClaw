@@ -54,13 +54,32 @@ ChatAI standalone chart helpers (requires HiClaw core already installed).
 {{- printf "%s-chatai-key-auth" .worker.name | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
-{{- define "chatai.gatewayHost" -}}
+{{- define "chatai.gatewayIngressHost" -}}
 {{- $worker := .worker -}}
+{{- $root := .root -}}
 {{- if $worker.gatewayHost -}}
 {{- $worker.gatewayHost -}}
-{{- else -}}
-{{- printf "worker-%s-8090-local.hiclaw.io" $worker.name -}}
+{{- else if $root.Values.gateway.host -}}
+{{- $root.Values.gateway.host -}}
 {{- end -}}
+{{- end }}
+
+{{- define "chatai.gatewayPath" -}}
+{{- .Values.gateway.path | default "/effiyc" -}}
+{{- end }}
+
+{{- define "chatai.gatewayPublicURL" -}}
+{{- if .Values.gateway.publicURL -}}
+{{- .Values.gateway.publicURL -}}
+{{- else -}}
+http://localhost
+{{- end -}}
+{{- end }}
+
+{{- define "chatai.chatEndpointURL" -}}
+{{- $base := include "chatai.gatewayPublicURL" . | trimSuffix "/" -}}
+{{- $path := include "chatai.gatewayPath" . | trimSuffix "/" -}}
+{{- printf "%s%s/v1/chat" $base $path -}}
 {{- end }}
 
 {{- define "chatai.mysql.host" -}}

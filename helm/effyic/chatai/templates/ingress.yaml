@@ -14,10 +14,13 @@ metadata:
 spec:
   ingressClassName: {{ $.Values.gateway.ingressClassName | default "higress" | quote }}
   rules:
-    - host: {{ include "chatai.gatewayHost" $ctx | quote }}
+    {{- $host := include "chatai.gatewayIngressHost" $ctx | trim }}
+    - {{- if $host }}
+      host: {{ $host | quote }}
+      {{- end }}
       http:
         paths:
-          - path: {{ $.Values.gateway.path | default "/" | quote }}
+          - path: {{ include "chatai.gatewayPath" $ | quote }}
             pathType: Prefix
             backend:
               service:

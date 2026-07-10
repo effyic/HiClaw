@@ -6,20 +6,19 @@ Prerequisite: HiClaw core release "{{ .Values.hiclaw.releaseName }}" in namespac
 
 Namespace: {{ include "chatai.namespace" . }}
 Controller: {{ include "chatai.hiclaw.controllerName" . }}
+Route:    {{ include "chatai.gatewayPath" . }} on platform gateway ({{ include "chatai.gatewayPublicURL" . }})
 
 {{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
 {{- $ctx := dict "root" $ "worker" $worker }}
 
 Worker: {{ $worker.name }}
-Host:   {{ include "chatai.gatewayHost" $ctx }}
 Token:
   kubectl get secret {{ include "chatai.authSecretName" $ctx }} \
     -n {{ include "chatai.namespace" $ }} \
     -o jsonpath='{.data.{{ $.Values.auth.secretKey | default "CHATAI_API_TOKEN" }}}' | base64 -d ; echo
 
-Example (port-forward higress-gateway 80:80 first):
-  curl -X POST http://localhost/v1/chat \
-    -H "Host: {{ include "chatai.gatewayHost" $ctx }}" \
+Example (port-forward higress-gateway 80:80 if needed):
+  curl -X POST {{ include "chatai.chatEndpointURL" $ }} \
     -H "Authorization: Bearer <token>" \
     -H "tenant-id: tenant-a" \
     -H "Content-Type: application/json" \

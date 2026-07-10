@@ -8,6 +8,7 @@ CHART_DIR="${SCRIPT_DIR}"
 HICLAW_RELEASE="${HICLAW_RELEASE:-effyic}"
 CHATAI_RELEASE="${CHATAI_RELEASE:-effyic-chatai}"
 NAMESPACE="${NAMESPACE:-default}"
+GATEWAY_PUBLIC_URL="${GATEWAY_PUBLIC_URL:-http://localhost:80}"
 GATEWAY_IP="${GATEWAY_IP:-$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)}"
 AGNO_DB_URL="${AGNO_DB_URL:-postgresql+psycopg://root:postgresql@${GATEWAY_IP}:5432/vector_store}"
 
@@ -19,6 +20,7 @@ helm upgrade --install "${CHATAI_RELEASE}" "${CHART_DIR}" \
   --namespace "${NAMESPACE}" \
   --set hiclaw.releaseName="${HICLAW_RELEASE}" \
   --set global.namespace="${NAMESPACE}" \
+  --set gateway.publicURL="${GATEWAY_PUBLIC_URL}" \
   --set globalEnv.AGNO_DB_URL="${AGNO_DB_URL}" \
   --set dbInit.mysql.hostAliasIP="${GATEWAY_IP}" \
   "$@"

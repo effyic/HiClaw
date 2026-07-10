@@ -61,7 +61,12 @@ dbInit:
 gateway:
   enabled: true
   ingressClassName: higress
-  path: /
+  # Match HiClaw gateway.publicURL (used in NOTES / docs only).
+  publicURL: ""
+  # Empty host = match all inbound hosts on the platform gateway (path-based routing).
+  host: ""
+  # Path prefix on the shared platform domain; must match agno_worker CHAT_API_PREFIX (/effiyc).
+  path: /effiyc
   keyAuth:
     enabled: true
     allowQuery: true
@@ -78,10 +83,11 @@ workers:
     containerManaged: true
     servicePort: 8090
     targetPort: 8090
+    # Optional per-worker Ingress host override (empty = platform shared domain).
     gatewayHost: ""
     gatewayConsumer: ""
     env: {}
     resources: {}
-    expose:
-      - port: 8090
-        protocol: http
+    # Worker expose creates a per-worker subdomain (worker-*-local.hiclaw.io).
+    # Leave unset for platform path routing via gateway.path (/effiyc).
+    expose: []
