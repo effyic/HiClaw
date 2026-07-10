@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -132,16 +133,12 @@ class AgnoRuntime:
         metadata: dict[str, Any] | None = None,
     ) -> tuple[str, str]:
         target = self._resolve_run_target()
-        run_metadata: dict[str, Any] = dict(metadata or {})
-        kwargs: dict[str, Any] = {"metadata": run_metadata}
-        if session_id:
-            run_metadata["session_id"] = session_id
-            kwargs["session_id"] = session_id
-        if user_id:
-            run_metadata["user_id"] = user_id
-            kwargs["user_id"] = user_id
-        if tenant_id:
-            run_metadata["tenant_id"] = tenant_id
+        kwargs = self._build_run_kwargs(
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            metadata=metadata,
+        )
         response = await target.arun(message, **kwargs)
         if hasattr(response, "content"):
             reply = str(response.content)
@@ -152,6 +149,91 @@ class AgnoRuntime:
             or session_id
         )
         return reply, resolved_session_id
+
+    async def astream(
+        self,
+        message: str,
+        *,
+        session_id: str = "",
+        user_id: str = "",
+        tenant_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        stream_events: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream Agno run events as JSON-serializable dicts for SSE consumers."""
+        from agno.run.agent import RunEvent
+
+        target = self._resolve_run_target()
+        kwargs = self._build_run_kwargs(
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            metadata=metadata,
+            stream=True,
+            stream_events=stream_events,
+        )
+        resolved_session_id = session_id
+
+        async for event in target.arun(message, **kwargs):
+            if sid := getattr(event, "session_id", None):
+                if str(sid).strip():
+                    resolved_session_id = str(sid)
+
+            event_name = str(getattr(event, "event", "") or "")
+
+            if event_name == RunEvent.run_content.value:
+                content = getattr(event, "content", None)
+                if content is not None and str(content):
+                    yield {"event": "content", "delta": str(content)}
+                continue
+
+            if event_name == RunEvent.run_error.value:
+                yield {
+                    "event": "error",
+                    "message": str(getattr(event, "content", None) or "run error"),
+                }
+                return
+
+            if stream_events and event_name not in {
+                RunEvent.run_started.value,
+                RunEvent.run_content_completed.value,
+                RunEvent.run_completed.value,
+            }:
+                payload: dict[str, Any] = {
+                    "event": "agent",
+                    "agent_event": event_name,
+                }
+                if content := getattr(event, "content", None):
+                    payload["content"] = str(content)
+                yield payload
+
+        yield {"event": "done", "session_id": resolved_session_id}
+
+    def _build_run_kwargs(
+        self,
+        *,
+        session_id: str = "",
+        user_id: str = "",
+        tenant_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        stream: bool = False,
+        stream_events: bool = False,
+    ) -> dict[str, Any]:
+        run_metadata: dict[str, Any] = dict(metadata or {})
+        kwargs: dict[str, Any] = {"metadata": run_metadata}
+        if stream:
+            kwargs["stream"] = True
+        if stream_events:
+            kwargs["stream_events"] = True
+        if session_id:
+            run_metadata["session_id"] = session_id
+            kwargs["session_id"] = session_id
+        if user_id:
+            run_metadata["user_id"] = user_id
+            kwargs["user_id"] = user_id
+        if tenant_id:
+            run_metadata["tenant_id"] = tenant_id
+        return kwargs
 
     def _resolve_run_target(self) -> Any:
         """Return the executor for chat runs.

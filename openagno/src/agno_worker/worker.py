@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -70,6 +70,7 @@ class Worker:
             token=token,
             chat_handler=self._handle_chat,
             chat_handler_async=self._handle_chat_async,
+            chat_stream_handler_async=self._handle_chat_stream_async,
             status_handler=self._status,
             worker_name=self.config.worker_name,
             enable_agentos=self.config.enable_agentos,
@@ -201,6 +202,26 @@ class Worker:
             user_id=user_id,
             tenant_id=tenant_id,
         )
+
+    async def _handle_chat_stream_async(
+        self,
+        message: str,
+        session_id: str,
+        user_id: str,
+        tenant_id: str = "",
+        *,
+        stream_events: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        if not self._runtime:
+            raise RuntimeError("runtime not initialized")
+        async for chunk in self._runtime.astream(
+            message,
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            stream_events=stream_events,
+        ):
+            yield chunk
 
     def _status(self) -> dict[str, Any]:
         spec = self._runtime.spec if self._runtime else None

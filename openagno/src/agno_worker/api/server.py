@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -41,6 +43,17 @@ class ChatResponse(BaseModel):
     session_id: str
 
 
+ChatStreamHandler = Callable[..., AsyncIterator[dict[str, Any]]]
+
+
+def _format_sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _truthy_query(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class AgnoAPIServer:
     def __init__(
         self,
@@ -51,6 +64,7 @@ class AgnoAPIServer:
         status_handler: Callable[[], dict[str, Any]],
         *,
         chat_handler_async: Callable[..., Awaitable[tuple[str, str]]] | None = None,
+        chat_stream_handler_async: ChatStreamHandler | None = None,
         worker_name: str = "agno-worker",
         enable_agentos: bool = False,
         runtime: Any = None,
@@ -64,6 +78,7 @@ class AgnoAPIServer:
             if chat_handler_async is not None
             else self._default_async_chat_handler(chat_handler)
         )
+        self._chat_stream_handler_async = chat_stream_handler_async
         self._status_handler = status_handler
         self._worker_name = worker_name
         self._enable_agentos = enable_agentos
@@ -184,6 +199,64 @@ class AgnoAPIServer:
                 logger.exception("Unhandled error during chat")
                 raise HTTPException(status_code=500, detail="Internal server error") from exc
             return ChatResponse(reply=reply, session_id=resolved_session_id)
+
+        @app.post("/v1/chat/stream")
+        async def chat_stream(
+            req: ChatRequest,
+            request: Request,
+            _: None = Depends(_auth),
+        ) -> StreamingResponse:
+            if self._chat_stream_handler_async is None:
+                raise HTTPException(status_code=501, detail="streaming not configured")
+
+            user_id = resolve_user_id(
+                body_user_id=req.user_id,
+                headers=request.headers,
+                query_user_id=request.query_params.get("user_id", ""),
+            )
+            tenant_id = resolve_tenant_id(
+                headers=request.headers,
+                query_tenant_id=request.query_params.get("tenant_id", ""),
+            )
+            session_id = resolve_session_id(
+                headers=request.headers,
+                query_session_id=request.query_params.get("session_id", ""),
+            )
+            stream_events = _truthy_query(
+                request.query_params.get("stream_events", "")
+            )
+
+            async def event_generator() -> AsyncIterator[str]:
+                try:
+                    async for chunk in self._chat_stream_handler_async(
+                        req.message,
+                        session_id,
+                        user_id,
+                        tenant_id,
+                        stream_events=stream_events,
+                    ):
+                        yield _format_sse(chunk)
+                except Exception as exc:
+                    from agno_worker.hooks.errors import HookExecutionError, HookLoadError
+
+                    if isinstance(exc, (HookLoadError, HookExecutionError)):
+                        logger.error("Hook error during chat stream: %s", exc)
+                        yield _format_sse({"event": "error", "message": str(exc)})
+                        return
+                    logger.exception("Unhandled error during chat stream")
+                    yield _format_sse(
+                        {"event": "error", "message": "Internal server error"}
+                    )
+
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
         @app.post("/agent/reregister")
         async def reregister(_: None = Depends(_auth)) -> dict[str, str]:
