@@ -3,14 +3,14 @@
 ## 前置条件
 
 
-| 项          | 要求                                                                                                                                                                                                                                                                   |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 集群         | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                                                                                                                                                                                                           |
-| 工具         | Helm 3.14+                                                                                                                                                                                                                                                           |
-| LLM        | 通义千问 API Key（安装时通过 `--set` 传入）                                                                                                                                                                                                                                       |
-| PostgreSQL | 宿主机已运行 PostgreSQL（默认 `root:postgresql@127.0.0.1:5432`）；`values.yaml` 默认 `host.minikube.internal` + `hostAliasIP`（Docker 网关 IP）。Nacos 库由 Helm `nacos.dbInit` Job 自动建库并导入 schema；网关 IP：`docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'` |
-| 本地镜像       | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager`                                                                                                                                                                              |
-| inotify 限制 | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令                                                                                                                                                                                     |
+| 项          | 要求                                                                                      |
+| ---------- | --------------------------------------------------------------------------------------- |
+| 集群         | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                              |
+| 工具         | Helm 3.14+                                                                              |
+| LLM        | 通义千问 API Key（安装时通过 `--set` 传入）                                                          |
+| PostgreSQL | 宿主机已运行 PostgreSQL；Nacos 库由 Helm `nacos.dbInit` Job 自动建库并导入 schema；                      |
+| 本地镜像       | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager` |
+| inotify 限制 | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令        |
 
 
 ```bash
@@ -21,11 +21,11 @@ Nacos 使用 PostgreSQL 时，**无需手动建库**——`helm upgrade --instal
 
 1. 创建 `nacos` 数据库（若不存在）
 2. 导入官方 `pg-schema.sql`（仅首次，已存在表结构则跳过）
-3. 写入默认管理员用户（`nacos` / `nacos`，幂等）
+3. 写入默认管理员用户（`nacos` / `nacos`）
 
-SQL 脚本位于 `files/nacos-pg-schema.sql`（含 schema 与默认用户 seed）；可通过 `nacos.dbInit.enabled=false` 关闭自动初始化。
+SQL 脚本位于 `files/nacos-pg-schema.sql`；可通过 `nacos.dbInit.enabled=false` 关闭自动初始化。
 
-ChatAI 的 `aip_hub_test` 库由子 Chart `chatai` 的 `dbInit` Job 自动初始化（见 §6）。
+ChatAI 的 `aip_hub_test` 库由子 Chart `chatai` 的 `dbInit` Job 自动初始化
 
 ## 1. 准备镜像
 
@@ -58,7 +58,7 @@ make build-manager \
   DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 
 # 装入 minikube
-for img in hiclaw/hiclaw-controller:latest hiclaw/agno-worker:latest hiclaw/hermes-worker:latest hiclaw/hiclaw-manager:latest postgres:16-alpine; do
+for img in hiclaw/hiclaw-controller:latest hiclaw/agno-worker:latest hiclaw/hermes-worker:latest hiclaw/hiclaw-manager:latest; do
   load_image "$img"
 done
 ```
@@ -78,14 +78,29 @@ helm dependency build helm/effyic/
 默认命名空间为 `effiyc`（见 `values.yaml` 中 `global.namespace`）。
 
 ```bash
+# Nacos 外部 PostgreSQL（按宿主机实际配置修改）
+export NACOS_DB_HOST="${NACOS_DB_HOST:-nacos.inner.host}"
+export NACOS_DB_PORT="${NACOS_DB_PORT:-5432}"
+export NACOS_DB_USERNAME="${NACOS_DB_USERNAME:-root}"
+export NACOS_DB_PASSWORD="${NACOS_DB_PASSWORD:-postgresql}"
+
+# LLM（llmApiKey 必填；其余与 values.yaml 默认值一致，可按需覆盖）
 export HICLAW_LLM_API_KEY="sk-your-qwen-api-key"
-GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
+export HICLAW_LLM_PROVIDER="${HICLAW_LLM_PROVIDER:-qwen}"
+export HICLAW_DEFAULT_MODEL="${HICLAW_DEFAULT_MODEL:-qwen3.6-plus}"
+export HICLAW_LLM_BASE_URL="${HICLAW_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
 
 helm upgrade --install effyic helm/effyic \
   --namespace effiyc --create-namespace \
   --set credentials.llmApiKey="${HICLAW_LLM_API_KEY}" \
+  --set credentials.llmProvider="${HICLAW_LLM_PROVIDER}" \
+  --set credentials.defaultModel="${HICLAW_DEFAULT_MODEL}" \
+  --set credentials.llmBaseUrl="${HICLAW_LLM_BASE_URL}" \
+  --set nacos.database.host="${NACOS_DB_HOST}" \
+  --set nacos.database.port="${NACOS_DB_PORT}" \
+  --set nacos.database.username="${NACOS_DB_USERNAME}" \
+  --set nacos.database.password="${NACOS_DB_PASSWORD}" \
   --set gateway.publicURL="http://localhost:80" \
-  --set nacos.database.hostAliasIP="${GATEWAY_IP}" \
   --timeout 20m
 ```
 
@@ -107,7 +122,7 @@ kubectl get manager.hiclaw.io -n effiyc
 
 浏览器打开 [http://localhost](http://localhost) ，用户名 `admin`，密码见 `values.yaml` 中 `credentials.adminPassword`（默认 `admin`）。
 
-## 6. ChatAI（独立 Chart，可选）
+## 6. ChatAI（独立 Chart，可选安装）
 
 ChatAI **不在** `helm/effyic` 根 Chart 中安装，而是进入子目录 `chatai/` 单独部署（依赖已运行的 HiClaw 核心）。
 
@@ -120,8 +135,6 @@ ChatAI **不在** `helm/effyic` 根 Chart 中安装，而是进入子目录 `cha
 
 
 ### 6.2 安装 ChatAI
-
-
 
 ```bash
 GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
@@ -149,6 +162,18 @@ curl -X POST http://localhost/effiyc/v1/chat \
   -H "tenant-id: tenant-a" \
   -H "Content-Type: application/json" \
   -d '{"message":"你好"}'
+```
+
+
+
+### 7. 卸载
+
+```bash
+# 卸载保留 PVC：
+helm uninstall effyic -n default --wait --timeout 15m
+
+# 卸载删 PVC
+helm uninstall effyic -n default --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n default --ignore-not-found
 ```
 
 详见 [chatai/README.md](../chatai/README.md)。

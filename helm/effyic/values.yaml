@@ -44,8 +44,7 @@ nacos:
     identityValue: security
   database:
     platform: postgresql          # postgresql | mysql — official nacos-server image supports both (v3.2+)
-    host: "host.minikube.internal"  # host DB via minikube gateway; stable across host LAN IP changes
-    hostAliasIP: "192.168.49.1"     # minikube docker gateway; docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}'
+    host: "192.168.0.111"
     port: 5432
     database: nacos
     username: root
