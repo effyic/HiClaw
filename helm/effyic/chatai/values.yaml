@@ -3,7 +3,7 @@
 # =============================================================================
 
 global:
-  namespace: effiyc  # must match HiClaw release namespace
+  namespace: effyic  # must match HiClaw release namespace
 
 # ── Reference to existing HiClaw installation ─────────────────────────────
 hiclaw:
@@ -15,6 +15,7 @@ hiclaw:
 # ── Credentials (Worker runtime) ──────────────────────────────────────────
 credentials:
   defaultModel: qwen3.6-plus  # pass via --set credentials.defaultModel=...
+  modelProvider: qwen         # Higress AI route provider; required for LLM gateway auth
 
 # ── External PostgreSQL (session + tenant share one database) ─────────────
 postgres:
@@ -57,7 +58,7 @@ gateway:
   tlsSecretName: default        # TLS for default-domain routes; set "" to omit tls block
   publicURL: ""                 # align with core gateway.publicURL, e.g. http://localhost:80
   host: ""                      # empty = match all inbound hosts (path-based routing)
-  path: /effiyc                 # must match agno_worker CHAT_API_PREFIX
+  path: /effyic                 # must match agno_worker CHAT_API_PREFIX
   sync:
     image: ""                 # defaults to hiclaw.controllerImage or hiclaw/hiclaw-controller:latest
     backoffLimit: 5
@@ -89,6 +90,7 @@ resources: {}
 workers:
   - name: effyic-chatai
     model: ""
+    modelProvider: ""         # defaults to credentials.modelProvider (qwen)
     image: ""
     package: ""
     containerManaged: true

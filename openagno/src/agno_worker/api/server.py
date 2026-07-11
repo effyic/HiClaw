@@ -24,7 +24,7 @@ from agno_worker.hooks.protocols import UserContext
 
 logger = logging.getLogger(__name__)
 
-CHAT_API_PREFIX = "/effiyc"
+CHAT_API_PREFIX = "/effyic"
 
 
 def _cors_allow_origins() -> list[str]:

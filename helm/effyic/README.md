@@ -67,12 +67,13 @@ helm dependency build helm/effyic/
 
 ## 3. 安装
 
-默认命名空间为 `effiyc`（见 `values.yaml` 中 `global.namespace`）。
+默认命名空间为 `effyic`（见 `values.yaml` 中 `global.namespace`）。
 
 ```bash
 helm upgrade --install effyic-chatai helm/effyic/chatai \
-  --namespace effiyc --create-namespace \
+  --namespace effyic --create-namespace \
   --set hiclaw.releaseName="${HICLAW_RELEASE:-effyic}" \
+  --set credentials.modelProvider="${HICLAW_MODEL_PROVIDER:-qwen}" \
   --set credentials.defaultModel="${HICLAW_DEFAULT_MODEL:-qwen3.6-plus}" \
   --set postgres.host="${CHATAI_DB_HOST:-host.minikube.internal}" \
   --set postgres.port="${CHATAI_DB_PORT:-5432}" \
@@ -93,9 +94,9 @@ helm upgrade --install effyic-chatai helm/effyic/chatai \
 ## 4. 验证
 
 ```bash
-kubectl get pods -n effiyc
-helm status effyic -n effiyc
-kubectl get manager.hiclaw.io -n effiyc
+kubectl get pods -n effyic
+helm status effyic -n effyic
+kubectl get manager.hiclaw.io -n effyic
 ```
 
 预期 Running 组件：controller、nacos、tuwunel、minio、element-web、higress-gateway / higress-controller / higress-console、Manager Pod（`hiclaw-manager`）。
@@ -110,15 +111,13 @@ kubectl get manager.hiclaw.io -n effiyc
 
 ChatAI **不在** `helm/effyic` 根 Chart 中安装，而是进入子目录 `chatai/` 单独部署（依赖已运行的 HiClaw 核心），详见 [chatai/README.md](../chatai/README.md)。
 
-
-
 ### 7. 卸载
 
 ```bash
 # 卸载保留 PVC：
-helm uninstall effyic -n effiyc --wait --timeout 15m
+helm uninstall effyic -n effyic --wait --timeout 15m
 
 # 卸载删 PVC
-helm uninstall effyic -n effiyc --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n effiyc --ignore-not-found
+helm uninstall effyic -n effyic --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n effyic --ignore-not-found
 ```
 

@@ -9,7 +9,7 @@
 ## 1. 架构分层
 
 ```
-HTTP (/effiyc/v1/chat, /effiyc/v1/chat/stream)
+HTTP (/effyic/v1/chat, /effyic/v1/chat/stream)
   → api/identity.py           解析 tenant-id / user-id / session-id
   → hooks/filters.py          tenant_id 必填校验（可配置）+ 可选 pre/post filter
   → runtime/engine.py         单一动态 Agent
@@ -52,8 +52,8 @@ HTTP (/effiyc/v1/chat, /effiyc/v1/chat/stream)
 
 | 端点                     | 说明                   |
 | ---------------------- | -------------------- |
-| `POST /effiyc/v1/chat`        | 同步对话                 |
-| `POST /effiyc/v1/chat/stream` | SSE 流式对话             |
+| `POST /effyic/v1/chat`        | 同步对话                 |
+| `POST /effyic/v1/chat/stream` | SSE 流式对话             |
 | `GET /health`          | 健康检查                 |
 | `GET /status`          | 运行时状态（Hook 加载来源、指纹等） |
 
@@ -76,7 +76,7 @@ HTTP (/effiyc/v1/chat, /effiyc/v1/chat/stream)
 请求示例：
 
 ```bash
-curl -X POST http://localhost:8090/effiyc/v1/chat/stream \
+curl -X POST http://localhost:8090/effyic/v1/chat/stream \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -H "tenant-id: tenant-a" \

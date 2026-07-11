@@ -14,6 +14,7 @@ metadata:
 spec:
   runtime: agno
   model: {{ $worker.model | default $.Values.credentials.defaultModel | quote }}
+  modelProvider: {{ $worker.modelProvider | default $.Values.credentials.modelProvider | default "qwen" | quote }}
   image: {{ include "chatai.workerImage" $ctx | quote }}
   containerManaged: {{ $worker.containerManaged | default true }}
   {{- $pkg := include "chatai.workerPackage" $ctx }}

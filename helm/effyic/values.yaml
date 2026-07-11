@@ -3,7 +3,7 @@
 # =============================================================================
 
 global:
-  namespace: effiyc  # all chart resources target this namespace
+  namespace: effyic  # all chart resources target this namespace
   imageRegistry: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
   imageTag: ""
 

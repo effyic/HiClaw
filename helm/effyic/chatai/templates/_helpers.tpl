@@ -15,7 +15,7 @@ ChatAI standalone chart helpers (requires HiClaw core already installed).
 {{- end }}
 
 {{- define "chatai.namespace" -}}
-{{- .Values.global.namespace | default .Values.hiclaw.namespace | default .Release.Namespace | default "effiyc" -}}
+{{- .Values.global.namespace | default .Values.hiclaw.namespace | default .Release.Namespace | default "effyic" -}}
 {{- end }}
 
 {{/*
@@ -134,7 +134,7 @@ hiclaw/hiclaw-controller:latest
 {{- end }}
 
 {{- define "chatai.gatewayPath" -}}
-{{- .Values.gateway.path | default "/effiyc" -}}
+{{- .Values.gateway.path | default "/effyic" -}}
 {{- end }}
 
 {{- define "chatai.gatewayPublicURL" -}}

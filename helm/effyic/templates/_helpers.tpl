@@ -32,7 +32,7 @@ Chart label.
 Namespace for all resources.
 */}}
 {{- define "hiclaw.namespace" -}}
-{{- .Values.global.namespace | default .Release.Namespace | default "effiyc" }}
+{{- .Values.global.namespace | default .Release.Namespace | default "effyic" }}
 {{- end }}
 
 {{/*
