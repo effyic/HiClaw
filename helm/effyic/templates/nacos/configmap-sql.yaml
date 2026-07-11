@@ -1,4 +1,4 @@
-{{- if and .Values.nacos.enabled (eq .Values.nacos.mode "managed") (eq (.Values.nacos.database.platform | default "mysql") "postgresql") (.Values.nacos.dbInit.enabled | default true) }}
+{{- if and .Values.nacos.enabled (eq .Values.nacos.mode "managed") (eq (.Values.nacos.database.platform | default "mysql") "postgresql") (eq (include "hiclaw.nacos.dbInitEnabled" .) "enabled") }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

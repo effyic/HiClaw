@@ -8,7 +8,7 @@
 | 集群         | [minikube](https://minikube.sigs.k8s.io/) 已启动，`kubectl` 可用                              |
 | 工具         | Helm 3.14+                                                                              |
 | LLM        | 通义千问 API Key（安装时通过 `--set` 传入）                                                          |
-| PostgreSQL | 宿主机已运行 PostgreSQL；Nacos 库由 Helm `nacos.dbInit` Job 自动建库并导入 schema；                      |
+| PostgreSQL | 宿主机已运行 PostgreSQL；默认由 `nacos.dbInit` Job 自动建库并导入 schema（`NACOS_DB_INIT=false` 可跳过）      |
 | 本地镜像       | 已构建并装入 minikube：`hiclaw/hiclaw-controller`、`hiclaw/agno-worker`、`hiclaw/hiclaw-manager` |
 | inotify 限制 | minikube 节点默认 `max_user_instances=128`，多 Pod 同节点时 Nacos 等 Java 服务易耗尽；安装前执行下方调优命令        |
 
@@ -17,15 +17,9 @@
 minikube ssh -- "echo -e 'fs.inotify.max_user_instances=1024\nfs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/99-inotify.conf && sudo sysctl --system"
 ```
 
-Nacos 使用 PostgreSQL 时，**无需手动建库**——`helm upgrade --install` 会通过 `nacos.dbInit` Hook Job 自动完成：
 
-1. 创建 `nacos` 数据库（若不存在）
-2. 导入官方 `pg-schema.sql`（仅首次，已存在表结构则跳过）
-3. 写入默认管理员用户（`nacos` / `nacos`）
 
-SQL 脚本位于 `files/nacos-pg-schema.sql`；可通过 `nacos.dbInit.enabled=false` 关闭自动初始化。
-
-ChatAI 的 `aip_hub_test` 库由子 Chart `chatai` 的 `dbInit` Job 自动初始化
+SQL 脚本位于 `files/nacos-pg-schema.sql`。若库表已提前准备好，安装时设 `NACOS_DB_INIT=false` 跳过建库与导表（`nacos.dbInit.enabled=false`）。
 
 ## 1. 准备镜像
 
@@ -78,11 +72,17 @@ helm dependency build helm/effyic/
 默认命名空间为 `effiyc`（见 `values.yaml` 中 `global.namespace`）。
 
 ```bash
-# Nacos 外部 PostgreSQL（按宿主机实际配置修改）
-export NACOS_DB_HOST="${NACOS_DB_HOST:-nacos.inner.host}"
+# minikube 容器访问宿主机 PostgreSQL：hostAliases 将 NACOS_DB_HOST 解析为 Docker 网关 IP
+GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
+
+# Nacos 外部 PostgreSQL（dbInit Job 与 Nacos Server 共用）
+export NACOS_DB_HOST="${NACOS_DB_HOST:-host.minikube.internal}"
 export NACOS_DB_PORT="${NACOS_DB_PORT:-5432}"
+export NACOS_DB_DATABASE="${NACOS_DB_DATABASE:-nacos}"
 export NACOS_DB_USERNAME="${NACOS_DB_USERNAME:-root}"
 export NACOS_DB_PASSWORD="${NACOS_DB_PASSWORD:-postgresql}"
+# true：自动建库并导入 schema；false：跳过（库表须已存在）
+export NACOS_DB_INIT="${NACOS_DB_INIT:-true}"
 
 # LLM（llmApiKey 必填；其余与 values.yaml 默认值一致，可按需覆盖）
 export HICLAW_LLM_API_KEY="sk-your-qwen-api-key"
@@ -98,8 +98,11 @@ helm upgrade --install effyic helm/effyic \
   --set credentials.llmBaseUrl="${HICLAW_LLM_BASE_URL}" \
   --set nacos.database.host="${NACOS_DB_HOST}" \
   --set nacos.database.port="${NACOS_DB_PORT}" \
+  --set nacos.database.database="${NACOS_DB_DATABASE}" \
   --set nacos.database.username="${NACOS_DB_USERNAME}" \
   --set nacos.database.password="${NACOS_DB_PASSWORD}" \
+  --set nacos.database.hostAliasIP="${GATEWAY_IP}" \
+  --set nacos.dbInit.enabled="${NACOS_DB_INIT}" \
   --set gateway.publicURL="http://localhost:80" \
   --timeout 20m
 ```

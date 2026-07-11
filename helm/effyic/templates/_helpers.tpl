@@ -36,6 +36,18 @@ Namespace for all resources.
 {{- end }}
 
 {{/*
+Nacos PostgreSQL dbInit toggle. Avoid `enabled | default true` — Helm treats false as empty.
+Returns "enabled" or "disabled".
+*/}}
+{{- define "hiclaw.nacos.dbInitEnabled" -}}
+{{- if and (.Values.nacos.dbInit) (kindIs "bool" .Values.nacos.dbInit.enabled) -}}
+{{- ternary "enabled" "disabled" .Values.nacos.dbInit.enabled -}}
+{{- else -}}
+enabled
+{{- end -}}
+{{- end }}
+
+{{/*
 Common labels.
 */}}
 {{- define "hiclaw.commonLabels" -}}

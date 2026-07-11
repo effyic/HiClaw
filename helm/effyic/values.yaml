@@ -45,6 +45,7 @@ nacos:
   database:
     platform: postgresql          # postgresql | mysql — official nacos-server image supports both (v3.2+)
     host: "192.168.0.111"
+    hostAliasIP: ""               # minikube: docker gateway IP for hostAliases (see deploy-minikube.md)
     port: 5432
     database: nacos
     username: root
@@ -65,7 +66,7 @@ nacos:
       memory: 2Gi
   extraEnv: {}
   dbInit:
-    enabled: true
+    enabled: true               # false = skip pre-install Job (no auto CREATE DATABASE / schema import)
     image: postgres:16-alpine
     backoffLimit: 3
     activeDeadlineSeconds: 600
