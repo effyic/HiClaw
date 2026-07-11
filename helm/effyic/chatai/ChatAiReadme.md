@@ -43,13 +43,12 @@ TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -n effyic -o jsonpath='{.da
 
 curl -X POST http://localhost/effyic/v1/chat/stream \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer 32c001580411a1c36051c8a6d257b86a" \
-  -H 'role-code: default' \
-  -H 'user-id: default' \
-  -H 'Content-Type: application/json' \
-  -H 'session-id: 02ed7765-a1cc-4bcd-a0f9-307ba5bc6cda' \
-  -H 'tenant-id: default' \
-  --data-raw '{"message":"你好"}'
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "tenant-id: default" \
+  -H "user-id: default" \
+  -H "session-id: 02ed7765-a1cc-4bcd-a0f9-307ba5bc6cda" \
+  -H "role-code: default" \
+  -d '{"message":"你好"}'
 ```
 
 
