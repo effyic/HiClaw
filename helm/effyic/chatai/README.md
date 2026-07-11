@@ -1,39 +1,32 @@
-# ChatAI —  Helm Chart
+# ChatAI — Helm Chart
+
+独立子 Chart，在已安装的 HiClaw / Effyic 核心之上部署 Agno Worker、PostgreSQL schema、Higress 路由与 API Token。
 
 ## 前置条件
 
-1. 已安装 HiClaw 核心（namespace `effiyc`）：
-
-```bash
-helm upgrade --install effyic ../ \
-  --namespace effiyc --create-namespace \
-  --set credentials.llmApiKey="${HICLAW_LLM_API_KEY}" \
-  --set gateway.publicURL="http://localhost:80"
-```
-
-2. Nacos 中已上传 AgentSpec（如 `medical-orchestrator`，标签 `stable`）
-3. 外部 PostgreSQL 库 `aip_hub_test` 可访问（Agno 会话与租户配置共用同一库）
-
-
+1. 已安装 HiClaw 核心（namespace `effiyc`），参见 [README.md](../README.md)
+2. 宿主机 PostgreSQL 可访问；默认由 `dbInit` Job 自动建库并导入 schema（`CHATAI_DB_INIT=false` 可跳过）
+3. **仅当** `CHATAI_AGENTSPEC_ENABLED=true`（默认）时：Nacos 中已上传对应 AgentSpec
 
 ## 安装
 
 ```bash
-cd helm/effyic/chatai
-chmod +x install.sh
-./install.sh
-```
 
-或手动：
-
-```bash
-GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
-
-helm upgrade --install effyic-chatai . \
+helm upgrade --install effyic-chatai helm/effyic/chatai \
   --namespace effiyc --create-namespace \
-  --set hiclaw.releaseName=effyic \
+  --set hiclaw.releaseName="${HICLAW_RELEASE:-effyic}" \
+  --set credentials.defaultModel="${HICLAW_DEFAULT_MODEL:-qwen3.6-plus}" \
+  --set postgres.host="${CHATAI_DB_HOST:-host.minikube.internal}" \
+  --set postgres.port="${CHATAI_DB_PORT:-5432}" \
+  --set postgres.database="${CHATAI_DB_DATABASE:-aip_hub_test}" \
+  --set postgres.username="${CHATAI_DB_USERNAME:-root}" \
+  --set postgres.password="${CHATAI_DB_PASSWORD:-postgresql}" \
+  --set dbInit.enabled="${CHATAI_DB_INIT:-true}" \
+  --set agentspec.enabled="${CHATAI_AGENTSPEC_ENABLED:-false}" \
+  --set agentspec.dataId="${CHATAI_AGENTSPEC_DATA_ID:-medical-orchestrator}" \
+  --set agentspec.label="${CHATAI_AGENTSPEC_LABEL:-stable}" \
   --set gateway.publicURL="http://localhost:80" \
-  --set postgres.hostAliasIP="${GATEWAY_IP}"
+  --timeout 10m
 ```
 
 
@@ -41,6 +34,9 @@ helm upgrade --install effyic-chatai . \
 ## 验证
 
 ```bash
+kubectl get worker.hiclaw.io effyic-chatai -n effiyc
+kubectl get ingress,wasmplugin -l app.kubernetes.io/component=chatai -n effiyc
+
 TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -n effiyc -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
 
 curl -X POST http://localhost/effiyc/v1/chat \
@@ -49,26 +45,6 @@ curl -X POST http://localhost/effiyc/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"message":"你好"}'
 ```
-
-
-
-## 配置说明
-
-
-| values 路径            | 说明                                              |
-| -------------------- | ----------------------------------------------- |
-| `global.namespace`   | 目标 namespace（默认 `effiyc`）                      |
-| `hiclaw.releaseName` | 已安装的 HiClaw Helm release 名（默认 `effyic`）         |
-| `postgres.*`         | 外部 PostgreSQL（会话 + 租户共用，`AGNO_DB_URL` / `AGNO_AGENT_DB_URL` 自动注入） |
-| `globalEnv`          | Worker 共享环境变量（可选覆盖 `AGNO_DB_URL`）                                   |
-| `workers[]`          | Worker 列表（name / package / env）                 |
-| `dbInit`             | PostgreSQL 表结构初始化 Job                              |
-| `auth.token`         | API Token；留空则自动生成                               |
-| `gateway.publicURL`  | 平台公共 URL（与核心 `gateway.publicURL` 对齐，用于文档/NOTES） |
-| `gateway.host`       | Ingress Host；留空则匹配网关所有入站 Host                   |
-| `gateway.path`       | 路径前缀，默认 `/effiyc`                               |
-| `workers[].expose`   | 可选；启用后为 Worker 创建子域名路由                          |
-
 
 
 

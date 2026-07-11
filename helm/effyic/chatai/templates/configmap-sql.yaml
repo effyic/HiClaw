@@ -1,4 +1,4 @@
-{{- if .Values.dbInit.enabled | default true }}
+{{- if eq (include "chatai.dbInitEnabled" .) "enabled" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

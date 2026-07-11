@@ -18,6 +18,29 @@ ChatAI standalone chart helpers (requires HiClaw core already installed).
 {{- .Values.global.namespace | default .Values.hiclaw.namespace | default .Release.Namespace | default "effiyc" -}}
 {{- end }}
 
+{{/*
+PostgreSQL dbInit toggle. Avoid `enabled | default true` — Helm treats false as empty.
+Returns "enabled" or "disabled".
+*/}}
+{{- define "chatai.dbInitEnabled" -}}
+{{- if and (.Values.dbInit) (kindIs "bool" .Values.dbInit.enabled) -}}
+{{- ternary "enabled" "disabled" .Values.dbInit.enabled -}}
+{{- else -}}
+enabled
+{{- end -}}
+{{- end }}
+
+{{/*
+AgentSpec / Nacos package toggle. Avoid `enabled | default true` — Helm treats false as empty.
+*/}}
+{{- define "chatai.agentspecEnabled" -}}
+{{- if and (.Values.agentspec) (kindIs "bool" .Values.agentspec.enabled) -}}
+{{- ternary "enabled" "disabled" .Values.agentspec.enabled -}}
+{{- else -}}
+enabled
+{{- end -}}
+{{- end -}}
+
 {{- define "chatai.hiclaw.controllerName" -}}
 {{- if .Values.hiclaw.controllerName -}}
 {{- .Values.hiclaw.controllerName -}}
@@ -124,6 +147,16 @@ http://localhost
 {{- $label := .Values.agentspec.label | default "stable" -}}
 {{- $ns := .Values.nacos.namespaceId | default "public" -}}
 {{- printf "nacos://%s:%d/%s/%s?label:%s" (include "chatai.nacos.host" .) (include "chatai.nacos.port" . | int) $ns $dataId $label -}}
+{{- end }}
+
+{{- define "chatai.workerPackage" -}}
+{{- $worker := .worker -}}
+{{- $root := .root -}}
+{{- if $worker.package -}}
+{{- $worker.package -}}
+{{- else if eq (include "chatai.agentspecEnabled" $root) "enabled" -}}
+{{- include "chatai.defaultPackageURI" $root -}}
+{{- end -}}
 {{- end }}
 
 {{- define "chatai.workerImage" -}}

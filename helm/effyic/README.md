@@ -17,8 +17,6 @@
 minikube ssh -- "echo -e 'fs.inotify.max_user_instances=1024\nfs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/99-inotify.conf && sudo sysctl --system"
 ```
 
-
-
 SQL 脚本位于 `files/nacos-pg-schema.sql`。若库表已提前准备好，安装时设 `NACOS_DB_INIT=false` 跳过建库与导表（`nacos.dbInit.enabled=false`）。
 
 ## 1. 准备镜像
@@ -72,39 +70,22 @@ helm dependency build helm/effyic/
 默认命名空间为 `effiyc`（见 `values.yaml` 中 `global.namespace`）。
 
 ```bash
-# minikube 容器访问宿主机 PostgreSQL：hostAliases 将 NACOS_DB_HOST 解析为 Docker 网关 IP
-GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
-
-# Nacos 外部 PostgreSQL（dbInit Job 与 Nacos Server 共用）
-export NACOS_DB_HOST="${NACOS_DB_HOST:-host.minikube.internal}"
-export NACOS_DB_PORT="${NACOS_DB_PORT:-5432}"
-export NACOS_DB_DATABASE="${NACOS_DB_DATABASE:-nacos}"
-export NACOS_DB_USERNAME="${NACOS_DB_USERNAME:-root}"
-export NACOS_DB_PASSWORD="${NACOS_DB_PASSWORD:-postgresql}"
-# true：自动建库并导入 schema；false：跳过（库表须已存在）
-export NACOS_DB_INIT="${NACOS_DB_INIT:-true}"
-
-# LLM（llmApiKey 必填；其余与 values.yaml 默认值一致，可按需覆盖）
-export HICLAW_LLM_API_KEY="sk-your-qwen-api-key"
-export HICLAW_LLM_PROVIDER="${HICLAW_LLM_PROVIDER:-qwen}"
-export HICLAW_DEFAULT_MODEL="${HICLAW_DEFAULT_MODEL:-qwen3.6-plus}"
-export HICLAW_LLM_BASE_URL="${HICLAW_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
-
-helm upgrade --install effyic helm/effyic \
+helm upgrade --install effyic-chatai helm/effyic/chatai \
   --namespace effiyc --create-namespace \
-  --set credentials.llmApiKey="${HICLAW_LLM_API_KEY}" \
-  --set credentials.llmProvider="${HICLAW_LLM_PROVIDER}" \
-  --set credentials.defaultModel="${HICLAW_DEFAULT_MODEL}" \
-  --set credentials.llmBaseUrl="${HICLAW_LLM_BASE_URL}" \
-  --set nacos.database.host="${NACOS_DB_HOST}" \
-  --set nacos.database.port="${NACOS_DB_PORT}" \
-  --set nacos.database.database="${NACOS_DB_DATABASE}" \
-  --set nacos.database.username="${NACOS_DB_USERNAME}" \
-  --set nacos.database.password="${NACOS_DB_PASSWORD}" \
-  --set nacos.database.hostAliasIP="${GATEWAY_IP}" \
-  --set nacos.dbInit.enabled="${NACOS_DB_INIT}" \
+  --set hiclaw.releaseName="${HICLAW_RELEASE:-effyic}" \
+  --set credentials.defaultModel="${HICLAW_DEFAULT_MODEL:-qwen3.6-plus}" \
+  --set postgres.host="${CHATAI_DB_HOST:-host.minikube.internal}" \
+  --set postgres.port="${CHATAI_DB_PORT:-5432}" \
+  --set postgres.database="${CHATAI_DB_DATABASE:-aip_hub_test}" \
+  --set postgres.username="${CHATAI_DB_USERNAME:-root}" \
+  --set postgres.password="${CHATAI_DB_PASSWORD:-postgresql}" \
+  --set postgres.hostAliasIP="${GATEWAY_IP:-}" \
+  --set dbInit.enabled="${CHATAI_DB_INIT:-true}" \
+  --set agentspec.enabled="${CHATAI_AGENTSPEC_ENABLED:-true}" \
+  --set agentspec.dataId="${CHATAI_AGENTSPEC_DATA_ID:-medical-orchestrator}" \
+  --set agentspec.label="${CHATAI_AGENTSPEC_LABEL:-stable}" \
   --set gateway.publicURL="http://localhost:80" \
-  --timeout 20m
+  --timeout 10m
 ```
 
 
@@ -127,45 +108,7 @@ kubectl get manager.hiclaw.io -n effiyc
 
 ## 6. ChatAI（独立 Chart，可选安装）
 
-ChatAI **不在** `helm/effyic` 根 Chart 中安装，而是进入子目录 `chatai/` 单独部署（依赖已运行的 HiClaw 核心）。
-
-### 6.1 前置
-
-- §3 核心安装已完成（namespace `effiyc`）
-- Nacos 已上传 AgentSpec `medical-orchestrator`（标签 `stable`；ZIP 须含 `manifest.json`）
-- 外部 PostgreSQL 库 `aip_hub_test` 可用（Agno 会话 + 租户配置共用）
-
-
-
-### 6.2 安装 ChatAI
-
-```bash
-GATEWAY_IP=$(docker network inspect minikube --format '{{(index .IPAM.Config 0).Gateway}}')
-
-helm upgrade --install effyic-chatai helm/effyic/chatai \
-  --namespace effiyc --create-namespace \
-  --set hiclaw.releaseName=effyic \
-  --set gateway.publicURL="http://localhost:80" \
-  --set postgres.hostAliasIP="${GATEWAY_IP}"
-```
-
-
-
-### 6.3 验证
-
-```bash
-kubectl get worker.hiclaw.io effyic-chatai -n effiyc
-kubectl get ingress,wasmplugin -l app.kubernetes.io/component=chatai -n effiyc
-
-TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -n effiyc -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
-
-# 平台公共域名 + /effiyc 路径
-curl -X POST http://localhost/effiyc/v1/chat \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "tenant-id: tenant-a" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"你好"}'
-```
+ChatAI **不在** `helm/effyic` 根 Chart 中安装，而是进入子目录 `chatai/` 单独部署（依赖已运行的 HiClaw 核心），详见 [chatai/README.md](../chatai/README.md)。
 
 
 
@@ -179,4 +122,3 @@ helm uninstall effyic -n effiyc --wait --timeout 15m
 helm uninstall effyic -n effiyc --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n effiyc --ignore-not-found
 ```
 
-详见 [chatai/README.md](../chatai/README.md)。

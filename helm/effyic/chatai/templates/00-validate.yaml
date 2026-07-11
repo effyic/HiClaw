@@ -2,6 +2,6 @@
 {{- fail "postgres.database is required (shared PostgreSQL database for Agno session + tenant config)" -}}
 {{- end -}}
 
-{{- if not (.Values.hiclaw.releaseName | default "") -}}
+{{- if not (.Values.hiclaw.releaseName | default "effyic") -}}
 {{- fail "hiclaw.releaseName is required (name of the existing HiClaw Helm release)" -}}
 {{- end -}}

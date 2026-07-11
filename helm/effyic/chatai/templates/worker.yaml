@@ -16,7 +16,10 @@ spec:
   model: {{ $worker.model | default $.Values.credentials.defaultModel | quote }}
   image: {{ include "chatai.workerImage" $ctx | quote }}
   containerManaged: {{ $worker.containerManaged | default true }}
-  package: {{ $worker.package | default (include "chatai.defaultPackageURI" $) | quote }}
+  {{- $pkg := include "chatai.workerPackage" $ctx }}
+  {{- if $pkg }}
+  package: {{ $pkg | quote }}
+  {{- end }}
   {{- with $worker.expose }}
   expose:
     {{- toYaml . | nindent 4 }}

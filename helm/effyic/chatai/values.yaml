@@ -1,74 +1,60 @@
 # =============================================================================
 # ChatAI Helm Chart — values.yaml
 # =============================================================================
-# Prerequisite: HiClaw / Effyic core is already installed (helm install effyic …).
-# This chart deploys Agno Worker CR, PG schema, Higress route, and API token.
-# =============================================================================
 
 global:
   namespace: effiyc  # must match HiClaw release namespace
 
 # ── Reference to existing HiClaw installation ─────────────────────────────
 hiclaw:
-  releaseName: effyic
-  namespace: ""       # defaults to global.namespace
-  controllerName: ""  # defaults to {releaseName}-controller
+  releaseName: effyic       # required — pass via --set hiclaw.releaseName=...
+  namespace: ""             # defaults to global.namespace
+  controllerName: ""        # defaults to {releaseName}-controller
+
+# ── Credentials (Worker runtime) ──────────────────────────────────────────
+credentials:
+  defaultModel: qwen3.6-plus  # pass via --set credentials.defaultModel=...
 
 # ── External PostgreSQL (session + tenant share one database) ─────────────
 postgres:
   host: host.minikube.internal
-  hostAliasIP: ""     # minikube: docker gateway IP for hostAliases on init Job
+  hostAliasIP: ""           # minikube: docker gateway IP (see deploy-minikube.md)
   port: 5432
-  database: aip_hub_test
+  database: aip_hub_test    # required — Agno session + tenant config
   username: root
   password: postgresql
-  # url: ""           # optional full URL override (postgresql+psycopg://…)
 
-# ── Nacos (AgentSpec source; defaults to HiClaw-managed Nacos Service) ────
+# ── PostgreSQL schema init (post-install Hook Job) ────────────────────────
+dbInit:
+  enabled: true             # false = skip CREATE DATABASE / schema import
+  image: postgres:16-alpine
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+
+# ── AgentSpec via Nacos (optional — controller fetches and mounts to Pod) ─
+# agno-worker itself does NOT bind Nacos at build/runtime; it reads
+# AGNO_AGENTSPEC_DIR (/etc/hiclaw/agentspec) or falls back to built-in default.
+# When enabled=false, Worker CR has no spec.package; controller skips Nacos fetch.
+agentspec:
+  enabled: true               # false = use agno-worker built-in default AgentSpec
+  dataId: medical-orchestrator
+  label: stable
+
+# ── Nacos (only used when agentspec.enabled=true) ─────────────────────────
 nacos:
-  host: ""            # default: {hiclaw.releaseName}-nacos.{namespace}.svc.cluster.local
+  host: ""                  # default: {hiclaw.releaseName}-nacos.{namespace}.svc.cluster.local
   port: 8848
   namespaceId: public
   username: nacos
   password: nacos
 
-agentspec:
-  dataId: medical-orchestrator
-  label: stable
-
-credentials:
-  defaultModel: qwen3.6-plus
-
-worker:
-  image:
-    repository: hiclaw/agno-worker
-    tag: latest
-
-# Shared env for all workers (workers[].env overrides)
-globalEnv:
-  AGNO_REQUIRE_TENANT_ID: "true"
-
-resources: {}
-
-auth:
-  token: ""             # leave empty to auto-generate (stored in Secret)
-  secretKey: CHATAI_API_TOKEN
-
-dbInit:
-  enabled: true
-  image: postgres:16-alpine
-  backoffLimit: 3
-  activeDeadlineSeconds: 600
-
+# ── Gateway / Ingress (platform path routing on shared Higress) ───────────
 gateway:
   enabled: true
   ingressClassName: higress
-  # Match HiClaw gateway.publicURL (used in NOTES / docs only).
-  publicURL: ""
-  # Empty host = match all inbound hosts on the platform gateway (path-based routing).
-  host: ""
-  # Path prefix on the shared platform domain; must match agno_worker CHAT_API_PREFIX (/effiyc).
-  path: /effiyc
+  publicURL: ""             # align with core gateway.publicURL, e.g. http://localhost:80
+  host: ""                  # empty = match all inbound hosts (path-based routing)
+  path: /effiyc             # must match agno_worker CHAT_API_PREFIX
   keyAuth:
     enabled: true
     allowQuery: true
@@ -76,6 +62,22 @@ gateway:
       - Authorization
       - x-api-key
     pluginUrl: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/key-auth:1.0.0
+
+# ── API auth (auto-generated token stored in Secret) ──────────────────────
+auth:
+  token: ""                 # leave empty to auto-generate
+  secretKey: CHATAI_API_TOKEN
+
+# ── Worker defaults ───────────────────────────────────────────────────────
+worker:
+  image:
+    repository: hiclaw/agno-worker
+    tag: latest
+
+globalEnv:
+  AGNO_REQUIRE_TENANT_ID: "true"
+
+resources: {}
 
 workers:
   - name: effyic-chatai
@@ -85,11 +87,8 @@ workers:
     containerManaged: true
     servicePort: 8090
     targetPort: 8090
-    # Optional per-worker Ingress host override (empty = platform shared domain).
     gatewayHost: ""
     gatewayConsumer: ""
     env: {}
     resources: {}
-    # Worker expose creates a per-worker subdomain (worker-*-local.hiclaw.io).
-    # Leave unset for platform path routing via gateway.path (/effiyc).
     expose: []
