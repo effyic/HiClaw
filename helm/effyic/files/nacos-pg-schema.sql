@@ -557,7 +557,7 @@ CREATE INDEX "idx_ai_resource_ver_gmt_modified" ON "ai_resource_version" USING b
 
 -- >>> default admin user seed (idempotent, safe to re-run; password: nacos)
 INSERT INTO users (username, password, enabled) VALUES
-  ('nacos', '$2a$10$EuWPZHzz32dJN7jexM34MOeYirDdFAZm2kuWj7VEOJhhZkDrxfvUu', TRUE)
+  ('nacos', '$2a$10$WtlTNJVirxm/pNFf0xtFHeFWvqs7wrqOaXxk0O54Gi3QurqESSZFS', TRUE)
 ON CONFLICT DO NOTHING;
 INSERT INTO roles (username, role) VALUES ('nacos', 'ROLE_ADMIN') ON CONFLICT DO NOTHING;
 INSERT INTO permissions (role, resource, action) VALUES ('ROLE_ADMIN', '*:*:*', 'rw') ON CONFLICT DO NOTHING;
