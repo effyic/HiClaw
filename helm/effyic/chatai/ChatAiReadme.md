@@ -11,7 +11,6 @@
 ## 安装
 
 ```bash
-
 helm upgrade --install effyic-chatai helm/effyic/chatai \
   --namespace effyic --create-namespace \
   --set hiclaw.releaseName="${HICLAW_RELEASE:-effyic}" \
@@ -22,7 +21,7 @@ helm upgrade --install effyic-chatai helm/effyic/chatai \
   --set postgres.database="${CHATAI_DB_DATABASE:-aip_hub_test}" \
   --set postgres.username="${CHATAI_DB_USERNAME:-root}" \
   --set postgres.password="${CHATAI_DB_PASSWORD:-postgresql}" \
-  --set dbInit.enabled="${CHATAI_DB_INIT:-true}" \
+  --set dbInit.enabled="${CHATAI_DB_INIT:-false}" \
   --set agentspec.enabled="${CHATAI_AGENTSPEC_ENABLED:-false}" \
   --set agentspec.dataId="${CHATAI_AGENTSPEC_DATA_ID:-medical-orchestrator}" \
   --set agentspec.label="${CHATAI_AGENTSPEC_LABEL:-stable}" \

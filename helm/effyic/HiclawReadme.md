@@ -70,23 +70,20 @@ helm dependency build helm/effyic/
 默认命名空间为 `effyic`（见 `values.yaml` 中 `global.namespace`）。
 
 ```bash
-helm upgrade --install effyic-chatai helm/effyic/chatai \
+helm upgrade --install effyic helm/effyic \
   --namespace effyic --create-namespace \
-  --set hiclaw.releaseName="${HICLAW_RELEASE:-effyic}" \
-  --set credentials.modelProvider="${HICLAW_MODEL_PROVIDER:-qwen}" \
+  --set credentials.llmApiKey="${HICLAW_LLM_API_KEY}" \
+  --set credentials.llmProvider="${HICLAW_LLM_PROVIDER:-qwen}" \
   --set credentials.defaultModel="${HICLAW_DEFAULT_MODEL:-qwen3.6-plus}" \
-  --set postgres.host="${CHATAI_DB_HOST:-host.minikube.internal}" \
-  --set postgres.port="${CHATAI_DB_PORT:-5432}" \
-  --set postgres.database="${CHATAI_DB_DATABASE:-aip_hub_test}" \
-  --set postgres.username="${CHATAI_DB_USERNAME:-root}" \
-  --set postgres.password="${CHATAI_DB_PASSWORD:-postgresql}" \
-  --set postgres.hostAliasIP="${GATEWAY_IP:-}" \
-  --set dbInit.enabled="${CHATAI_DB_INIT:-true}" \
-  --set agentspec.enabled="${CHATAI_AGENTSPEC_ENABLED:-true}" \
-  --set agentspec.dataId="${CHATAI_AGENTSPEC_DATA_ID:-medical-orchestrator}" \
-  --set agentspec.label="${CHATAI_AGENTSPEC_LABEL:-stable}" \
+  --set credentials.llmBaseUrl="${HICLAW_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}" \
+  --set nacos.database.host="${NACOS_DB_HOST:-host.minikube.internal}" \
+  --set nacos.database.port="${NACOS_DB_PORT:-5432}" \
+  --set nacos.database.database="${NACOS_DB_DATABASE:-nacos}" \
+  --set nacos.database.username="${NACOS_DB_USERNAME:-root}" \
+  --set nacos.database.password="${NACOS_DB_PASSWORD:-postgresql}" \
+  --set nacos.dbInit.enabled="${NACOS_DB_INIT:-true}" \
   --set gateway.publicURL="http://localhost:80" \
-  --timeout 10m
+  --timeout 20m  
 ```
 
 
