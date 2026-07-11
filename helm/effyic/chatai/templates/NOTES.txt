@@ -7,11 +7,14 @@ Prerequisite: HiClaw core release "{{ .Values.hiclaw.releaseName }}" in namespac
 Namespace: {{ include "chatai.namespace" . }}
 Controller: {{ include "chatai.hiclaw.controllerName" . }}
 Route:    {{ include "chatai.gatewayPath" . }} on platform gateway ({{ include "chatai.gatewayPublicURL" . }})
+Higress:  Ingress + McpBridge service source (visible in Higress Console like element-web)
 
 {{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
 {{- $ctx := dict "root" $ "worker" $worker }}
 
 Worker: {{ $worker.name }}
+Ingress: {{ include "chatai.ingressName" $ctx }}
+Service source: {{ include "chatai.serviceSourceName" $ctx }}.dns -> {{ include "chatai.serviceDns" $ctx }}
 Token:
   kubectl get secret {{ include "chatai.authSecretName" $ctx }} \
     -n {{ include "chatai.namespace" $ }} \
@@ -28,5 +31,5 @@ Example (port-forward higress-gateway 80:80 if needed):
 Uninstall:
   helm uninstall {{ .Release.Name }} -n {{ include "chatai.namespace" $ }}
 
-Note: uninstalling this chart removes Worker CR / Ingress / DB init Job only.
+Note: uninstalling this chart removes Worker CR / Higress route / McpBridge registry / DB init Job.
 HiClaw core (effyic) remains installed.

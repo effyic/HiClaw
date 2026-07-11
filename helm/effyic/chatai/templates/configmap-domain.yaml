@@ -1,0 +1,24 @@
+{{- if .Values.gateway.enabled | default true }}
+{{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
+{{- $ctx := dict "root" $ "worker" $worker }}
+{{- $host := include "chatai.gatewayIngressHost" $ctx | trim }}
+{{- if $host }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chatai.gatewayDomainConfigMapName" $ctx }}
+  namespace: {{ include "chatai.namespace" $ }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: chatai
+    higress.io/config-map-type: domain
+    higress.io/resource-definer: higress
+    {{ include "chatai.gatewayDomainLabelKey" $ctx }}: "true"
+data:
+  domain: {{ $host | quote }}
+  enableHttps: "off"
+{{- end }}
+{{- end }}
+{{- end }}

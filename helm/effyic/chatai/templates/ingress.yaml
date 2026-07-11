@@ -1,6 +1,7 @@
 {{- if .Values.gateway.enabled | default true }}
 {{- range $worker := .Values.workers | default (list (dict "name" "effyic-chatai")) }}
 {{- $ctx := dict "root" $ "worker" $worker }}
+{{- $host := include "chatai.gatewayIngressHost" $ctx | trim }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -11,10 +12,14 @@ metadata:
     app.kubernetes.io/name: {{ include "chatai.name" $ }}
     app.kubernetes.io/instance: {{ $.Release.Name }}
     app.kubernetes.io/component: chatai
+    higress.io/resource-definer: higress
+    {{ include "chatai.gatewayDomainLabelKey" $ctx }}: "true"
+  annotations:
+    higress.io/destination: {{ include "chatai.gatewayDestination" $ctx | quote }}
+    higress.io/ignore-path-case: "true"
 spec:
   ingressClassName: {{ $.Values.gateway.ingressClassName | default "higress" | quote }}
   rules:
-    {{- $host := include "chatai.gatewayIngressHost" $ctx | trim }}
     - {{- if $host }}
       host: {{ $host | quote }}
       {{- end }}
@@ -23,9 +28,14 @@ spec:
           - path: {{ include "chatai.gatewayPath" $ | quote }}
             pathType: Prefix
             backend:
-              service:
-                name: {{ include "chatai.serviceName" $ctx }}
-                port:
-                  number: {{ $worker.servicePort | default 8090 }}
+              resource:
+                apiGroup: networking.higress.io
+                kind: McpBridge
+                name: {{ include "chatai.mcpBridgeName" $ctx | quote }}
+  {{- $tlsSecret := $.Values.gateway.tlsSecretName | default "default" }}
+  {{- if and (not $host) $tlsSecret }}
+  tls:
+    - secretName: {{ $tlsSecret | quote }}
+  {{- end }}
 {{- end }}
 {{- end }}

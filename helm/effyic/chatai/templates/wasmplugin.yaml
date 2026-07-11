@@ -11,8 +11,21 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ include "chatai.name" $ }}
     app.kubernetes.io/instance: {{ $.Release.Name }}
-    app.kubernetes.io/component: chatai
+    app.kubernetes.io/component: higress-plugin
+    higress.io/resource-definer: higress
+    higress.io/wasm-plugin-built-in: "false"
+    higress.io/wasm-plugin-name: key-auth
+    higress.io/wasm-plugin-version: 1.0.0
+    higress.io/wasm-plugin-category: auth
+  annotations:
+    higress.io/wasm-plugin-title: Key Auth
+    higress.io/wasm-plugin-description: Authentication based on API Key for ChatAI route.
+    higress.io/wasm-plugin-icon: https://img.alicdn.com/imgextra/i4/O1CN01BPFGlT1pGZ2VDLgaH_!!6000000005333-2-tps-42-42.png
 spec:
+  defaultConfigDisable: false
+  failStrategy: FAIL_OPEN
+  phase: AUTHN
+  priority: 310
   defaultConfig:
     global_auth: false
     consumers:
@@ -27,6 +40,7 @@ spec:
   matchRules:
     - ingress:
         - {{ printf "%s/%s" (include "chatai.namespace" $) (include "chatai.ingressName" $ctx) | quote }}
+      configDisable: false
       config:
         allow:
           - {{ $consumer | quote }}

@@ -10,6 +10,7 @@ hiclaw:
   releaseName: effyic       # required — pass via --set hiclaw.releaseName=...
   namespace: ""             # defaults to global.namespace
   controllerName: ""        # defaults to {releaseName}-controller
+  controllerImage: ""       # hook Job image fallback; default hiclaw/hiclaw-controller:latest
 
 # ── Credentials (Worker runtime) ──────────────────────────────────────────
 credentials:
@@ -52,9 +53,15 @@ nacos:
 gateway:
   enabled: true
   ingressClassName: higress
-  publicURL: ""             # align with core gateway.publicURL, e.g. http://localhost:80
-  host: ""                  # empty = match all inbound hosts (path-based routing)
-  path: /effiyc             # must match agno_worker CHAT_API_PREFIX
+  mcpBridgeName: default        # shared McpBridge service registry (same as HiClaw core)
+  tlsSecretName: default        # TLS for default-domain routes; set "" to omit tls block
+  publicURL: ""                 # align with core gateway.publicURL, e.g. http://localhost:80
+  host: ""                      # empty = match all inbound hosts (path-based routing)
+  path: /effiyc                 # must match agno_worker CHAT_API_PREFIX
+  sync:
+    image: ""                 # defaults to hiclaw.controllerImage or hiclaw/hiclaw-controller:latest
+    backoffLimit: 5
+    activeDeadlineSeconds: 120
   keyAuth:
     enabled: true
     allowQuery: true

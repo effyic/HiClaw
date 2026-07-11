@@ -35,7 +35,9 @@ helm upgrade --install effyic-chatai helm/effyic/chatai \
 
 ```bash
 kubectl get worker.hiclaw.io effyic-chatai -n effiyc
-kubectl get ingress,wasmplugin -l app.kubernetes.io/component=chatai -n effiyc
+kubectl get ingress -l higress.io/resource-definer=higress -n effiyc | grep chatai
+kubectl get mcpbridge default -n effiyc -o jsonpath='{.spec.registries[*].name}' ; echo
+kubectl get wasmplugin -l higress.io/resource-definer=higress -n effiyc | grep chatai
 
 TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -n effiyc -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
 

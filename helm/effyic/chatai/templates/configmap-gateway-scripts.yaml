@@ -1,0 +1,64 @@
+{{- if .Values.gateway.enabled | default true }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chatai.fullname" . }}-gateway-scripts
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: chatai-gateway
+data:
+  mcpbridge-sync.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    resource="mcpbridge.networking.higress.io/${MCP_BRIDGE_NAME}"
+
+    patch_registry() {
+      local name="$1"
+      local domain="$2"
+      local port="$3"
+      local attempt doc new_doc
+
+      for attempt in $(seq 1 8); do
+        doc="$(kubectl get "${resource}" -n "${NAMESPACE}" -o json)"
+        if [ "${MODE}" = "apply" ]; then
+          new_doc="$(echo "${doc}" | jq \
+            --arg name "${name}" \
+            --arg domain "${domain}" \
+            --argjson port "${port}" \
+            '.spec.registries = ((.spec.registries // []) | map(select(.name != $name))) + [
+              {"name": $name, "type": "dns", "domain": $domain, "port": $port, "protocol": "http"}
+            ]')"
+        else
+          new_doc="$(echo "${doc}" | jq \
+            --arg name "${name}" \
+            '.spec.registries = ((.spec.registries // []) | map(select(.name != $name)))')"
+        fi
+        if echo "${new_doc}" | kubectl apply -f - >/dev/null 2>&1; then
+          return 0
+        fi
+        sleep $((attempt / 2 + 1))
+      done
+      echo "failed to update McpBridge/${MCP_BRIDGE_NAME} for ${name}" >&2
+      return 1
+    }
+
+    IFS=','
+    for entry in ${WORKERS}; do
+      [ -n "${entry}" ] || continue
+      name="${entry%%|*}"
+      rest="${entry#*|}"
+      domain="${rest%%|*}"
+      port="${rest##*|}"
+      patch_registry "${name}" "${domain}" "${port}"
+    done
+
+    if [ "${MODE}" = "apply" ]; then
+      action="registered"
+    else
+      action="removed"
+    fi
+    echo "McpBridge/${MCP_BRIDGE_NAME}: ChatAI service sources ${action}"
+{{- end }}

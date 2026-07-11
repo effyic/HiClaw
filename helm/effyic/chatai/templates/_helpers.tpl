@@ -77,6 +77,52 @@ enabled
 {{- printf "%s-chatai-key-auth" .worker.name | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
+{{- define "chatai.serviceSourceName" -}}
+{{- include "chatai.serviceName" . -}}
+{{- end }}
+
+{{- define "chatai.serviceDns" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "chatai.serviceName" .) (include "chatai.namespace" .root) -}}
+{{- end }}
+
+{{- define "chatai.workerServicePort" -}}
+{{- .worker.servicePort | default 8090 -}}
+{{- end }}
+
+{{- define "chatai.gatewayDestination" -}}
+{{- printf "%s.dns:%d" (include "chatai.serviceSourceName" .) (include "chatai.workerServicePort" . | int) -}}
+{{- end }}
+
+{{- define "chatai.mcpBridgeName" -}}
+{{- .root.Values.gateway.mcpBridgeName | default "default" -}}
+{{- end }}
+
+{{- define "chatai.gatewayDomainConfigMapName" -}}
+{{- $host := include "chatai.gatewayIngressHost" . | trim -}}
+{{- if $host -}}
+{{- printf "domain-%s" $host -}}
+{{- end -}}
+{{- end }}
+
+{{- define "chatai.gatewayDomainLabelKey" -}}
+{{- $host := include "chatai.gatewayIngressHost" . | trim -}}
+{{- if $host -}}
+{{- printf "higress.io/domain_%s" $host -}}
+{{- else -}}
+higress.io/domain_higress-default-domain
+{{- end -}}
+{{- end }}
+
+{{- define "chatai.gatewaySyncImage" -}}
+{{- if .Values.gateway.sync.image -}}
+{{- .Values.gateway.sync.image -}}
+{{- else if .Values.hiclaw.controllerImage -}}
+{{- .Values.hiclaw.controllerImage -}}
+{{- else -}}
+hiclaw/hiclaw-controller:latest
+{{- end -}}
+{{- end }}
+
 {{- define "chatai.gatewayIngressHost" -}}
 {{- $worker := .worker -}}
 {{- $root := .root -}}

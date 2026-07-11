@@ -1,0 +1,43 @@
+{{- if .Values.gateway.enabled | default true }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "chatai.fullname" . }}-gateway
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: chatai-gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "chatai.fullname" . }}-gateway
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: chatai-gateway
+rules:
+  - apiGroups: ["networking.higress.io"]
+    resources: ["mcpbridges"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "chatai.fullname" . }}-gateway
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: chatai-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "chatai.fullname" . }}-gateway
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "chatai.fullname" . }}-gateway
+    namespace: {{ include "chatai.namespace" . }}
+{{- end }}
