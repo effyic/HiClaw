@@ -170,10 +170,10 @@ curl -X POST http://localhost/effiyc/v1/chat \
 
 ```bash
 # 卸载保留 PVC：
-helm uninstall effyic -n default --wait --timeout 15m
+helm uninstall effyic -n effiyc --wait --timeout 15m
 
 # 卸载删 PVC
-helm uninstall effyic -n default --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n default --ignore-not-found
+helm uninstall effyic -n effiyc --no-hooks; kubectl delete pvc data-effyic-tuwunel-0 data-effyic-minio-0 -n effiyc --ignore-not-found
 ```
 
 详见 [chatai/README.md](../chatai/README.md)。
