@@ -26,7 +26,7 @@ helm upgrade --install effyic-chatai helm/effyic/chatai \
   --set agentspec.dataId="${CHATAI_AGENTSPEC_DATA_ID:-medical-orchestrator}" \
   --set agentspec.label="${CHATAI_AGENTSPEC_LABEL:-stable}" \
   --set gateway.publicURL="http://localhost:80" \
-  --timeout 10m
+  --timeout 20m
 ```
 
 
@@ -41,13 +41,15 @@ kubectl get wasmplugin -l higress.io/resource-definer=higress -n effyic | grep c
 
 TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -n effyic -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
 
-curl -X POST http://localhost:8090/effyic/v1/chat/stream \
+curl -X POST http://localhost/effyic/v1/chat/stream \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer 32c001580411a1c36051c8a6d257b86a" \
-  -H "tenant-id: default" \
-  -H "user-id: default" \
-  -H "role-code: default" \
-  -d '{"message": "你好"}'
+  -H 'role-code: default' \
+  -H 'user-id: default' \
+  -H 'Content-Type: application/json' \
+  -H 'session-id: 02ed7765-a1cc-4bcd-a0f9-307ba5bc6cda' \
+  -H 'tenant-id: default' \
+  --data-raw '{"message":"你好"}'
 ```
 
 
