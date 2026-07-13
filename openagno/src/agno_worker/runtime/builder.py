@@ -20,6 +20,7 @@ from agno_worker.hooks.compose import (
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.mcp.loader import build_mcp_tools
 from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill_catalog_summary
+from agno_worker.api.identity import default_debug_request
 from agno_worker.runtime.agent import StorageAwareAgent
 from agno_worker.runtime.storage import slim_session_state, sync_debug_request_to_session_state
 from agno_worker.tenant.service import TenantAgentService
@@ -261,7 +262,7 @@ class AgentBuilder:
                 run_context.session_state.update(updates)
 
             metadata = getattr(run_context, "metadata", None) or {}
-            debug_request = bool(metadata.get("debug_request", True))
+            debug_request = bool(metadata.get("debug_request", default_debug_request()))
             sync_debug_request_to_session_state(run_context, debug_request)
             if not debug_request:
                 run_context.session_state = slim_session_state(run_context.session_state)

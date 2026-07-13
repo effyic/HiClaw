@@ -1,6 +1,7 @@
 """Resolve caller identity from HTTP headers, body, and query string."""
 from __future__ import annotations
 
+import os
 from typing import Mapping
 
 # Align with aip-hub WebFrameworkUtils (tenant-id) and common gateway headers.
@@ -77,12 +78,25 @@ def resolve_role_code(
     )
 
 
+def default_debug_request() -> bool:
+    """Default storage mode when ``x-debug-request`` header is absent.
+
+    Controlled by ``AGNO_DEBUG_REQUEST_DEFAULT`` (Helm ``globalEnv``); defaults to slim storage.
+    """
+    return os.environ.get("AGNO_DEBUG_REQUEST_DEFAULT", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def resolve_debug_request(headers: Mapping[str, str] | None = None) -> bool:
     """Return True for full session persistence; False for slim storage.
 
-    ``x-debug-request: false`` enables slim storage. Default is True when absent.
+    Header ``x-debug-request`` overrides ``AGNO_DEBUG_REQUEST_DEFAULT`` when present.
     """
     value = _header_value(headers or {}, DEBUG_REQUEST_HEADERS)
     if not value:
-        return True
+        return default_debug_request()
     return value.strip().lower() in {"1", "true", "yes", "on"}

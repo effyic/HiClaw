@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agno_worker.api.identity import default_debug_request
+
 # Persisted on session_state for scrub lookup; stripped before save in slim mode.
 DEBUG_REQUEST_STATE_KEY = "_debug_request"
 
@@ -76,7 +78,7 @@ def is_debug_storage(run_response: Any) -> bool:
     if isinstance(metadata, dict) and "debug_request" in metadata:
         return bool(metadata["debug_request"])
 
-    return True
+    return default_debug_request()
 
 
 def apply_slim_storage_scrub(agent: Any, run_response: Any) -> None:

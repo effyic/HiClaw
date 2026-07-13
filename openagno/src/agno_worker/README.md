@@ -75,7 +75,7 @@ HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
 | `user_id`    | `user-id` / `x-user-id`       | Body → Query      |
 | `session_id` | `session-id` / `x-session-id` | Query             |
 | `role_code`  | `role-code` / `x-role-code`   | Query `role_code` |
-| `debug_request` | `x-debug-request` / `x-debug-requet` | 缺省 `true`（完整入库）；`false` 精简入库 |
+| `debug_request` | `x-debug-request` / `x-debug-requet` | 缺省见 `AGNO_DEBUG_REQUEST_DEFAULT`（默认 `false` 精简入库）；`true` 完整入库 |
 
 
 请求示例：
@@ -114,8 +114,9 @@ run_metadata["debug_request"] = resolve_debug_request(headers)  # false → 精�
 
 | 请求头 | 入库行为 |
 | --- | --- |
-| 缺省 / `true` | 完整写入（与改造前一致） |
-| `false` | 精简写入：仅保留 user/assistant 对话、思考内容（`reasoning_content`）、run 基础字段与必要 `session_state` |
+| 缺省 | 由 `AGNO_DEBUG_REQUEST_DEFAULT` 决定（Helm 默认 `false`，精简写入） |
+| `true` | 完整写入（调试/审计） |
+| `false` | 精简写入：仅保留 user/assistant 对话、思考内容、run 基础字段与必要 `session_state` |
 
 精简模式会过滤：tool 消息、media、metrics、events、system 消息及内部缓存字段。
 
@@ -398,6 +399,7 @@ pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 | `AGNO_SKILLS_DIR`             | Skill 文件目录                 | `/etc/hiclaw/skills`    |
 | `AGNO_CONTROL_PORT`           | HTTP 端口                    | `8090`                  |
 | `AGNO_ENABLE_SESSION_API`     | 挂载 `/effyic/v1/sessions*` 会话查询 API | `true`                  |
+| `AGNO_DEBUG_REQUEST_DEFAULT`  | 未传 `x-debug-request` 时是否完整入库     | `false`（精简入库）       |
 | `AGNO_ENABLE_AGENTOS`         | 启用完整 AgentOS（根路径 API + os.agno.com） | `false`                 |
 | `AGNO_SPEC_WATCH_INTERVAL`    | AgentSpec/Hook 热重载间隔（秒）    | `30`                    |
 

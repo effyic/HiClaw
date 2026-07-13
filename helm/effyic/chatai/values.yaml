@@ -85,6 +85,7 @@ worker:
 globalEnv:
   AGNO_REQUIRE_TENANT_ID: "true"
   AGNO_ENABLE_SESSION_API: "true"
+  AGNO_DEBUG_REQUEST_DEFAULT: "false"
 
 resources: {}
 

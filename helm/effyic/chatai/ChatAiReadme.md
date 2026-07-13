@@ -58,7 +58,7 @@ curl -X POST http://localhost/effyic/v1/chat/stream \
 
 认证与 chat 相同：`Authorization: Bearer <TOKEN>`
 
-**入库裁剪**：请求头 `x-debug-request: false` 时精简写入会话库（仅保留用户对话、模型回复、思考内容与基础字段）；缺省或 `true` 保持完整写入。
+**入库裁剪**：未传 `x-debug-request` 时默认精简写入（`AGNO_DEBUG_REQUEST_DEFAULT=false`）；传 `x-debug-request: true` 可完整入库。
 
 | 方法       | 路径                                 | 说明                                                                                           |
 | -------- | ---------------------------------- | -------------------------------------------------------------------------------------------- |

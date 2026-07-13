@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agno_worker.api.identity import resolve_debug_request
+from agno_worker.api.identity import default_debug_request, resolve_debug_request
 from agno_worker.runtime.storage import (
     apply_slim_storage_scrub,
     is_debug_storage,
@@ -11,9 +11,25 @@ from agno_worker.runtime.storage import (
 )
 
 
-def test_resolve_debug_request_defaults_to_true() -> None:
-    assert resolve_debug_request({}) is True
-    assert resolve_debug_request(None) is True
+def test_resolve_debug_request_defaults_to_slim_storage() -> None:
+    assert resolve_debug_request({}) is False
+    assert resolve_debug_request(None) is False
+    assert default_debug_request() is False
+
+
+def test_resolve_debug_request_env_default_true() -> None:
+    import os
+
+    prev = os.environ.get("AGNO_DEBUG_REQUEST_DEFAULT")
+    os.environ["AGNO_DEBUG_REQUEST_DEFAULT"] = "true"
+    try:
+        assert resolve_debug_request({}) is True
+        assert default_debug_request() is True
+    finally:
+        if prev is None:
+            os.environ.pop("AGNO_DEBUG_REQUEST_DEFAULT", None)
+        else:
+            os.environ["AGNO_DEBUG_REQUEST_DEFAULT"] = prev
 
 
 def test_resolve_debug_request_false_enables_slim_storage() -> None:
