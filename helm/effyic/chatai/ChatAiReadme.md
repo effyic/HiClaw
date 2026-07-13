@@ -53,6 +53,39 @@ curl -X POST http://localhost/effyic/v1/chat/stream \
 
 
 
+### Session 接口（`/effyic/v1/sessions*`）
+
+认证与 chat 相同：`Authorization: Bearer <TOKEN>`
+
+
+| 方法       | 路径                                 | 说明                                                                                           |
+| -------- | ---------------------------------- | -------------------------------------------------------------------------------------------- |
+| `GET`    | `/effyic/v1/sessions`              | 分页列出会话；常用 query：`user_id`、`type`（agent）、`component_id`、`limit`、`page`、`sort_by`、`sort_order` |
+| `GET`    | `/effyic/v1/sessions/{session_id}` | 获取会话详情，响应含 `chat_history`（推荐用于展示对话记录）                                                        |
+|          |                                    |                                                                                              |
+| `DELETE` | `/effyic/v1/sessions/{session_id}` | 删除单个会话                                                                                       |
+| `DELETE` | `/effyic/v1/sessions`              | 批量删除会话                                                                                       |
+|          |                                    |                                                                                              |
+
+
+```bash
+TOKEN=$(kubectl get secret effyic-chatai-chatai-auth -n effyic -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
+
+# 1. 按 user_id 列出历史会话
+curl "http://localhost/effyic/v1/sessions?user_id=default&limit=20&page=1&sort_order=desc" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 2. 获取会话对话记录（chat_history）
+curl "http://localhost/effyic/v1/sessions/<agno-session-id>" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. 删除单个会话
+curl -X DELETE "http://localhost/effyic/v1/sessions/<agno-session-id>" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+
+
 ## 卸载
 
 ```bash

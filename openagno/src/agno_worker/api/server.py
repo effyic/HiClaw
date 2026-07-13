@@ -76,6 +76,7 @@ class AgnoAPIServer:
         chat_stream_handler_async: ChatStreamHandler | None = None,
         worker_name: str = "agno-worker",
         enable_agentos: bool = False,
+        enable_session_api: bool = True,
         runtime: Any = None,
     ) -> None:
         self._bind = bind
@@ -91,6 +92,7 @@ class AgnoAPIServer:
         self._status_handler = status_handler
         self._worker_name = worker_name
         self._enable_agentos = enable_agentos
+        self._enable_session_api = enable_session_api
         self._runtime = runtime
         self._agent_os: Any = None
         self._base_app: FastAPI | None = None
@@ -305,6 +307,15 @@ class AgnoAPIServer:
         async def reregister(_: None = Depends(_auth)) -> dict[str, str]:
             self.resync_agentos()
             return {"status": "ok"}
+
+        if (
+            self._enable_session_api
+            and self._runtime is not None
+            and getattr(self._runtime, "db", None) is not None
+        ):
+            from agno_worker.api.sessions import mount_effyic_session_routes
+
+            mount_effyic_session_routes(app, self._runtime.db, _auth)
 
         return app
 

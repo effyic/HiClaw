@@ -23,11 +23,17 @@ class WorkerConfig:
     api_bind: str = "0.0.0.0"
     watch_interval: int = 30
     enable_agentos: bool = False
+    enable_session_api: bool = True
     require_tenant_id: bool = False
 
     @classmethod
     def from_env(cls, worker_name: str) -> WorkerConfig:
         enable_agentos = os.environ.get("AGNO_ENABLE_AGENTOS", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        enable_session_api = os.environ.get("AGNO_ENABLE_SESSION_API", "true").lower() in (
             "1",
             "true",
             "yes",
@@ -68,5 +74,6 @@ class WorkerConfig:
             api_bind=os.environ.get("AGNO_CONTROL_BIND", "0.0.0.0"),
             watch_interval=int(os.environ.get("AGNO_SPEC_WATCH_INTERVAL", "30")),
             enable_agentos=enable_agentos,
+            enable_session_api=enable_session_api,
             require_tenant_id=require_tenant_id,
         )

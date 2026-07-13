@@ -38,6 +38,7 @@ spec:
 | `AGNO_DB_URL` | `postgresql+psycopg://root:vector_store@localhost:5432/postgres` | 会话库 |
 | `AGNO_CONTROL_PORT` | `8090` | HTTP API 端口 |
 | `AGNO_ENABLE_AGENTOS` | `false` | 启用 Agno AgentOS API（供 [os.agno.com](https://os.agno.com) 控制台连接） |
+| `AGNO_ENABLE_SESSION_API` | `true` | 在 `/effyic/v1/sessions*` 暴露会话查询 API（复用 chat Bearer Token） |
 | `RUNTIME_ENV` | `prd` | 设为 `dev` 时本地开发免 JWT，便于连接控制台 |
 | `AGNO_SPEC_WATCH_INTERVAL` | `30` | ConfigMap 热更新检测间隔（秒） |
 

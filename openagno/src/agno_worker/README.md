@@ -9,7 +9,7 @@
 ## 1. 架构分层
 
 ```
-HTTP (/effyic/v1/chat, /effyic/v1/chat/stream)
+HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
   → api/identity.py           解析 tenant-id / user-id / session-id
   → hooks/filters.py          tenant_id 必填校验（可配置）+ 可选 pre/post filter
   → runtime/engine.py         单一动态 Agent
@@ -54,6 +54,10 @@ HTTP (/effyic/v1/chat, /effyic/v1/chat/stream)
 | ---------------------- | -------------------- |
 | `POST /effyic/v1/chat`        | 同步对话                 |
 | `POST /effyic/v1/chat/stream` | SSE 流式对话             |
+| `GET /effyic/v1/sessions`     | 按 `user_id` 分页列出历史会话 |
+| `GET /effyic/v1/sessions/{session_id}` | 获取会话详情（含 `chat_history`） |
+| `GET /effyic/v1/sessions/{session_id}/runs` | 获取会话下所有 run |
+| `GET /effyic/v1/sessions/{session_id}/runs/{run_id}` | 获取单次 run 详情 |
 | `GET /health`          | 健康检查                 |
 | `GET /status`          | 运行时状态（Hook 加载来源、指纹等） |
 
@@ -381,6 +385,8 @@ pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 | `AGNO_AGENTSPEC_DIR`          | AgentSpec YAML 目录          | `/etc/hiclaw/agentspec` |
 | `AGNO_SKILLS_DIR`             | Skill 文件目录                 | `/etc/hiclaw/skills`    |
 | `AGNO_CONTROL_PORT`           | HTTP 端口                    | `8090`                  |
+| `AGNO_ENABLE_SESSION_API`     | 挂载 `/effyic/v1/sessions*` 会话查询 API | `true`                  |
+| `AGNO_ENABLE_AGENTOS`         | 启用完整 AgentOS（根路径 API + os.agno.com） | `false`                 |
 | `AGNO_SPEC_WATCH_INTERVAL`    | AgentSpec/Hook 热重载间隔（秒）    | `30`                    |
 
 
@@ -428,6 +434,7 @@ PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 | -------------------- | ------------------------------- |
 | `api/identity.py`    | tenant / user / session ID 解析   |
 | `api/server.py`      | HTTP 入口                         |
+| `api/sessions.py`    | `/effyic/v1/sessions*` AgentOS 会话 API 挂载 |
 | `worker.py`          | Worker 生命周期、热重载                 |
 | `runtime/engine.py`  | 单一动态 Agent 构建与 run              |
 | `runtime/builder.py` | pre/post/instructions/tools 注入点 |

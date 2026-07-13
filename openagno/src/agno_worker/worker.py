@@ -75,6 +75,7 @@ class Worker:
             status_handler=self._status,
             worker_name=self.config.worker_name,
             enable_agentos=self.config.enable_agentos,
+            enable_session_api=self.config.enable_session_api,
             runtime=self._runtime,
         )
         self._api_task = asyncio.create_task(self._api.start())
