@@ -75,6 +75,7 @@ HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
 | `user_id`    | `user-id` / `x-user-id`       | Body → Query      |
 | `session_id` | `session-id` / `x-session-id` | Query             |
 | `role_code`  | `role-code` / `x-role-code`   | Query `role_code` |
+| `debug_request` | `x-debug-request` / `x-debug-requet` | 缺省 `true`（完整入库）；`false` 精简入库 |
 
 
 请求示例：
@@ -87,6 +88,7 @@ curl -X POST http://localhost:8090/effyic/v1/chat/stream \
   -H "user-id: alice" \
   -H "session-id: conv-123" \
   -H "role-code: triage" \
+  -H "x-debug-request: false" \
   -d '{"message": "你好"}'
 ```
 
@@ -105,7 +107,17 @@ run_metadata["tenant_id"] = tenant_id   # 非空时
 run_metadata["user_id"] = user_id
 run_metadata["session_id"] = session_id
 run_metadata["role_code"] = role_code
+run_metadata["debug_request"] = resolve_debug_request(headers)  # false → 精简入库
 ```
+
+### 3.4 会话入库裁剪（`x-debug-request`）
+
+| 请求头 | 入库行为 |
+| --- | --- |
+| 缺省 / `true` | 完整写入（与改造前一致） |
+| `false` | 精简写入：仅保留 user/assistant 对话、思考内容（`reasoning_content`）、run 基础字段与必要 `session_state` |
+
+精简模式会过滤：tool 消息、media、metrics、events、system 消息及内部缓存字段。
 
 Hook 开发者可通过以下路径读取租户信息：
 
@@ -438,6 +450,8 @@ PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 | `worker.py`          | Worker 生命周期、热重载                 |
 | `runtime/engine.py`  | 单一动态 Agent 构建与 run              |
 | `runtime/builder.py` | pre/post/instructions/tools 注入点 |
+| `runtime/storage.py` | 按 `x-debug-request` 控制入库裁剪 |
+| `runtime/agent.py`   | StorageAwareAgent（覆盖 Agno scrub 钩子） |
 | `tenant/service.py`  | 标准流水线编排 + 扩展 Hook 调度            |
 | `tenant/context.py`  | 租户上下文解析（含 run-scoped 缓存）        |
 | `tenant/store.py`    | MySQL agno_agent 配置             |

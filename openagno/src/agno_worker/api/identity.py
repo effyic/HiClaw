@@ -8,6 +8,7 @@ USER_ID_HEADERS = ("user-id", "x-user-id")
 TENANT_ID_HEADERS = ("tenant-id", "x-tenant-id")
 SESSION_ID_HEADERS = ("session-id", "x-session-id")
 ROLE_CODE_HEADERS = ("role-code", "x-role-code")
+DEBUG_REQUEST_HEADERS = ("x-debug-request", "x-debug-requet")
 
 
 def _first_non_empty(*values: str | None) -> str:
@@ -74,3 +75,14 @@ def resolve_role_code(
         _header_value(headers or {}, ROLE_CODE_HEADERS),
         query_role_code,
     )
+
+
+def resolve_debug_request(headers: Mapping[str, str] | None = None) -> bool:
+    """Return True for full session persistence; False for slim storage.
+
+    ``x-debug-request: false`` enables slim storage. Default is True when absent.
+    """
+    value = _header_value(headers or {}, DEBUG_REQUEST_HEADERS)
+    if not value:
+        return True
+    return value.strip().lower() in {"1", "true", "yes", "on"}

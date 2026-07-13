@@ -20,6 +20,8 @@ from agno_worker.hooks.compose import (
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.mcp.loader import build_mcp_tools
 from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill_catalog_summary
+from agno_worker.runtime.agent import StorageAwareAgent
+from agno_worker.runtime.storage import slim_session_state, sync_debug_request_to_session_state
 from agno_worker.tenant.service import TenantAgentService
 
 logger = logging.getLogger(__name__)
@@ -60,13 +62,11 @@ class AgentBuilder:
         self._skills_manager = DynamicSkillsManager(self.tenant)
 
     def build_dynamic_agent(self) -> Any:
-        from agno.agent import Agent
-
         agent_name = self.spec.name or "agent"
         default_role = next(iter(self.spec.agents), "default")
         default_defn = self.spec.agents.get(default_role)
 
-        return Agent(
+        return StorageAwareAgent.create(
             name=agent_name,
             description=self.spec.description or "Dynamic multi-role agent",
             model=self._resolve_model(
@@ -192,6 +192,13 @@ class AgentBuilder:
             if run_context.session_state is None:
                 run_context.session_state = {}
 
+            metadata = getattr(run_context, "metadata", None) or {}
+            if "debug_request" in metadata:
+                sync_debug_request_to_session_state(
+                    run_context,
+                    bool(metadata["debug_request"]),
+                )
+
             active_role = resolve_active_role(run_context.session_state, spec)
             run_context.session_state.setdefault("active_role", active_role)
 
@@ -252,6 +259,17 @@ class AgentBuilder:
             updates = tenant.build_session_updates(run_context.session_state, run_context)
             if isinstance(updates, dict) and updates:
                 run_context.session_state.update(updates)
+
+            metadata = getattr(run_context, "metadata", None) or {}
+            debug_request = bool(metadata.get("debug_request", True))
+            sync_debug_request_to_session_state(run_context, debug_request)
+            if not debug_request:
+                run_context.session_state = slim_session_state(run_context.session_state)
+            if run_output is not None:
+                run_output.session_state = dict(run_context.session_state)
+                if not isinstance(getattr(run_output, "metadata", None), dict):
+                    run_output.metadata = {}
+                run_output.metadata["debug_request"] = debug_request
 
         return _post_hook
 

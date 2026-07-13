@@ -12,6 +12,7 @@ from agno_worker.db import create_agno_db
 from agno_worker.hooks.filters import RequestFilterPipeline
 from agno_worker.hooks.protocols import UserContext
 from agno_worker.hooks.registry import HookRegistry
+from agno_worker.api.identity import resolve_debug_request
 from agno_worker.runtime.builder import AgentBuilder
 from agno_worker.tenant.service import TenantAgentService
 from agno_worker.tenant.store import clear_agent_store_cache
@@ -145,6 +146,7 @@ class AgnoRuntime:
             session_id=session_id,
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
+        run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
         target = self._resolve_run_target()
         kwargs = self._build_run_kwargs(
             session_id=ctx.session_id or session_id,
@@ -188,6 +190,7 @@ class AgnoRuntime:
             session_id=session_id,
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
+        run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
         target = self._resolve_run_target()
         kwargs = self._build_run_kwargs(
             session_id=ctx.session_id or session_id,
