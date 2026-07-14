@@ -462,5 +462,3 @@ PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 | `hooks/compose.py`   | 流水线/Spec 合并、dependencies 组装     |
 | `hooks/filters.py`   | 请求 pre/post filter              |
 | `examples/hooks/`    | PVC Hook 参考实现                   |
-
-

@@ -200,6 +200,8 @@ class AgnoRuntime:
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
         enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
         run_metadata["enable_thinking"] = enable_thinking
+        # Agno only emits ReasoningContentDelta when stream_events=True.
+        agno_stream_events = bool(stream_events or enable_thinking)
         target = self._resolve_run_target()
         kwargs = self._build_run_kwargs(
             session_id=ctx.session_id or session_id,
@@ -208,7 +210,7 @@ class AgnoRuntime:
             role_code=ctx.role_code,
             metadata=run_metadata,
             stream=True,
-            stream_events=stream_events,
+            stream_events=agno_stream_events,
         )
         resolved_session_id = ctx.session_id or session_id
         final_reply_parts: list[str] = []
@@ -221,6 +223,32 @@ class AgnoRuntime:
                         resolved_session_id = str(sid)
 
                 event_name = str(getattr(event, "event", "") or "")
+
+                if event_name == RunEvent.reasoning_content_delta.value:
+                    if enable_thinking:
+                        delta = getattr(event, "reasoning_content", None)
+                        if delta is not None and str(delta):
+                            yield {"event": "reasoning", "delta": str(delta)}
+                    continue
+
+                if event_name in {
+                    RunEvent.reasoning_started.value,
+                    RunEvent.reasoning_completed.value,
+                    RunEvent.reasoning_step.value,
+                }:
+                    # Lifecycle markers are consumed only when thinking is on;
+                    # skip generic agent forward to avoid duplicate noise.
+                    if enable_thinking and stream_events:
+                        payload: dict[str, Any] = {
+                            "event": "agent",
+                            "agent_event": event_name,
+                        }
+                        if content := getattr(event, "content", None):
+                            payload["content"] = str(content)
+                        if reasoning := getattr(event, "reasoning_content", None):
+                            payload["reasoning_content"] = str(reasoning)
+                        yield payload
+                    continue
 
                 if event_name == RunEvent.run_content.value:
                     content = getattr(event, "content", None)
@@ -242,7 +270,7 @@ class AgnoRuntime:
                     RunEvent.run_content_completed.value,
                     RunEvent.run_completed.value,
                 }:
-                    payload: dict[str, Any] = {
+                    payload = {
                         "event": "agent",
                         "agent_event": event_name,
                     }
