@@ -96,6 +96,14 @@ def apply_slim_storage_scrub(agent: Any, run_response: Any) -> None:
     _scrub_run_fields(run_response)
     _scrub_messages(run_response)
     _scrub_session_state(run_response)
+    _scrub_request_headers_metadata(run_response)
+
+
+def _scrub_request_headers_metadata(run_response: Any) -> None:
+    """Drop ephemeral inbound headers so slim persistence does not retain them."""
+    metadata = getattr(run_response, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata.pop("request_headers", None)
 
 
 def _scrub_run_fields(run_response: Any) -> None:

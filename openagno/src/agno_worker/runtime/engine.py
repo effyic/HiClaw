@@ -150,6 +150,7 @@ class AgnoRuntime:
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
         enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
         run_metadata["enable_thinking"] = enable_thinking
+        self._attach_request_headers(ctx, run_metadata)
         target = self._resolve_run_target()
         kwargs = self._build_run_kwargs(
             session_id=ctx.session_id or session_id,
@@ -200,6 +201,7 @@ class AgnoRuntime:
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
         enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
         run_metadata["enable_thinking"] = enable_thinking
+        self._attach_request_headers(ctx, run_metadata)
         # Agno only emits ReasoningContentDelta when stream_events=True.
         agno_stream_events = bool(stream_events or enable_thinking)
         target = self._resolve_run_target()
@@ -337,6 +339,18 @@ class AgnoRuntime:
         if role_code:
             run_metadata["role_code"] = role_code
         return kwargs
+
+    @staticmethod
+    def _attach_request_headers(
+        ctx: UserContext,
+        run_metadata: dict[str, Any],
+    ) -> None:
+        """Preserve inbound HTTP headers for MCP forward / mcp_headers_hook."""
+        if not ctx.headers:
+            return
+        run_metadata["request_headers"] = {
+            str(key): str(value) for key, value in ctx.headers.items()
+        }
 
     @staticmethod
     def _resolve_enable_thinking(

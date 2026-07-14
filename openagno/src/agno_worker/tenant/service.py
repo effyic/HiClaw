@@ -69,12 +69,7 @@ class TenantAgentService:
             (getattr(run_context, "metadata", None) or {}).get("business_scenario") or ""
         )
         servers = self.mcp.build_servers(run_context, scenario)
-        cache["mcp_servers"] = self._apply_transform(
-            "transform_mcp_servers_hook",
-            run_context,
-            servers,
-            default=servers,
-        )
+        cache["mcp_servers"] = self._finalize_mcp_servers(run_context, servers)
 
         catalog = self.skills.resolve_catalog(run_context, user_requirements)
         cache["skill_catalog"] = self._apply_transform(
@@ -172,13 +167,7 @@ class TenantAgentService:
         if is_run_prepared(run_context):
             return self.get_mcp_servers(run_context)
         servers = self.mcp.build_servers(run_context, business_scenario)
-        transformed = self._apply_transform(
-            "transform_mcp_servers_hook",
-            run_context,
-            servers,
-            default=servers,
-        )
-        return transformed if isinstance(transformed, list) else servers
+        return self._finalize_mcp_servers(run_context, servers)
 
     def resolve_skill_catalog(
         self,
@@ -259,6 +248,47 @@ class TenantAgentService:
             if isinstance(hook_result, dict):
                 return hook_result
         return processed
+
+    def _finalize_mcp_servers(
+        self,
+        run_context: Any,
+        servers: list[MCPServerConfig],
+    ) -> list[MCPServerConfig]:
+        """Transform servers, inject default forward headers, then mcp_headers_hook."""
+        transformed = self._apply_transform(
+            "transform_mcp_servers_hook",
+            run_context,
+            servers,
+            default=servers,
+        )
+        finalized: list[MCPServerConfig] = (
+            list(transformed) if isinstance(transformed, list) else list(servers)
+        )
+        self.mcp.apply_forwarded_headers(run_context, finalized)
+        return self._apply_mcp_headers_hook(run_context, finalized)
+
+    def _apply_mcp_headers_hook(
+        self,
+        run_context: Any,
+        servers: list[MCPServerConfig],
+    ) -> list[MCPServerConfig]:
+        if not self.registry.has("mcp_headers_hook"):
+            return servers
+        for server in servers:
+            if not server.url:
+                continue
+            current = dict(server.headers or {})
+            result = self.registry.call(
+                "mcp_headers_hook",
+                run_context,
+                server,
+                current,
+            )
+            if isinstance(result, dict):
+                server.headers = {
+                    str(key): str(value) for key, value in result.items()
+                }
+        return servers
 
     def _apply_transform(
         self,

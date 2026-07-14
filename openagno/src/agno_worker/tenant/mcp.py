@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from agno_worker.hooks.protocols import MCPServerConfig
+from agno_worker.mcp.headers import apply_forwarded_mcp_headers
 from agno_worker.tenant.context import TenantContextResolver
 
 
@@ -48,6 +49,14 @@ class TenantMCPBuilder:
                 )
             )
         return out
+
+    @staticmethod
+    def apply_forwarded_headers(
+        run_context: Any,
+        servers: list[MCPServerConfig],
+    ) -> list[MCPServerConfig]:
+        """Inject identity + ``x-*`` headers onto HTTP MCP servers."""
+        return apply_forwarded_mcp_headers(run_context, servers)
 
     @staticmethod
     def apply_connection_defaults(server_config: MCPServerConfig) -> None:

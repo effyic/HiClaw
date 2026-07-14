@@ -61,6 +61,7 @@ EXTENSION_HOOK_NAMES: tuple[str, ...] = (
     "transform_workflow_hook",
     "transform_session_state_hook",
     "mcp_tool_filter_hook",
+    "mcp_headers_hook",
     "mcp_connection_hook",
     "result_processing_hook",
     "request_pre_filter_hook",
@@ -115,6 +116,13 @@ class RequestFilterHooks(Protocol):
 @runtime_checkable
 class MCPHooks(Protocol):
     def mcp_tool_filter_hook(self, run_context: Any, available_tools: list[Any]) -> list[Any]: ...
+
+    def mcp_headers_hook(
+        self,
+        run_context: Any,
+        server_config: MCPServerConfig,
+        headers: dict[str, str],
+    ) -> dict[str, str] | None: ...
 
     def mcp_connection_hook(self, server_config: MCPServerConfig) -> None: ...
 

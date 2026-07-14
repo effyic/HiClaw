@@ -58,8 +58,8 @@ HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
 | `GET /effyic/v1/sessions/{session_id}`               | 获取会话详情（含 `chat_history`） |
 | `GET /effyic/v1/sessions/{session_id}/runs`          | 获取会话下所有 run              |
 | `GET /effyic/v1/sessions/{session_id}/runs/{run_id}` | 获取单次 run 详情              |
-| `GET /health`                                        | 健康检查                     |
-| `GET /status`                                        | 运行时状态（Hook 加载来源、指纹等）     |
+| `GET /effyic/health`                                 | 健康检查                     |
+| `GET /effyic/status`                                 | 运行时状态（Hook 加载来源、指纹等）     |
 
 
 
@@ -174,7 +174,7 @@ RequestFilterPipeline.apply_post_filter()  # request_post_filter_hook (可选)
 | 租户/角色解析   | `tenant/context.py` | `tenant_id`：metadata → session_state → factory → `"default"`；`role_code`：metadata → session_state → `"default"` |
 | 配置加载      | `tenant/store.py`   | `tenant_id` + `role_code` 精确匹配 → 同租户 `default` 行 → 全局 `default` 租户                                              |
 | Prompt 组装 | `tenant/prompt.py`  | system_prompt、instructions、context_filters                                                                      |
-| MCP 配置    | `tenant/mcp.py`     | 从 `mcp_config` 构建 MCPServerConfig 列表                                                                            |
+| MCP 配置    | `tenant/mcp.py`     | 从 `mcp_config` 构建 MCPServerConfig；HTTP MCP 默认注入身份 + `x-*` headers                                         |
 | Skill 扫描  | `tenant/skills.py`  | 扫描 `AGNO_SKILLS_DIR`，按 tenant_ids 过滤                                                                            |
 | 会话管理      | `tenant/session.py` | init_session、build_session_updates（同步当前行的 `workflow`）                                                           |
 | 数据工具      | `tenant/data.py`    | `query_tenant_data`（当前为配置摘要 stub）                                                                               |
@@ -205,7 +205,7 @@ HTTP role-code / x-role-code（或 query role_code）
 
 
 
-## 6. 扩展 Hook（PVC 可选，共 11 个）
+## 6. 扩展 Hook（PVC 可选，共 12 个）
 
 挂载目录：`AGNO_HOOKS_DIR`（默认 `/etc/hiclaw/hooks`）。
 
@@ -240,6 +240,7 @@ hooks.py → filters.py → transform.py → business.py → prompt.py
 | `transform_workflow_hook`      | post_hook           | `tenant/service.py`                   | 变换 workflow / session_state 更新              |
 | `transform_session_state_hook` | post_hook           | `tenant/service.py`                   | 变换 session_state 更新                         |
 | `mcp_connection_hook`          | MCP 连接前             | `tenant/service.py` → `mcp/loader.py` | 鉴权、env/headers 注入                           |
+| `mcp_headers_hook`             | MCP headers 默认透传后 | `tenant/service.py`                   | 二次加工 HTTP MCP headers；返回 `None` 表示不改       |
 | `mcp_tool_filter_hook`         | tools 组装后           | `tenant/service.py`                   | 裁剪最终工具列表                                    |
 | `result_processing_hook`       | 数据查询后               | `tenant/service.py`                   | 格式化 `query_tenant_data` 结果                  |
 | `request_pre_filter_hook`      | HTTP 请求前            | `hooks/filters.py`                    | 准入控制；返回 `{"allowed": False}` 拒绝             |
@@ -301,7 +302,7 @@ def transform_prompt_hook(
 ├── business.py     # enrich_business_context_hook
 ├── transform.py    # transform_prompt/mcp/skills/workflow/session_state_hook
 ├── filters.py      # request_pre/post_filter_hook
-├── mcp.py          # mcp_connection_hook, mcp_tool_filter_hook
+├── mcp.py          # mcp_connection_hook, mcp_headers_hook, mcp_tool_filter_hook
 └── ...
 ```
 
@@ -342,6 +343,8 @@ pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 | `metadata["tenant_id"]`             | HTTP 解析          | 租户 ID                                  |
 | `metadata["user_id"]`               | HTTP 解析          | 用户 ID                                  |
 | `metadata["session_id"]`            | HTTP / Agno      | 会话 ID                                  |
+| `metadata["role_code"]`             | HTTP 解析          | 角色编码                                   |
+| `metadata["request_headers"]`       | HTTP 原始请求头       | 供 `x-*` 透传 / `mcp_headers_hook`；精简持久化时剥离     |
 | `metadata["user_requirements"]`     | pre_hook 从用户消息提取 | Skill 匹配                               |
 | `session_state`                     | Agno 持久化         | 含 `active_role`、`phase`、`workflow` 等   |
 | `knowledge_filters`                 | pre_hook 写入      | WeKnora MCP 知识检索参数                     |
