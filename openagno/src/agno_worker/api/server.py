@@ -65,7 +65,12 @@ ChatStreamHandler = Callable[..., AsyncIterator[dict[str, Any]]]
 
 
 def _format_sse(payload: dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    """Agno AgentOS SSE: event line + dual-field JSON body."""
+    event_type = str(payload.get("event") or "message")
+    return (
+        f"event: {event_type}\n"
+        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    )
 
 
 def _truthy_query(value: str) -> bool:
@@ -313,7 +318,9 @@ class AgnoAPIServer:
                         yield _format_sse(chunk)
                 except Exception as exc:
                     http_exc = self._handle_api_error(exc)
-                    yield _format_sse({"event": "error", "message": http_exc.detail})
+                    yield _format_sse(
+                        {"event": "RunError", "content": http_exc.detail}
+                    )
                     return
 
             return StreamingResponse(

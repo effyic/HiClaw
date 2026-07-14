@@ -228,7 +228,11 @@ class AgnoRuntime:
                     if enable_thinking:
                         delta = getattr(event, "reasoning_content", None)
                         if delta is not None and str(delta):
-                            yield {"event": "reasoning", "delta": str(delta)}
+                            yield self._agno_sse_payload(
+                                "ReasoningContentDelta",
+                                session_id=resolved_session_id,
+                                reasoning_content=str(delta),
+                            )
                     continue
 
                 if event_name in {
@@ -236,47 +240,62 @@ class AgnoRuntime:
                     RunEvent.reasoning_completed.value,
                     RunEvent.reasoning_step.value,
                 }:
-                    # Lifecycle markers are consumed only when thinking is on;
-                    # skip generic agent forward to avoid duplicate noise.
+                    # Lifecycle markers only when thinking + stream_events.
                     if enable_thinking and stream_events:
-                        payload: dict[str, Any] = {
-                            "event": "agent",
-                            "agent_event": event_name,
-                        }
-                        if content := getattr(event, "content", None):
-                            payload["content"] = str(content)
-                        if reasoning := getattr(event, "reasoning_content", None):
-                            payload["reasoning_content"] = str(reasoning)
-                        yield payload
+                        yield self._agno_event_passthrough(
+                            event,
+                            event_name,
+                            session_id=resolved_session_id,
+                        )
                     continue
 
                 if event_name == RunEvent.run_content.value:
+                    # Agno dual-field standard: content + reasoning_content
+                    # on the same RunContent event (Qwen puts thinking here).
                     content = getattr(event, "content", None)
-                    if content is not None and str(content):
-                        text = str(content)
-                        final_reply_parts.append(text)
-                        yield {"event": "content", "delta": text}
+                    content_str = (
+                        str(content) if content is not None and str(content) else None
+                    )
+                    reasoning_str = None
+                    if enable_thinking:
+                        reasoning = getattr(event, "reasoning_content", None)
+                        if reasoning is not None and str(reasoning):
+                            reasoning_str = str(reasoning)
+                    if content_str:
+                        final_reply_parts.append(content_str)
+                    if not content_str and not reasoning_str:
+                        continue
+                    yield {
+                        "event": "RunContent",
+                        "content": content_str,
+                        "reasoning_content": reasoning_str,
+                        "session_id": resolved_session_id or None,
+                    }
                     continue
 
                 if event_name == RunEvent.run_error.value:
                     yield {
-                        "event": "error",
-                        "message": str(getattr(event, "content", None) or "run error"),
+                        "event": "RunError",
+                        "content": str(
+                            getattr(event, "content", None) or "run error"
+                        ),
+                        "session_id": resolved_session_id or None,
                     }
                     return
+
+                if event_name == RunEvent.run_completed.value:
+                    # Terminal event is synthesized after post_filter below.
+                    continue
 
                 if stream_events and event_name not in {
                     RunEvent.run_started.value,
                     RunEvent.run_content_completed.value,
-                    RunEvent.run_completed.value,
                 }:
-                    payload = {
-                        "event": "agent",
-                        "agent_event": event_name,
-                    }
-                    if content := getattr(event, "content", None):
-                        payload["content"] = str(content)
-                    yield payload
+                    yield self._agno_event_passthrough(
+                        event,
+                        event_name,
+                        session_id=resolved_session_id,
+                    )
         finally:
             reset_enable_thinking(thinking_token)
 
@@ -285,7 +304,10 @@ class AgnoRuntime:
             ctx,
             {"reply": reply, "session_id": resolved_session_id},
         )
-        yield {"event": "done", "session_id": str(output.get("session_id", resolved_session_id))}
+        yield {
+            "event": "RunCompleted",
+            "session_id": str(output.get("session_id", resolved_session_id)),
+        }
 
     def _build_run_kwargs(
         self,
@@ -327,6 +349,40 @@ class AgnoRuntime:
         if "enable_thinking" in run_metadata:
             return bool(run_metadata["enable_thinking"])
         return resolve_enable_thinking(headers=ctx.headers)
+
+    @staticmethod
+    def _agno_sse_payload(
+        event_name: str,
+        *,
+        session_id: str = "",
+        **fields: Any,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"event": event_name}
+        for key, value in fields.items():
+            if value is not None:
+                payload[key] = value
+        if session_id:
+            payload["session_id"] = session_id
+        return payload
+
+    @classmethod
+    def _agno_event_passthrough(
+        cls,
+        event: Any,
+        event_name: str,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        if content := getattr(event, "content", None):
+            fields["content"] = str(content)
+        if reasoning := getattr(event, "reasoning_content", None):
+            fields["reasoning_content"] = str(reasoning)
+        return cls._agno_sse_payload(
+            event_name,
+            session_id=session_id,
+            **fields,
+        )
 
     def _resolve_run_target(self) -> Any:
         if self._primary_agent is None:
