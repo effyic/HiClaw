@@ -28,6 +28,28 @@ def _header_value(headers: Mapping[str, str], names: tuple[str, ...]) -> str:
     return ""
 
 
+def _truthy_flag(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _falsy_flag(value: str) -> bool:
+    return value.strip().lower() in {"0", "false", "no", "off"}
+
+
+def _parse_optional_bool(value: str | None) -> bool | None:
+    """Parse an explicit bool flag; return None when absent / unrecognized."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if _truthy_flag(text):
+        return True
+    if _falsy_flag(text):
+        return False
+    return None
+
+
 def resolve_user_id(
     *,
     body_user_id: str = "",
@@ -99,4 +121,35 @@ def resolve_debug_request(headers: Mapping[str, str] | None = None) -> bool:
     value = _header_value(headers or {}, DEBUG_REQUEST_HEADERS)
     if not value:
         return default_debug_request()
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return _truthy_flag(value)
+
+
+def resolve_enable_thinking(
+    *,
+    body_enable_thinking: bool | None = None,
+    headers: Mapping[str, str] | None = None,
+    query_enable_thinking: str = "",
+) -> bool:
+    """Resolve whether the model should run with thinking/reasoning enabled.
+
+    Priority (highest → lowest):
+    1. Explicit request param: body ``enable_thinking`` → query ``enable_thinking``
+    2. Header ``x-debug-request`` (true → on, false → off)
+    3. Default ``False`` (thinking off)
+
+    Only ``x-debug-request`` is read from headers (no ``x-enable-thinking``).
+    """
+    if body_enable_thinking is not None:
+        return bool(body_enable_thinking)
+
+    query_flag = _parse_optional_bool(query_enable_thinking)
+    if query_flag is not None:
+        return query_flag
+
+    debug_flag = _parse_optional_bool(
+        _header_value(headers or {}, DEBUG_REQUEST_HEADERS)
+    )
+    if debug_flag is not None:
+        return debug_flag
+
+    return False

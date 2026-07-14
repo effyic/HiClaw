@@ -10,10 +10,11 @@ from typing import Any, Awaitable, Callable, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 from agno_worker.api.identity import (
+    resolve_enable_thinking,
     resolve_role_code,
     resolve_session_id,
     resolve_tenant_id,
@@ -45,6 +46,14 @@ def _cors_allow_origins() -> list[str]:
 class ChatRequest(BaseModel):
     message: str
     user_id: str = ""
+    enable_thinking: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Per-request thinking/reasoning toggle (body/query). "
+            "Highest priority over x-debug-request. Omitted → follow "
+            "x-debug-request, else off."
+        ),
+    )
 
 
 class ChatResponse(BaseModel):
@@ -133,6 +142,7 @@ class AgnoAPIServer:
         tenant_id: str,
         session_id: str,
         role_code: str = "",
+        enable_thinking: bool = False,
     ) -> UserContext:
         return UserContext(
             user_id=user_id,
@@ -140,6 +150,7 @@ class AgnoAPIServer:
             session_id=session_id,
             role_code=role_code,
             headers={str(k): str(v) for k, v in request.headers.items()},
+            extra={"enable_thinking": enable_thinking},
         )
 
     def _handle_api_error(self, exc: Exception) -> HTTPException:
@@ -221,12 +232,18 @@ class AgnoAPIServer:
                 headers=request.headers,
                 query_role_code=request.query_params.get("role_code", ""),
             )
+            enable_thinking = resolve_enable_thinking(
+                body_enable_thinking=req.enable_thinking,
+                headers=request.headers,
+                query_enable_thinking=request.query_params.get("enable_thinking", ""),
+            )
             user_context = self._build_user_context(
                 request,
                 user_id=user_id,
                 tenant_id=tenant_id,
                 session_id=session_id,
                 role_code=role_code,
+                enable_thinking=enable_thinking,
             )
             try:
                 reply, resolved_session_id = await self._chat_handler_async(
@@ -266,12 +283,18 @@ class AgnoAPIServer:
                 headers=request.headers,
                 query_role_code=request.query_params.get("role_code", ""),
             )
+            enable_thinking = resolve_enable_thinking(
+                body_enable_thinking=req.enable_thinking,
+                headers=request.headers,
+                query_enable_thinking=request.query_params.get("enable_thinking", ""),
+            )
             user_context = self._build_user_context(
                 request,
                 user_id=user_id,
                 tenant_id=tenant_id,
                 session_id=session_id,
                 role_code=role_code,
+                enable_thinking=enable_thinking,
             )
             stream_events = _truthy_query(
                 request.query_params.get("stream_events", "")

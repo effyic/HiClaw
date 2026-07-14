@@ -102,4 +102,6 @@ workers:
     gatewayConsumer: ""
     env: {}
     resources: {}
-    expose: []
+    expose:
+      - port: 8090
+        protocol: http

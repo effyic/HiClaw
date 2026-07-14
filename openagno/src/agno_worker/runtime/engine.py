@@ -12,8 +12,9 @@ from agno_worker.db import create_agno_db
 from agno_worker.hooks.filters import RequestFilterPipeline
 from agno_worker.hooks.protocols import UserContext
 from agno_worker.hooks.registry import HookRegistry
-from agno_worker.api.identity import resolve_debug_request
+from agno_worker.api.identity import resolve_debug_request, resolve_enable_thinking
 from agno_worker.runtime.builder import AgentBuilder
+from agno_worker.runtime.thinking import reset_enable_thinking, set_enable_thinking
 from agno_worker.tenant.service import TenantAgentService
 from agno_worker.tenant.store import clear_agent_store_cache
 
@@ -147,6 +148,8 @@ class AgnoRuntime:
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
+        enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
+        run_metadata["enable_thinking"] = enable_thinking
         target = self._resolve_run_target()
         kwargs = self._build_run_kwargs(
             session_id=ctx.session_id or session_id,
@@ -155,7 +158,11 @@ class AgnoRuntime:
             role_code=ctx.role_code,
             metadata=run_metadata,
         )
-        response = await target.arun(message, **kwargs)
+        thinking_token = set_enable_thinking(enable_thinking)
+        try:
+            response = await target.arun(message, **kwargs)
+        finally:
+            reset_enable_thinking(thinking_token)
         if hasattr(response, "content"):
             reply = str(response.content)
         else:
@@ -191,6 +198,8 @@ class AgnoRuntime:
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
+        enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
+        run_metadata["enable_thinking"] = enable_thinking
         target = self._resolve_run_target()
         kwargs = self._build_run_kwargs(
             session_id=ctx.session_id or session_id,
@@ -204,40 +213,44 @@ class AgnoRuntime:
         resolved_session_id = ctx.session_id or session_id
         final_reply_parts: list[str] = []
 
-        async for event in target.arun(message, **kwargs):
-            if sid := getattr(event, "session_id", None):
-                if str(sid).strip():
-                    resolved_session_id = str(sid)
+        thinking_token = set_enable_thinking(enable_thinking)
+        try:
+            async for event in target.arun(message, **kwargs):
+                if sid := getattr(event, "session_id", None):
+                    if str(sid).strip():
+                        resolved_session_id = str(sid)
 
-            event_name = str(getattr(event, "event", "") or "")
+                event_name = str(getattr(event, "event", "") or "")
 
-            if event_name == RunEvent.run_content.value:
-                content = getattr(event, "content", None)
-                if content is not None and str(content):
-                    text = str(content)
-                    final_reply_parts.append(text)
-                    yield {"event": "content", "delta": text}
-                continue
+                if event_name == RunEvent.run_content.value:
+                    content = getattr(event, "content", None)
+                    if content is not None and str(content):
+                        text = str(content)
+                        final_reply_parts.append(text)
+                        yield {"event": "content", "delta": text}
+                    continue
 
-            if event_name == RunEvent.run_error.value:
-                yield {
-                    "event": "error",
-                    "message": str(getattr(event, "content", None) or "run error"),
-                }
-                return
+                if event_name == RunEvent.run_error.value:
+                    yield {
+                        "event": "error",
+                        "message": str(getattr(event, "content", None) or "run error"),
+                    }
+                    return
 
-            if stream_events and event_name not in {
-                RunEvent.run_started.value,
-                RunEvent.run_content_completed.value,
-                RunEvent.run_completed.value,
-            }:
-                payload: dict[str, Any] = {
-                    "event": "agent",
-                    "agent_event": event_name,
-                }
-                if content := getattr(event, "content", None):
-                    payload["content"] = str(content)
-                yield payload
+                if stream_events and event_name not in {
+                    RunEvent.run_started.value,
+                    RunEvent.run_content_completed.value,
+                    RunEvent.run_completed.value,
+                }:
+                    payload: dict[str, Any] = {
+                        "event": "agent",
+                        "agent_event": event_name,
+                    }
+                    if content := getattr(event, "content", None):
+                        payload["content"] = str(content)
+                    yield payload
+        finally:
+            reset_enable_thinking(thinking_token)
 
         reply = "".join(final_reply_parts)
         output = self._request_filters.apply_post_filter(
@@ -274,6 +287,18 @@ class AgnoRuntime:
         if role_code:
             run_metadata["role_code"] = role_code
         return kwargs
+
+    @staticmethod
+    def _resolve_enable_thinking(
+        ctx: UserContext,
+        run_metadata: dict[str, Any],
+    ) -> bool:
+        """Prefer body/extra explicit flag (already resolved by API), else headers."""
+        if "enable_thinking" in (ctx.extra or {}):
+            return bool(ctx.extra["enable_thinking"])
+        if "enable_thinking" in run_metadata:
+            return bool(run_metadata["enable_thinking"])
+        return resolve_enable_thinking(headers=ctx.headers)
 
     def _resolve_run_target(self) -> Any:
         if self._primary_agent is None:

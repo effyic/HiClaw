@@ -21,10 +21,13 @@ spec:
   {{- if $pkg }}
   package: {{ $pkg | quote }}
   {{- end }}
-  {{- with $worker.expose }}
-  expose:
-    {{- toYaml . | nindent 4 }}
+  {{- /* Default: expose container control API (8090) for port-forward / Higress */}}
+  {{- $expose := $worker.expose }}
+  {{- if not $expose }}
+  {{- $expose = list (dict "port" ($worker.targetPort | default 8090) "protocol" "http") }}
   {{- end }}
+  expose:
+    {{- toYaml $expose | nindent 4 }}
   env:
     {{- include "chatai.workerEnv" $ctx | nindent 4 }}
   {{- if $worker.resources }}

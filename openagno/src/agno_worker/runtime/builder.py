@@ -23,6 +23,7 @@ from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill
 from agno_worker.api.identity import default_debug_request
 from agno_worker.runtime.agent import StorageAwareAgent
 from agno_worker.runtime.storage import slim_session_state, sync_debug_request_to_session_state
+from agno_worker.runtime.thinking import attach_thinking_request_params
 from agno_worker.tenant.service import TenantAgentService
 
 logger = logging.getLogger(__name__)
@@ -286,10 +287,13 @@ class AgentBuilder:
         if gateway_url and gateway_key:
             from agno.models.openai import OpenAIChat
 
-            return OpenAIChat(
-                id=default_model,
-                api_key=gateway_key,
-                base_url=f"{gateway_url}/v1",
+            return attach_thinking_request_params(
+                OpenAIChat(
+                    id=default_model,
+                    api_key=gateway_key,
+                    base_url=f"{gateway_url}/v1",
+                    extra_body={"enable_thinking": False},
+                )
             )
         if ":" not in default_model:
             return f"openai:{default_model}"

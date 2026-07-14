@@ -75,8 +75,6 @@ HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
 | `user_id`    | `user-id` / `x-user-id`       | Body → Query      |
 | `session_id` | `session-id` / `x-session-id` | Query             |
 | `role_code`  | `role-code` / `x-role-code`   | Query `role_code` |
-| `debug_request` | `x-debug-request` / `x-debug-requet` | 缺省见 `AGNO_DEBUG_REQUEST_DEFAULT`（默认 `false` 精简入库）；`true` 完整入库 |
-
 
 请求示例：
 
@@ -89,7 +87,7 @@ curl -X POST http://localhost:8090/effyic/v1/chat/stream \
   -H "session-id: conv-123" \
   -H "role-code: triage" \
   -H "x-debug-request: false" \
-  -d '{"message": "你好"}'
+  -d '{"message": "你好", "enable_thinking": false}'
 ```
 
 
@@ -108,6 +106,7 @@ run_metadata["user_id"] = user_id
 run_metadata["session_id"] = session_id
 run_metadata["role_code"] = role_code
 run_metadata["debug_request"] = resolve_debug_request(headers)  # false → 精简入库
+run_metadata["enable_thinking"] = enable_thinking              # 注入模型 extra_body
 ```
 
 ### 3.4 会话入库裁剪（`x-debug-request`）
