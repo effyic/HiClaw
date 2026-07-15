@@ -98,7 +98,7 @@ curl -X POST http://localhost:8090/effyic/v1/chat/stream \
 
 | 请求头     | 行为 |
 | ------- | --- |
-| `true`  | **不读且不写** session 表：本次 run 使用空内存会话，结束后不 upsert |
+| `true`  | **读但不写** session 表：本次 run 使用空内存会话，结束后不 upsert |
 
 
 适用于后台一次性推理、不希望污染对话历史的接口。优先于 `x-debug-request`。

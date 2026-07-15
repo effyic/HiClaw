@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agno_worker.runtime.ignore_db import get_ignore_db
+from agno_worker.runtime.ignore_db import get_skip_session_read, get_skip_session_write
 from agno_worker.runtime.storage import apply_slim_storage_scrub, is_debug_storage
 
 _STORAGE_AWARE_ATTR = "_effyic_storage_aware"
@@ -24,7 +24,8 @@ def _patch_agno_storage_scrub_dispatch() -> None:
         if not getattr(agent, _STORAGE_AWARE_ATTR, False):
             original(agent, run_response)
             return
-        if get_ignore_db():
+        # Nothing is written when skip_write; avoid scrub work.
+        if get_skip_session_write():
             return
         if is_debug_storage(run_response):
             original(agent, run_response)
@@ -36,9 +37,10 @@ def _patch_agno_storage_scrub_dispatch() -> None:
 
 
 def _patch_agno_session_io_for_ignore_db() -> None:
-    """Skip Agno session read/upsert when ``x-ignore-db`` is active for the request.
+    """Apply ``x-ignore-db`` read/write policy to Agno session I/O.
 
-    Persist paths all go through upsert; short-circuiting read+upsert is enough.
+    - skip_write → short-circuit upsert (all persist paths)
+    - skip_read → short-circuit read (ephemeral session when no session_id)
     """
     from agno.agent import _storage as agent_storage
 
@@ -51,22 +53,22 @@ def _patch_agno_session_io_for_ignore_db() -> None:
     original_aread = agent_storage.aread_session
 
     def upsert_session(agent: Any, session: Any) -> Any:
-        if get_ignore_db():
+        if get_skip_session_write():
             return session
         return original_upsert(agent, session)
 
     async def aupsert_session(agent: Any, session: Any) -> Any:
-        if get_ignore_db():
+        if get_skip_session_write():
             return session
         return await original_aupsert(agent, session)
 
     def read_session(agent: Any, *args: Any, **kwargs: Any) -> Any:
-        if get_ignore_db():
+        if get_skip_session_read():
             return None
         return original_read(agent, *args, **kwargs)
 
     async def aread_session(agent: Any, *args: Any, **kwargs: Any) -> Any:
-        if get_ignore_db():
+        if get_skip_session_read():
             return None
         return await original_aread(agent, *args, **kwargs)
 

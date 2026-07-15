@@ -155,15 +155,16 @@ class AgnoRuntime:
         run_metadata["enable_thinking"] = enable_thinking
         self._attach_request_headers(ctx, run_metadata)
         target = self._resolve_run_target()
+        resolved_session_id = ctx.session_id or session_id
         kwargs = self._build_run_kwargs(
-            session_id=ctx.session_id or session_id,
+            session_id=resolved_session_id,
             user_id=ctx.user_id or user_id,
             tenant_id=ctx.tenant_id or tenant_id,
             role_code=ctx.role_code,
             metadata=run_metadata,
         )
         thinking_token = set_enable_thinking(enable_thinking)
-        ignore_token = set_ignore_db(ignore_db)
+        ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
         try:
             response = await target.arun(message, **kwargs)
         finally:
@@ -212,8 +213,9 @@ class AgnoRuntime:
         # Agno only emits ReasoningContentDelta when stream_events=True.
         agno_stream_events = bool(stream_events or enable_thinking)
         target = self._resolve_run_target()
+        resolved_session_id = ctx.session_id or session_id
         kwargs = self._build_run_kwargs(
-            session_id=ctx.session_id or session_id,
+            session_id=resolved_session_id,
             user_id=ctx.user_id or user_id,
             tenant_id=ctx.tenant_id or tenant_id,
             role_code=ctx.role_code,
@@ -221,11 +223,10 @@ class AgnoRuntime:
             stream=True,
             stream_events=agno_stream_events,
         )
-        resolved_session_id = ctx.session_id or session_id
         final_reply_parts: list[str] = []
 
         thinking_token = set_enable_thinking(enable_thinking)
-        ignore_token = set_ignore_db(ignore_db)
+        ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
         try:
             async for event in target.arun(message, **kwargs):
                 if sid := getattr(event, "session_id", None):

@@ -125,10 +125,12 @@ def resolve_debug_request(headers: Mapping[str, str] | None = None) -> bool:
 
 
 def resolve_ignore_db(headers: Mapping[str, str] | None = None) -> bool:
-    """Return True when this request must skip Agno session DB read/write.
+    """Return True when ``x-ignore-db`` requests session write skip.
 
     Expects lowercase header name ``x-ignore-db`` (Starlette/FastAPI norm).
-    Values: true/1/yes/on → skip; absent or anything else → normal storage.
+    Combined with session_id in the runtime:
+    - true + session_id → read history, do not persist
+    - true + no session_id → neither read nor write
     """
     if not headers:
         return False
