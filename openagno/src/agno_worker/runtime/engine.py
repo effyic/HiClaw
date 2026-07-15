@@ -12,8 +12,9 @@ from agno_worker.db import create_agno_db
 from agno_worker.hooks.filters import RequestFilterPipeline
 from agno_worker.hooks.protocols import UserContext
 from agno_worker.hooks.registry import HookRegistry
-from agno_worker.api.identity import resolve_debug_request, resolve_enable_thinking
+from agno_worker.api.identity import resolve_debug_request, resolve_enable_thinking, resolve_ignore_db
 from agno_worker.runtime.builder import AgentBuilder
+from agno_worker.runtime.ignore_db import reset_ignore_db, set_ignore_db
 from agno_worker.runtime.thinking import reset_enable_thinking, set_enable_thinking
 from agno_worker.tenant.service import TenantAgentService
 from agno_worker.tenant.store import clear_agent_store_cache
@@ -148,6 +149,8 @@ class AgnoRuntime:
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
+        ignore_db = resolve_ignore_db(ctx.headers)
+        run_metadata["ignore_db"] = ignore_db
         enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
         run_metadata["enable_thinking"] = enable_thinking
         self._attach_request_headers(ctx, run_metadata)
@@ -160,10 +163,12 @@ class AgnoRuntime:
             metadata=run_metadata,
         )
         thinking_token = set_enable_thinking(enable_thinking)
+        ignore_token = set_ignore_db(ignore_db)
         try:
             response = await target.arun(message, **kwargs)
         finally:
             reset_enable_thinking(thinking_token)
+            reset_ignore_db(ignore_token)
         if hasattr(response, "content"):
             reply = str(response.content)
         else:
@@ -199,6 +204,8 @@ class AgnoRuntime:
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
+        ignore_db = resolve_ignore_db(ctx.headers)
+        run_metadata["ignore_db"] = ignore_db
         enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
         run_metadata["enable_thinking"] = enable_thinking
         self._attach_request_headers(ctx, run_metadata)
@@ -218,6 +225,7 @@ class AgnoRuntime:
         final_reply_parts: list[str] = []
 
         thinking_token = set_enable_thinking(enable_thinking)
+        ignore_token = set_ignore_db(ignore_db)
         try:
             async for event in target.arun(message, **kwargs):
                 if sid := getattr(event, "session_id", None):
@@ -300,6 +308,7 @@ class AgnoRuntime:
                     )
         finally:
             reset_enable_thinking(thinking_token)
+            reset_ignore_db(ignore_token)
 
         reply = "".join(final_reply_parts)
         output = self._request_filters.apply_post_filter(

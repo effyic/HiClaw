@@ -22,6 +22,7 @@ from agno_worker.mcp.loader import build_mcp_tools
 from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill_catalog_summary
 from agno_worker.api.identity import default_debug_request
 from agno_worker.runtime.agent import StorageAwareAgent
+from agno_worker.runtime.ignore_db import get_ignore_db
 from agno_worker.runtime.storage import slim_session_state, sync_debug_request_to_session_state
 from agno_worker.runtime.thinking import attach_thinking_request_params
 from agno_worker.tenant.service import TenantAgentService
@@ -265,13 +266,14 @@ class AgentBuilder:
             metadata = getattr(run_context, "metadata", None) or {}
             debug_request = bool(metadata.get("debug_request", default_debug_request()))
             sync_debug_request_to_session_state(run_context, debug_request)
-            if not debug_request:
+            if not debug_request and not get_ignore_db():
                 run_context.session_state = slim_session_state(run_context.session_state)
             if run_output is not None:
                 run_output.session_state = dict(run_context.session_state)
                 if not isinstance(getattr(run_output, "metadata", None), dict):
                     run_output.metadata = {}
                 run_output.metadata["debug_request"] = debug_request
+                run_output.metadata["ignore_db"] = get_ignore_db()
 
         return _post_hook
 

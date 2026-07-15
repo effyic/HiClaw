@@ -93,7 +93,28 @@ curl -X POST http://localhost:8090/effyic/v1/chat/stream \
 
 
 
-### 3.2 会话入库裁剪（`x-debug-request`）
+### 3.2 跳过会话持久化（`x-ignore-db`）
+
+
+| 请求头     | 行为 |
+| ------- | --- |
+| `true`  | **不读且不写** session 表：本次 run 使用空内存会话，结束后不 upsert |
+
+
+适用于后台一次性推理、不希望污染对话历史的接口。优先于 `x-debug-request`。
+
+```bash
+curl -X POST http://localhost:8090/effyic/v1/chat \
+  -H "tenant-id: tenant-a" \
+  -H "user-id: alice" \
+  -H "session-id: ephemeral-1" \
+  -H "x-ignore-db: true" \
+  -d '{"message": "仅本次推理，不要入库"}'
+```
+
+
+
+### 3.3 会话入库裁剪（`x-debug-request`）
 
 
 | 请求头     | 入库行为                                                        |
