@@ -30,6 +30,7 @@ WORKER_IMAGE         ?= $(REGISTRY)/$(REPO)/hiclaw-worker
 COPAW_WORKER_IMAGE   ?= $(REGISTRY)/$(REPO)/hiclaw-copaw-worker
 HERMES_WORKER_IMAGE  ?= $(REGISTRY)/$(REPO)/hiclaw-hermes-worker
 AGNO_WORKER_IMAGE    ?= $(REGISTRY)/$(REPO)/hiclaw-agno-worker
+SENSITIVE_CONTENT_IMAGE ?= $(REGISTRY)/$(REPO)/hiclaw-sensitive-content
 OPENHUMAN_WORKER_IMAGE ?= $(REGISTRY)/$(REPO)/hiclaw-openhuman-worker
 OPENCLAW_BASE_IMAGE  ?= $(REGISTRY)/$(REPO)/openclaw-base
 CONTROLLER_IMAGE     ?= $(REGISTRY)/$(REPO)/hiclaw-controller
@@ -41,6 +42,7 @@ WORKER_TAG         ?= $(WORKER_IMAGE):$(VERSION)
 COPAW_WORKER_TAG   ?= $(COPAW_WORKER_IMAGE):$(VERSION)
 HERMES_WORKER_TAG  ?= $(HERMES_WORKER_IMAGE):$(VERSION)
 AGNO_WORKER_TAG    ?= $(AGNO_WORKER_IMAGE):$(VERSION)
+SENSITIVE_CONTENT_TAG ?= $(SENSITIVE_CONTENT_IMAGE):$(VERSION)
 OPENHUMAN_WORKER_TAG ?= $(OPENHUMAN_WORKER_IMAGE):$(VERSION)
 OPENCLAW_BASE_TAG  ?= $(OPENCLAW_BASE_IMAGE):$(VERSION)
 CONTROLLER_TAG     ?= $(CONTROLLER_IMAGE):$(VERSION)
@@ -53,6 +55,7 @@ LOCAL_WORKER         = hiclaw/worker-agent:$(VERSION)
 LOCAL_COPAW_WORKER   = hiclaw/copaw-worker:$(VERSION)
 LOCAL_HERMES_WORKER  = hiclaw/hermes-worker:$(VERSION)
 LOCAL_AGNO_WORKER    = hiclaw/agno-worker:$(VERSION)
+LOCAL_SENSITIVE_CONTENT = hiclaw/sensitive-content:$(VERSION)
 LOCAL_OPENHUMAN_WORKER = hiclaw/openhuman-worker:$(VERSION)
 LOCAL_OPENCLAW_BASE  = hiclaw/openclaw-base:$(VERSION)
 LOCAL_CONTROLLER     = hiclaw/hiclaw-controller:$(VERSION)
@@ -107,9 +110,9 @@ LINES          ?= 50
 
 # ---------- Phony targets ----------
 
-.PHONY: all build build-openclaw-base build-hiclaw-controller build-embedded build-manager build-manager-copaw build-worker build-copaw-worker build-hermes-worker build-agno-worker build-openhuman-worker \
-        tag push push-openclaw-base push-hiclaw-controller push-embedded push-manager push-manager-copaw push-worker push-copaw-worker push-hermes-worker push-agno-worker push-openhuman-worker \
-        push-native push-native-manager push-native-manager-copaw push-native-worker push-native-copaw-worker push-native-hermes-worker push-native-agno-worker push-native-openhuman-worker \
+.PHONY: all build build-openclaw-base build-hiclaw-controller build-embedded build-manager build-manager-copaw build-worker build-copaw-worker build-hermes-worker build-agno-worker build-sensitive-content build-openhuman-worker \
+        tag push push-openclaw-base push-hiclaw-controller push-embedded push-manager push-manager-copaw push-worker push-copaw-worker push-hermes-worker push-agno-worker push-sensitive-content push-openhuman-worker \
+        push-native push-native-manager push-native-manager-copaw push-native-worker push-native-copaw-worker push-native-hermes-worker push-native-agno-worker push-native-sensitive-content push-native-openhuman-worker \
         buildx-setup \
         test test-quick test-installed test-embedded \
         install install-embedded uninstall uninstall-embedded replay replay-log \
@@ -195,6 +198,13 @@ build-agno-worker: ## Build Agno Worker image (standalone conversational agent)
 		-f openagno/Dockerfile \
 		-t $(LOCAL_AGNO_WORKER) \
 		./openagno/
+
+build-sensitive-content: ## Build sensitive-content service image (rule management + policy snapshot)
+	@echo "==> Building sensitive-content image: $(LOCAL_SENSITIVE_CONTENT) (registry: $(HIGRESS_REGISTRY))"
+	docker build $(PLATFORM_FLAG) $(REGISTRY_ARG) $(DOCKER_BUILD_ARGS) \
+		-f sensitive-content/Dockerfile \
+		-t $(LOCAL_SENSITIVE_CONTENT) \
+		./sensitive-content/
 
 build-openhuman-worker: ## Build OpenHuman Worker image (Rust + native Matrix)
 	@echo "==> Building OpenHuman Worker image: $(LOCAL_OPENHUMAN_WORKER)"
@@ -468,6 +478,33 @@ else
 		./hermes/
 endif
 
+push-sensitive-content: buildx-setup ## Build + push multi-arch sensitive-content image
+	@echo "==> Building + pushing multi-arch sensitive-content: $(SENSITIVE_CONTENT_TAG) [$(MULTIARCH_PLATFORMS)]"
+ifeq ($(IS_PODMAN),1)
+	-podman manifest rm $(SENSITIVE_CONTENT_TAG) 2>/dev/null
+	$(foreach plat,$(subst $(comma), ,$(MULTIARCH_PLATFORMS)), \
+		echo "  -> Building sensitive-content for $(plat)..." && \
+		podman build --platform $(plat) \
+			$(REGISTRY_ARG) $(DOCKER_BUILD_ARGS) \
+			-f sensitive-content/Dockerfile \
+			--manifest $(SENSITIVE_CONTENT_TAG) \
+			./sensitive-content/ && ) true
+	podman manifest push --all $(SENSITIVE_CONTENT_TAG) docker://$(SENSITIVE_CONTENT_TAG)
+	$(if $(PUSH_LATEST), \
+		podman manifest push --all $(SENSITIVE_CONTENT_TAG) docker://$(SENSITIVE_CONTENT_IMAGE):latest && \
+		echo "  -> Also pushed :latest tag")
+else
+	docker buildx build \
+		--builder $(BUILDX_BUILDER) \
+		--platform $(MULTIARCH_PLATFORMS) \
+		$(REGISTRY_ARG) $(DOCKER_BUILD_ARGS) \
+		-f sensitive-content/Dockerfile \
+		-t $(SENSITIVE_CONTENT_TAG) \
+		$(if $(PUSH_LATEST),-t $(SENSITIVE_CONTENT_IMAGE):latest) \
+		--push \
+		./sensitive-content/
+endif
+
 # ---------- Push native-arch only (dev use) ----------
 # WARNING: Pushing single-arch images will overwrite multi-arch manifests.
 # Only use for local development / testing, never for release.
@@ -508,6 +545,10 @@ push-native-copaw-worker: build-copaw-worker ## Push native-arch CoPaw Worker on
 push-native-hermes-worker: build-hermes-worker ## Push native-arch Hermes Worker only (dev)
 	docker tag $(LOCAL_HERMES_WORKER) $(HERMES_WORKER_TAG)
 	docker push $(HERMES_WORKER_TAG)
+
+push-native-sensitive-content: build-sensitive-content ## Push native-arch sensitive-content only (dev)
+	docker tag $(LOCAL_SENSITIVE_CONTENT) $(SENSITIVE_CONTENT_TAG)
+	docker push $(SENSITIVE_CONTENT_TAG)
 
 push-native-openhuman-worker: build-openhuman-worker ## Push native-arch OpenHuman Worker only (dev)
 	docker tag $(LOCAL_OPENHUMAN_WORKER) $(OPENHUMAN_WORKER_TAG)

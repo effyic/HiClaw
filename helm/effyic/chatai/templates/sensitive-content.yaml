@@ -1,0 +1,120 @@
+{{- if eq (include "chatai.sensitiveContentEnabled" .) "enabled" }}
+{{- $name := include "chatai.sensitiveContent.name" . }}
+{{- $port := include "chatai.sensitiveContent.port" . | int }}
+{{- if not .Values.sensitiveContent.existingSecret }}
+---
+# Chart-managed credentials Secret (skipped when sensitiveContent.existingSecret
+# references a pre-created Secret). Values follow the chatai.authToken pattern:
+# configured value > existing Secret (lookup) > deterministic generation.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "chatai.sensitiveContent.secretName" . }}
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sensitive-content
+type: Opaque
+stringData:
+  SENSITIVE_CONTENT_ADMIN_TOKEN: {{ include "chatai.sensitiveContent.adminToken" . | quote }}
+  SENSITIVE_CONTENT_RUNTIME_TOKEN: {{ include "chatai.sensitiveContent.runtimeToken" . | quote }}
+  SENSITIVE_CONTENT_FINGERPRINT_KEY: {{ include "chatai.sensitiveContent.fingerprintKey" . | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sensitive-content
+spec:
+  replicas: {{ .Values.sensitiveContent.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: sensitive-content
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "chatai.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: sensitive-content
+    spec:
+      {{- $hostAliasIP := include "chatai.postgres.hostAliasIP" . }}
+      {{- $pgHost := include "chatai.postgres.host" . }}
+      {{- if and $hostAliasIP $pgHost }}
+      hostAliases:
+        - ip: {{ $hostAliasIP | quote }}
+          hostnames:
+            - {{ $pgHost | quote }}
+      {{- end }}
+      containers:
+        - name: sensitive-content
+          image: {{ include "chatai.sensitiveContent.image" . | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["sensitive-content", "serve"]
+          ports:
+            - name: http
+              containerPort: {{ $port }}
+              protocol: TCP
+          env:
+            - name: SENSITIVE_CONTENT_DB_URL
+              value: {{ include "chatai.postgres.url" . | quote }}
+            - name: SENSITIVE_CONTENT_PORT
+              value: {{ $port | quote }}
+            - name: SENSITIVE_CONTENT_RETENTION_DAYS
+              value: {{ .Values.sensitiveContent.retentionDays | default 90 | quote }}
+            - name: SENSITIVE_CONTENT_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "chatai.sensitiveContent.secretName" . }}
+                  key: SENSITIVE_CONTENT_ADMIN_TOKEN
+            - name: SENSITIVE_CONTENT_RUNTIME_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "chatai.sensitiveContent.secretName" . }}
+                  key: SENSITIVE_CONTENT_RUNTIME_TOKEN
+            - name: SENSITIVE_CONTENT_FINGERPRINT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "chatai.sensitiveContent.secretName" . }}
+                  key: SENSITIVE_CONTENT_FINGERPRINT_KEY
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          {{- if .Values.sensitiveContent.resources }}
+          resources:
+            {{- toYaml .Values.sensitiveContent.resources | nindent 12 }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sensitive-content
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sensitive-content
+  ports:
+    - name: http
+      port: {{ $port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

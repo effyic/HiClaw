@@ -233,6 +233,82 @@ http://localhost
 {{- end -}}
 {{- end }}
 
+{{/*
+Sensitive content service toggle. Avoid `enabled | default false` pitfalls —
+mirrors chatai.dbInitEnabled but defaults to "disabled".
+*/}}
+{{- define "chatai.sensitiveContentEnabled" -}}
+{{- if and (.Values.sensitiveContent) (kindIs "bool" .Values.sensitiveContent.enabled) -}}
+{{- ternary "enabled" "disabled" .Values.sensitiveContent.enabled -}}
+{{- else -}}
+disabled
+{{- end -}}
+{{- end }}
+
+{{- define "chatai.sensitiveContent.name" -}}
+{{- printf "%s-sensitive-content" (include "chatai.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
+{{- define "chatai.sensitiveContent.image" -}}
+{{- $repo := .Values.sensitiveContent.image.repository | default "hiclaw/sensitive-content" -}}
+{{- $tag := .Values.sensitiveContent.image.tag | default "latest" -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end }}
+
+{{- define "chatai.sensitiveContent.port" -}}
+{{- /* 默认端口与服务实现/镜像默认值（SENSITIVE_CONTENT_PORT=8091）保持一致 */ -}}
+{{- .Values.sensitiveContent.port | default 8091 -}}
+{{- end }}
+
+{{- define "chatai.sensitiveContent.serviceURL" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%d" (include "chatai.sensitiveContent.name" .) (include "chatai.namespace" .) (include "chatai.sensitiveContent.port" . | int) -}}
+{{- end }}
+
+{{/*
+Credentials Secret name: sensitiveContent.existingSecret wins, otherwise the
+chart-managed Secret rendered in sensitive-content.yaml.
+*/}}
+{{- define "chatai.sensitiveContent.secretName" -}}
+{{- if .Values.sensitiveContent.existingSecret -}}
+{{- .Values.sensitiveContent.existingSecret -}}
+{{- else -}}
+{{- printf "%s-auth" (include "chatai.sensitiveContent.name" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Resolve one sensitive-content credential (same precedence as chatai.authToken):
+configured value > existing Secret data (lookup) > deterministic generation.
+Call with dict: root=$ valueKey=<values field> secretKey=<Secret data key>.
+*/}}
+{{- define "chatai.sensitiveContent.credential" -}}
+{{- $root := .root -}}
+{{- $configured := index $root.Values.sensitiveContent .valueKey | default "" -}}
+{{- if $configured -}}
+{{- $configured -}}
+{{- else -}}
+{{- $secretName := include "chatai.sensitiveContent.secretName" $root -}}
+{{- $existing := lookup "v1" "Secret" (include "chatai.namespace" $root) $secretName -}}
+{{- if and $existing $existing.data (hasKey $existing.data .secretKey) -}}
+{{- index $existing.data .secretKey | b64dec -}}
+{{- else -}}
+{{- printf "sensitive-content-%s-%s-%s" $root.Release.Name (include "chatai.namespace" $root) .secretKey | sha256sum | trunc 32 -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "chatai.sensitiveContent.adminToken" -}}
+{{- include "chatai.sensitiveContent.credential" (dict "root" . "valueKey" "adminToken" "secretKey" "SENSITIVE_CONTENT_ADMIN_TOKEN") -}}
+{{- end }}
+
+{{- define "chatai.sensitiveContent.runtimeToken" -}}
+{{- include "chatai.sensitiveContent.credential" (dict "root" . "valueKey" "runtimeToken" "secretKey" "SENSITIVE_CONTENT_RUNTIME_TOKEN") -}}
+{{- end }}
+
+{{- define "chatai.sensitiveContent.fingerprintKey" -}}
+{{- include "chatai.sensitiveContent.credential" (dict "root" . "valueKey" "fingerprintKey" "secretKey" "SENSITIVE_CONTENT_FINGERPRINT_KEY") -}}
+{{- end }}
+
 {{- define "chatai.workerEnv" -}}
 {{- $root := .root -}}
 {{- $worker := .worker -}}
@@ -249,6 +325,33 @@ http://localhost
 {{- end -}}
 {{- if not (index $merged "AGNO_AGENT_DB_URL" | default "") -}}
 {{- $_ := set $merged "AGNO_AGENT_DB_URL" (index $merged "AGNO_DB_URL") -}}
+{{- end -}}
+{{- /* Sensitive content guardrail wiring. Worker CR spec.env is a plain
+       string map (no valueFrom/secretKeyRef support), so token values are
+       resolved by the chart — same pattern as AGNO_CONTROL_TOKEN above. */ -}}
+{{- if eq (include "chatai.sensitiveContentEnabled" $root) "enabled" -}}
+{{- $sc := $root.Values.sensitiveContent -}}
+{{- if not (index $merged "SENSITIVE_CONTENT_SERVICE_URL" | default "") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_SERVICE_URL" (include "chatai.sensitiveContent.serviceURL" $root) -}}
+{{- end -}}
+{{- if not (index $merged "SENSITIVE_CONTENT_RUNTIME_TOKEN" | default "") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_RUNTIME_TOKEN" (include "chatai.sensitiveContent.runtimeToken" $root) -}}
+{{- end -}}
+{{- if not (index $merged "SENSITIVE_CONTENT_FINGERPRINT_KEY" | default "") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_FINGERPRINT_KEY" (include "chatai.sensitiveContent.fingerprintKey" $root) -}}
+{{- end -}}
+{{- if not (index $merged "SENSITIVE_CONTENT_CACHE_PATH" | default "") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_CACHE_PATH" ($sc.cachePath | default "/var/lib/agno/moderation/policy-snapshot.json") -}}
+{{- end -}}
+{{- if not (index $merged "SENSITIVE_CONTENT_REFRESH_INTERVAL" | default "") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_REFRESH_INTERVAL" ($sc.refreshInterval | default "30" | toString) -}}
+{{- end -}}
+{{- if not (index $merged "SENSITIVE_CONTENT_MAX_STALE" | default "") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_MAX_STALE" ($sc.maxStale | default "600" | toString) -}}
+{{- end -}}
+{{- if not (index $merged "SENSITIVE_CONTENT_FAIL_MODE" | default "") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_FAIL_MODE" ($sc.failMode | default "open") -}}
+{{- end -}}
 {{- end -}}
 {{- $merged | toYaml -}}
 {{- end }}

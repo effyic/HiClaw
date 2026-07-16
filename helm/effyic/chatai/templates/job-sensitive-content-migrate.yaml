@@ -1,0 +1,53 @@
+{{- if eq (include "chatai.sensitiveContentEnabled" .) "enabled" }}
+# Versioned schema migration for the sensitive_content schema. This Job is the
+# only DDL executor (the service never runs DDL at startup); `sensitive-content
+# migrate` takes a PostgreSQL advisory lock and waits for DB availability with
+# built-in retry (default 120s). The pre-install/pre-upgrade hook at weight -10
+# guarantees it completes before Workers are (re)created.
+#
+# NOTE (fresh install): the target database itself is created by the post-install
+# db-init Job, which cannot run before this pre-install hook. If the database
+# does not exist yet, pre-create it or install with sensitiveContent.enabled=false
+# first and enable via `helm upgrade` — see the sensitiveContent comments in
+# values.yaml.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "chatai.fullname" . }}-sensitive-content-migrate
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sensitive-content
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.sensitiveContent.migrate.backoffLimit | default 3 }}
+  activeDeadlineSeconds: {{ .Values.sensitiveContent.migrate.activeDeadlineSeconds | default 300 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "chatai.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: sensitive-content-migrate
+    spec:
+      restartPolicy: OnFailure
+      {{- $hostAliasIP := include "chatai.postgres.hostAliasIP" . }}
+      {{- $pgHost := include "chatai.postgres.host" . }}
+      {{- if and $hostAliasIP $pgHost }}
+      hostAliases:
+        - ip: {{ $hostAliasIP | quote }}
+          hostnames:
+            - {{ $pgHost | quote }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "chatai.sensitiveContent.image" . | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["sensitive-content", "migrate"]
+          env:
+            - name: SENSITIVE_CONTENT_DB_URL
+              value: {{ include "chatai.postgres.url" . | quote }}
+{{- end }}
