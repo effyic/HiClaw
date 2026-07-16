@@ -56,6 +56,7 @@ HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
 | `POST /effyic/v1/chat/stream`                        | SSE 流式对话                 |
 | `GET /effyic/v1/sessions`                            | 按 `user_id` 分页列出历史会话     |
 | `GET /effyic/v1/sessions/{session_id}`               | 获取会话详情（含 `chat_history`） |
+| `GET /effyic/v1/sessions/{session_id}/conversation`  | 获取纯对话（基于 `run_input`，不含 `<additional context>`） |
 | `GET /effyic/v1/sessions/{session_id}/runs`          | 获取会话下所有 run              |
 | `GET /effyic/v1/sessions/{session_id}/runs/{run_id}` | 获取单次 run 详情              |
 | `GET /effyic/health`                                 | 健康检查                     |
@@ -445,7 +446,7 @@ PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 | -------------------- | ---------------------------------------- |
 | `api/identity.py`    | tenant / user / session ID 解析            |
 | `api/server.py`      | HTTP 入口                                  |
-| `api/sessions.py`    | `/effyic/v1/sessions*` AgentOS 会话 API 挂载 |
+| `api/sessions.py`    | `/effyic/v1/sessions*` AgentOS 会话 API + `/conversation` 纯对话 |
 | `worker.py`          | Worker 生命周期、热重载                          |
 | `runtime/engine.py`  | 单一动态 Agent 构建与 run                       |
 | `runtime/builder.py` | pre/post/instructions/tools 注入点          |
