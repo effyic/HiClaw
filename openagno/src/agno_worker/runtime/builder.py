@@ -174,7 +174,7 @@ class AgentBuilder:
                 ]
 
             tools.extend(skills_manager.build_tools(run_context, catalog))
-            tools.extend(tenant.data.get_tools())
+            tools.extend(tenant.data.get_tools(run_context))
             return tenant.filter_mcp_tools(run_context, tools)
 
         return _tools
@@ -262,6 +262,21 @@ class AgentBuilder:
             updates = tenant.build_session_updates(run_context.session_state, run_context)
             if isinstance(updates, dict) and updates:
                 run_context.session_state.update(updates)
+
+            from agno_worker.tenant.collection import (
+                COLLECTION_STATE_KEY,
+                append_status_marker,
+                is_collection_enabled,
+            )
+
+            workflow = (run_context.session_state or {}).get("workflow") or {}
+            if is_collection_enabled(workflow if isinstance(workflow, dict) else {}):
+                coll = (run_context.session_state or {}).get(COLLECTION_STATE_KEY) or {}
+                if run_output is not None and hasattr(run_output, "content"):
+                    run_output.content = append_status_marker(
+                        getattr(run_output, "content", None),
+                        coll if isinstance(coll, dict) else {},
+                    )
 
             metadata = getattr(run_context, "metadata", None) or {}
             debug_request = bool(metadata.get("debug_request", default_debug_request()))

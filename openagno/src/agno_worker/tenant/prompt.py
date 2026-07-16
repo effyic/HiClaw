@@ -118,6 +118,24 @@ class TenantPromptBuilder:
         parts.append(f"可用知识库: {', '.join(kb) if kb else '（未启用）'}")
         if instructions_append := supplements.get("instructions_append"):
             parts.append(instructions_append)
+
+        # Config-driven collection protocol: inject live slot state every turn.
+        from agno_worker.tenant.collection import (
+            COLLECTION_STATE_KEY,
+            collection_instructions_appendix,
+            resolve_collection_config,
+        )
+
+        coll_cfg = resolve_collection_config(workflow)
+        if coll_cfg:
+            session_state = getattr(run_context, "session_state", None) or {}
+            coll_state = (
+                session_state.get(COLLECTION_STATE_KEY)
+                if isinstance(session_state, dict)
+                else None
+            )
+            parts.append(collection_instructions_appendix(coll_state or {}, coll_cfg))
+
         return "\n".join(part for part in parts if part)
 
     def _build_context_filters(

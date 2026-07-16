@@ -223,6 +223,48 @@ HTTP role-code / x-role-code（或 query role_code）
 
 多阶段业务（如分诊 → 问诊 → 病历）需在**调用方**切换 `role-code`，或在 `transform_session_state_hook` 中更新 `session_state.active_role` / `role_code`；框架本身不做阶段路由。
 
+### 5.2 采集对话薄协议（collection dialogue）
+
+配置驱动的槽位采集 FSM，适用于问诊 / 分诊 / 问卷等。**进度只写在 `session_state.collection`**，随 Agno session 落库（`AGNO_DB_URL`），精简入库白名单含 `collection`，**集群多副本不丢状态**。
+
+启用方式（`agno_agent.workflow`）：
+
+```json
+{
+  "kind": "medical",
+  "phase": "inquiry",
+  "collection": {
+    "kind": "collection_dialogue",
+    "confirm_required": true,
+    "ask_batch_size": 2,
+    "schema": {
+      "source": "inline",
+      "fields": [
+        {"name": "主诉", "required": true, "description": "主要症状"},
+        {"name": "持续时间", "required": true}
+      ]
+    },
+    "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"},
+    "gated_mcp_tools": ["mec_create_emr_case"]
+  }
+}
+```
+
+也可顶层 `"kind": "collection_dialogue"`。`schema.source=mcp` 时由模型先调字段列表 MCP，再把结果传给 `collection_load_schema(fields_json=...)`。
+
+| 工具 | 作用 |
+|------|------|
+| `collection_load_schema` | 加载字段清单 |
+| `collection_update_fields` | 合并采集值并重算 missing |
+| `collection_status` | 只读进度 |
+| `collection_confirm` | 用户确认 |
+| `collection_complete` | 写入 draft，授权完成 |
+| `collection_mark_done` | 写库副作用成功后收尾 |
+
+闸门：必填未齐或未确认时，将 `gated_mcp_tools` / `complete_action.tool` 加入 MCP `exclude_tools`。客户端可用请求头 `x-collection-confirm: true` 在本轮解锁确认。同步回复末尾会附加 `<!--COLLECTION_STATUS {...}-->`。
+
+实现：`tenant/collection.py`；接线：`tenant/service.py`、`tenant/session.py`、`tenant/prompt.py`、`tenant/data.py`、`runtime/storage.py`。
+
 ---
 
 

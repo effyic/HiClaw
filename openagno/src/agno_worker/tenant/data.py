@@ -3,6 +3,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from agno_worker.tenant.collection import (
+    build_collection_tools,
+    is_collection_enabled,
+    workflow_from_run_context,
+)
 from agno_worker.tenant.context import TenantContextResolver
 from agno_worker.tenant.db import agent_db_driver, agent_db_url
 
@@ -29,7 +34,7 @@ class TenantDataProvider:
     def db_connection_info(self) -> dict[str, str]:
         return {"url": agent_db_url(), "driver": agent_db_driver()}
 
-    def get_tools(self) -> list[Any]:
+    def get_tools(self, run_context: Any = None) -> list[Any]:
         try:
             from agno.tools import tool
         except ImportError:
@@ -43,4 +48,9 @@ class TenantDataProvider:
             processed = provider.process_result(raw, run_context)
             return str(processed.get("text", raw))
 
-        return [query_data]
+        tools: list[Any] = [query_data]
+        if run_context is not None and is_collection_enabled(
+            workflow_from_run_context(run_context)
+        ):
+            tools.extend(build_collection_tools())
+        return tools

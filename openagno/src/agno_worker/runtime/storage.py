@@ -9,6 +9,7 @@ from agno_worker.api.identity import default_debug_request
 DEBUG_REQUEST_STATE_KEY = "_debug_request"
 
 # Business session_state keys kept in slim storage mode.
+# ``collection`` holds the slot-filling FSM and MUST survive multi-turn + multi-replica.
 SLIM_SESSION_STATE_KEYS = frozenset(
     {
         "tenant_id",
@@ -17,6 +18,7 @@ SLIM_SESSION_STATE_KEYS = frozenset(
         "phase",
         "workflow",
         "session_id",
+        "collection",
     }
 )
 
