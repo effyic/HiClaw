@@ -12,7 +12,8 @@
 HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
   → api/identity.py           解析 tenant-id / user-id / session-id
   → hooks/filters.py          tenant_id 必填校验（可配置）+ 可选 pre/post filter
-  → runtime/engine.py         单一动态 Agent
+  → runtime/engine.py         单一动态 Agent（注入请求级 request_id contextvars）
+  → moderation/               敏感内容 Guardrail（可选，pre_hooks 首位）
   → runtime/builder.py        pre_hook / instructions / tools / post_hook
   → tenant/service.py         标准流水线编排 + run-scoped 缓存
       ├── tenant/context.py   租户 / 角色解析
@@ -379,6 +380,23 @@ pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 | `AGNO_ENABLE_AGENTOS`         | 启用完整 AgentOS（根路径 API + os.agno.com） | `false`                      |
 | `AGNO_SPEC_WATCH_INTERVAL`    | AgentSpec/Hook 热重载间隔（秒）             | `30`                         |
 
+### 10.1 敏感内容检测（`moderation/`，可选）
+
+配置 `SENSITIVE_CONTENT_SERVICE_URL` 后启用；未配置时 Worker 行为与原来完全一致。`SensitiveContentGuardrail` 挂载在 Agent `pre_hooks` **首位**（业务 pre_hook 之前），因此脱敏后的文本才进入 `user_requirements`、Prompt 与会话上下文；被阻断/终止的原始输入不写入会话历史。
+
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `SENSITIVE_CONTENT_SERVICE_URL` | sensitive-content 管理服务地址（空 = 关闭） | 空 |
+| `SENSITIVE_CONTENT_RUNTIME_TOKEN` | 内部 API Runtime Token | 空 |
+| `SENSITIVE_CONTENT_CACHE_PATH` | 快照落盘路径（不可写降级纯内存） | `/var/lib/agno/moderation/policy-snapshot.json` |
+| `SENSITIVE_CONTENT_REFRESH_INTERVAL` | 快照刷新间隔（秒） | `30` |
+| `SENSITIVE_CONTENT_MAX_STALE` | 快照过期上限（秒） | `600` |
+| `SENSITIVE_CONTENT_FAIL_MODE` | 无有效快照/正则超时处理：`open` / `closed` | `open` |
+| `SENSITIVE_CONTENT_FINGERPRINT_KEY` | 命中事件 HMAC-SHA256 指纹密钥 | 空 |
+| `SENSITIVE_CONTENT_REGEX_TIMEOUT_MS` | 单条正则匹配超时（毫秒） | `50` |
+| `SENSITIVE_CONTENT_BREAKER_THRESHOLD` | 正则连续超时熔断阈值 | `3` |
+| `SENSITIVE_CONTENT_BREAKER_COOLDOWN` | 熔断冷却时长（秒） | `60` |
+
 
 ---
 
@@ -409,6 +427,8 @@ Worker.start()
 | `RequestRejectedError` | tenant_id 缺失（`AGNO_REQUIRE_TENANT_ID`）或 pre_filter 拒绝 | 403                    |
 | `HookLoadError`        | 代码主动 `registry.call()` 未加载的 Hook                      | 500                    |
 | `HookExecutionError`   | 扩展 Hook 运行时抛错                                         | 500，`detail` 含 hook 名称 |
+| `SensitiveContentDecisionError` | 敏感内容命中且最终行为为 `BLOCK_REQUEST`             | 422 `sensitive_content_blocked` |
+| `SensitivePolicyUnavailableError` | 无有效策略快照且 `SENSITIVE_CONTENT_FAIL_MODE=closed` | 503 `sensitive_policy_unavailable` |
 
 
 PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
@@ -438,6 +458,10 @@ PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 | `hooks/protocols.py` | Hook 接口与类型定义                             |
 | `hooks/compose.py`   | 流水线/Spec 合并、dependencies 组装              |
 | `hooks/filters.py`   | 请求 pre/post filter                       |
+| `moderation/guardrail.py` | SensitiveContentGuardrail（pre_hooks 首位） |
+| `moderation/detector.py`  | 敏感内容检测引擎（归一化 / 正则超时 / 熔断）  |
+| `moderation/snapshot.py`  | 策略快照客户端（内存 + 落盘 + 后台刷新）      |
+| `moderation/reporter.py`  | 命中事件批量上报（有界队列 + HMAC 指纹）      |
 | `examples/hooks/`    | PVC Hook 参考实现                            |
 
 
