@@ -384,6 +384,8 @@ pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 
 配置 `SENSITIVE_CONTENT_SERVICE_URL` 后启用；未配置时 Worker 行为与原来完全一致。`SensitiveContentGuardrail` 挂载在 Agent `pre_hooks` **首位**（业务 pre_hook 之前），因此脱敏后的文本才进入 `user_requirements`、Prompt 与会话上下文；被阻断/终止的原始输入不写入会话历史。
 
+支持八种响应行为：结束对话 / 固定回复 / 阻断 / 脱敏放行 / 仅记录 / 业务动作 / 自定义回复 / **语气调整（`ADJUST_PROMPT`）**。`ADJUST_PROMPT` 放行请求并将 `prompt_guidance` 经请求上下文注入本轮 `instructions`（阻断类胜出时不注入）；注入块含冲突优先级说明。
+
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
 | `SENSITIVE_CONTENT_SERVICE_URL` | sensitive-content 管理服务地址（空 = 关闭） | 空 |

@@ -27,6 +27,7 @@ def _event(
     hit_at: str,
     tenant_id: str = "mt",
     hit_count: int = 1,
+    session_id: str = "",
 ) -> dict[str, Any]:
     return {
         "event_id": str(uuid.uuid4()),
@@ -39,6 +40,7 @@ def _event(
         "tenant_id": tenant_id,
         "request_fingerprint": fp,
         "session_fingerprint": "sess",
+        "session_id": session_id,
         "policy_version": "global-1:tenant-1",
         "hit_count": hit_count,
         "hit_at": hit_at,
@@ -56,13 +58,13 @@ def seeded_events(client):
     events = [
         _event(101, 1, "LOG_ONLY", "BLOCK_REQUEST",
                selected=False, final_rule_id=102, fp="fp-r1",
-               hit_at=f"{DAY1}T10:00:00Z"),
+               hit_at=f"{DAY1}T10:00:00Z", session_id="sess-1"),
         _event(102, 1, "BLOCK_REQUEST", "BLOCK_REQUEST",
                selected=True, final_rule_id=102, fp="fp-r1",
-               hit_at=f"{DAY1}T10:00:00Z"),
+               hit_at=f"{DAY1}T10:00:00Z", session_id="sess-1"),
         _event(101, 1, "LOG_ONLY", "LOG_ONLY",
                selected=True, final_rule_id=101, fp="fp-r2",
-               hit_at=f"{DAY1}T11:00:00Z", hit_count=2),
+               hit_at=f"{DAY1}T11:00:00Z", hit_count=2, session_id="sess-2"),
         _event(103, 2, "REDACT_AND_CONTINUE", "REDACT_AND_CONTINUE",
                selected=True, final_rule_id=103, fp="fp-r3",
                hit_at=f"{DAY2}T10:00:00Z"),
@@ -122,6 +124,11 @@ class TestByRule:
         assert top["hits"] == 3          # 1 + hit_count 2
         assert top["events"] == 2        # 事件行数
         assert top["last_hit_at"].startswith(f"{DAY1}T11:00:00")
+        # 最近一次命中的会话标识（规则 101 最近命中在 sess-2）
+        assert top["last_session_id"] == "sess-2"
+        # 规则 103 的事件未带 session_id：示例会话为空
+        by_id = {i["rule_id"]: i for i in items}
+        assert by_id[103]["last_session_id"] is None
 
     def test_top_n(self, seeded_events):
         items = _get(seeded_events, "mt", "by-rule", top=1)["items"]

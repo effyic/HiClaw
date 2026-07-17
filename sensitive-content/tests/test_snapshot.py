@@ -113,6 +113,37 @@ class TestOverrideSemantics:
         assert "类型禁用词" not in _snapshot_patterns(client, "t1")
 
 
+class TestSelfHarmSeedInSnapshot:
+    """0003 种子：self_harm 类型 + 中文基础规则集进入快照。"""
+
+    def test_self_harm_type_and_chinese_rules(self, client):
+        resp = get_snapshot(client, "t1")
+        assert resp.status_code == 200
+        body = resp.json()
+        types_by_code = {t["code"]: t for t in body["types"]}
+        assert "self_harm" in types_by_code
+        sh = types_by_code["self_harm"]
+        assert sh["action"] == "ADJUST_PROMPT"
+        assert sh["priority"] == 70
+        assert sh["action_config"].get("prompt_guidance")
+
+        patterns = {
+            r["pattern"]
+            for r in body["rules"]
+            if r["type_id"] == sh["id"]
+        }
+        # 中文基础规则集（关键词覆盖，非完整分类器）
+        assert {
+            "自杀",
+            "轻生",
+            "结束生命",
+            "不想活",
+            "自我伤害",
+            "割腕",
+            "寻死",
+        } <= patterns
+
+
 class TestCombinedVersionAndEtag:
     def test_version_format_and_types_included(self, client):
         ttype = create_type(client, "t1", action="FIXED_REPLY",

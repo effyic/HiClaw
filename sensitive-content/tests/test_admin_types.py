@@ -42,8 +42,21 @@ class TestTypeCrud:
             headers=ADMIN_HEADERS,
             params={"page_size": 100},
         )
-        codes = {t["code"] for t in resp.json()["items"]}
-        assert {"politics", "porn", "violence", "privacy", "abuse", "general"} <= codes
+        items = resp.json()["items"]
+        codes = {t["code"] for t in items}
+        assert {
+            "politics",
+            "porn",
+            "violence",
+            "privacy",
+            "abuse",
+            "general",
+            "self_harm",
+        } <= codes
+        self_harm = next(t for t in items if t["code"] == "self_harm")
+        assert self_harm["action"] == "ADJUST_PROMPT"
+        assert self_harm["priority"] == 70
+        assert self_harm["action_config"].get("prompt_guidance")
 
     def test_list_includes_global_for_tenant(self, client):
         create_type(client, "t1", code="own-type")
@@ -65,6 +78,19 @@ class TestTypeCrud:
         )
         assert resp.status_code == 409
         assert resp.json()["error"]["code"] == "duplicate_code"
+
+    def test_create_without_code_auto_generates(self, client):
+        resp = client.post(
+            "/api/v1/tenants/t1/sensitive-types",
+            json={"name": "自动编码类型", "action": "LOG_ONLY"},
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["code"]
+        assert body["code"].startswith("t_")
+        assert 1 <= len(body["code"]) <= 64
+        assert body["name"] == "自动编码类型"
 
     def test_update(self, client):
         created = create_type(client, "t1")
@@ -89,6 +115,91 @@ class TestTypeCrud:
         )
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "invalid_action_config"
+
+    def test_non_adjust_with_prompt_guidance_rejected(self, client):
+        resp = client.post(
+            "/api/v1/tenants/t1/sensitive-types",
+            json={
+                "code": "bad-guidance",
+                "name": "n",
+                "action": "LOG_ONLY",
+                "action_config": {"prompt_guidance": "不应出现"},
+            },
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_action_config"
+
+    def test_create_adjust_prompt_requires_guidance(self, client):
+        resp = client.post(
+            "/api/v1/tenants/t1/sensitive-types",
+            json={"code": "need-guide", "name": "n", "action": "ADJUST_PROMPT"},
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_action_config"
+
+    def test_merge_then_validate_switch_away_without_clearing_guidance(self, client):
+        """ADJUST → 其它 action 且未清除 prompt_guidance → 400。"""
+        created = create_type(
+            client,
+            "t1",
+            code="adjust-then-log",
+            action="ADJUST_PROMPT",
+            action_config={"prompt_guidance": "关怀指引"},
+        )
+        resp = client.put(
+            f"/api/v1/tenants/t1/sensitive-types/{created['id']}",
+            json={"action": "LOG_ONLY"},
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_action_config"
+
+    def test_merge_then_validate_switch_to_adjust_without_guidance(self, client):
+        """其它 → ADJUST 且未提交 prompt_guidance → 400。"""
+        created = create_type(client, "t1", code="log-then-adjust", action="LOG_ONLY")
+        resp = client.put(
+            f"/api/v1/tenants/t1/sensitive-types/{created['id']}",
+            json={"action": "ADJUST_PROMPT"},
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_action_config"
+
+    def test_merge_then_validate_patch_config_keeps_db_action(self, client):
+        """只改 action_config 时结合 DB 原 action 校验。"""
+        created = create_type(
+            client,
+            "t1",
+            code="patch-cfg",
+            action="ADJUST_PROMPT",
+            action_config={"prompt_guidance": "旧指引"},
+        )
+        resp = client.put(
+            f"/api/v1/tenants/t1/sensitive-types/{created['id']}",
+            json={"action_config": {"prompt_guidance": "新指引"}},
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["action_config"]["prompt_guidance"] == "新指引"
+
+    def test_merge_then_validate_switch_away_clearing_guidance(self, client):
+        created = create_type(
+            client,
+            "t1",
+            code="adjust-clear",
+            action="ADJUST_PROMPT",
+            action_config={"prompt_guidance": "关怀指引"},
+        )
+        resp = client.put(
+            f"/api/v1/tenants/t1/sensitive-types/{created['id']}",
+            json={"action": "LOG_ONLY", "action_config": {}},
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["action"] == "LOG_ONLY"
+        assert resp.json()["action_config"] == {}
 
     def test_enable_disable(self, client):
         created = create_type(client, "t1")

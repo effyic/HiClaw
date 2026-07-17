@@ -122,8 +122,14 @@ def db(migrated_db: str) -> Iterator[str]:
                 """
             )
         )
+        # 重放含种子数据的迁移片段（幂等）；0002 仅为 DDL，无需重放
         conn.exec_driver_sql(
             (MIGRATIONS_DIR / "0001_init.sql").read_text(encoding="utf-8")
+        )
+        conn.exec_driver_sql(
+            (MIGRATIONS_DIR / "0003_adjust_prompt_action.sql").read_text(
+                encoding="utf-8"
+            )
         )
     yield migrated_db
 

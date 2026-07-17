@@ -56,6 +56,7 @@ def hit_events_batch(body: HitEventBatch) -> dict[str, int]:
             "tenant_id": e.tenant_id,
             "request_fingerprint": e.request_fingerprint,
             "session_fingerprint": e.session_fingerprint,
+            "session_id": e.session_id,
             "policy_version": e.policy_version,
             "hit_count": e.hit_count,
             "hit_at": e.hit_at,

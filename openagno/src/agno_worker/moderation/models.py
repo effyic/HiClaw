@@ -8,7 +8,7 @@ from typing import Any
 
 
 class ActionType(str, Enum):
-    """七种响应行为（与管理服务 sensitive_type.action 枚举一致）。"""
+    """八种响应行为（与管理服务 sensitive_type.action 枚举一致）。"""
 
     END_CONVERSATION = "END_CONVERSATION"
     FIXED_REPLY = "FIXED_REPLY"
@@ -17,6 +17,7 @@ class ActionType(str, Enum):
     LOG_ONLY = "LOG_ONLY"
     BUSINESS_ACTION = "BUSINESS_ACTION"
     CUSTOM_RESPONSE = "CUSTOM_RESPONSE"
+    ADJUST_PROMPT = "ADJUST_PROMPT"
 
     @classmethod
     def parse(cls, value: str) -> "ActionType":
@@ -194,3 +195,5 @@ class GuardrailDecision:
     message: str = ""  # respond/terminate 场景的回复文案
     redacted_text: str = ""  # redact 场景的脱敏后文本
     policy_version: str = ""
+    # ADJUST_PROMPT 叠加指引（按 type_priority DESC / type_id ASC 去重后）
+    prompt_guidances: list[str] = field(default_factory=list)

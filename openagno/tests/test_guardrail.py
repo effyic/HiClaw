@@ -1,4 +1,4 @@
-"""guardrail 测试：七种行为、同步/异步 check、脱敏改写、命中事件字段与明文泄漏断言。"""
+"""guardrail 测试：八种行为、同步/异步 check、脱敏改写、命中事件字段与明文泄漏断言。"""
 from __future__ import annotations
 
 import asyncio
@@ -71,7 +71,7 @@ def request_ctx():
     reset_request_context(token)
 
 
-class TestSevenActions:
+class TestEightActions:
     def test_log_only_passes_through(self, config, tmp_path):
         guardrail, reporter = build_guardrail(
             config,
@@ -200,6 +200,129 @@ class TestSevenActions:
         )
         with pytest.raises(SensitiveContentDecisionError):
             guardrail.check(RunInput(input_content="有敏感词"))
+
+    def test_adjust_prompt_passes_and_writes_guidances(self, config, tmp_path, request_ctx):
+        guardrail, _ = build_guardrail(
+            config,
+            [
+                make_type(
+                    1,
+                    ActionType.ADJUST_PROMPT,
+                    action_config={"prompt_guidance": "以关怀语气回应"},
+                )
+            ],
+            [make_rule(1, 1, "敏感词")],
+            tmp_path=tmp_path,
+        )
+        run_input = RunInput(input_content="有敏感词")
+        guardrail.check(run_input)
+        assert run_input.input_content == "有敏感词"
+        assert request_ctx.prompt_guidances == ["以关怀语气回应"]
+
+
+class TestPromptGuidancesContext:
+    """每轮开头清空；放行写入；阻断保持空；复用上下文无污染。"""
+
+    def test_no_hit_leaves_guidances_empty(self, config, tmp_path, request_ctx):
+        request_ctx.prompt_guidances = ["上一轮残留"]
+        guardrail, _ = build_guardrail(
+            config,
+            [
+                make_type(
+                    1,
+                    ActionType.ADJUST_PROMPT,
+                    action_config={"prompt_guidance": "不应写入"},
+                )
+            ],
+            [make_rule(1, 1, "敏感词")],
+            tmp_path=tmp_path,
+        )
+        guardrail.check(RunInput(input_content="干净的输入"))
+        assert request_ctx.prompt_guidances == []
+
+    def test_allow_writes_guidances(self, config, tmp_path, request_ctx):
+        guardrail, _ = build_guardrail(
+            config,
+            [
+                make_type(
+                    1,
+                    ActionType.ADJUST_PROMPT,
+                    priority=70,
+                    action_config={"prompt_guidance": "关怀指引"},
+                )
+            ],
+            [make_rule(1, 1, "轻生")],
+            tmp_path=tmp_path,
+        )
+        guardrail.check(RunInput(input_content="提到轻生"))
+        assert request_ctx.prompt_guidances == ["关怀指引"]
+
+    def test_block_leaves_guidances_empty(self, config, tmp_path, request_ctx):
+        # violence(80) + self_harm(70)：BLOCK 胜出，不注入
+        guardrail, _ = build_guardrail(
+            config,
+            [
+                make_type(
+                    1,
+                    ActionType.ADJUST_PROMPT,
+                    priority=70,
+                    action_config={"prompt_guidance": "关怀指引"},
+                ),
+                make_type(2, ActionType.BLOCK_REQUEST, priority=80),
+            ],
+            [make_rule(1, 1, "轻生"), make_rule(2, 2, "暴力")],
+            tmp_path=tmp_path,
+        )
+        with pytest.raises(SensitiveContentDecisionError):
+            guardrail.check(RunInput(input_content="暴力与轻生"))
+        assert request_ctx.prompt_guidances == []
+
+    def test_reused_context_no_pollution(self, config, tmp_path, request_ctx):
+        guardrail, _ = build_guardrail(
+            config,
+            [
+                make_type(
+                    1,
+                    ActionType.ADJUST_PROMPT,
+                    action_config={"prompt_guidance": "关怀指引"},
+                )
+            ],
+            [make_rule(1, 1, "敏感词")],
+            tmp_path=tmp_path,
+        )
+        guardrail.check(RunInput(input_content="有敏感词"))
+        assert request_ctx.prompt_guidances == ["关怀指引"]
+        # 同一上下文再次检测未命中：开头清空，不应残留
+        guardrail.check(RunInput(input_content="干净的输入"))
+        assert request_ctx.prompt_guidances == []
+
+    def test_redact_wins_still_writes_guidances(self, config, tmp_path, request_ctx):
+        # privacy 胜出且同时命中 ADJUST：脱敏全部区间，仍写入叠加指引
+        guardrail, _ = build_guardrail(
+            config,
+            [
+                make_type(
+                    1,
+                    ActionType.REDACT_AND_CONTINUE,
+                    priority=60,
+                    action_config={"replacement": "*"},
+                ),
+                make_type(
+                    2,
+                    ActionType.ADJUST_PROMPT,
+                    priority=50,
+                    action_config={"prompt_guidance": "关怀指引"},
+                ),
+            ],
+            [make_rule(1, 1, "手机"), make_rule(2, 2, "轻生")],
+            tmp_path=tmp_path,
+        )
+        run_input = RunInput(input_content="手机与轻生")
+        guardrail.check(run_input)
+        assert "***" in run_input.input_content or "**" in run_input.input_content
+        assert "手机" not in run_input.input_content
+        assert "轻生" not in run_input.input_content
+        assert request_ctx.prompt_guidances == ["关怀指引"]
 
 
 class TestSyncAsyncCheck:
@@ -341,6 +464,15 @@ class TestHitEvents:
         assert len(event.request_fingerprint) == 64
         assert event.request_fingerprint != ctx.request_id
         assert event.session_fingerprint != ctx.session_id
+
+    def test_events_carry_plain_session_id(self, config, tmp_path):
+        """明文 session_id 取自请求上下文并随事件上报（后台会话跳转用）。"""
+        guardrail, reporter = self._multi_hit_guardrail(config, tmp_path)
+        with pytest.raises(SensitiveContentDecisionError):
+            guardrail.check(RunInput(input_content="低危词和高危词都有"))
+        ctx = get_request_context()
+        assert ctx.session_id == "session-1"
+        assert {e.session_id for e in reporter.events} == {"session-1"}
 
     def test_two_requests_same_session_differ_in_request_fingerprint(
         self, config, tmp_path

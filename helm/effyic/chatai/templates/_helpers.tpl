@@ -260,6 +260,19 @@ disabled
 {{- .Values.sensitiveContent.port | default 8091 -}}
 {{- end }}
 
+{{/*
+敏感内容管理 API 的对外路由前缀（前端经网关访问）。默认挂在
+{gateway.path}/v1/tenants 下（如 /effyic/v1/tenants），网关重写为服务内的
+/api/v1/tenants；仅暴露管理/统计 API，/internal/v1/* 不出集群。
+*/}}
+{{- define "chatai.sensitiveContent.gatewayPath" -}}
+{{- if .Values.sensitiveContent.gatewayPath -}}
+{{- .Values.sensitiveContent.gatewayPath | trimSuffix "/" -}}
+{{- else -}}
+{{- printf "%s/v1/tenants" (include "chatai.gatewayPath" . | trimSuffix "/") -}}
+{{- end -}}
+{{- end }}
+
 {{- define "chatai.sensitiveContent.serviceURL" -}}
 {{- printf "http://%s.%s.svc.cluster.local:%d" (include "chatai.sensitiveContent.name" .) (include "chatai.namespace" .) (include "chatai.sensitiveContent.port" . | int) -}}
 {{- end }}

@@ -350,6 +350,8 @@ class TestHitEventContract:
             assert row["final_rule_id"] == 1
             assert row["tenant_id"] == TENANT
             assert row["policy_version"] == "global-12:tenant-37"
+            # 明文 session_id 通过服务端校验并原样落到写入入参
+            assert row["session_id"] == "session-1"
             # event_id 为合法 UUID（服务端已完成 UUID 解析）
             uuid.UUID(row["event_id"])
             # hit_at ISO 时间串通过服务端 datetime 校验

@@ -1,0 +1,11 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* 覆盖规则失效（orphaned）行的醒目底色 */
+.sc-row-orphaned > td {
+  background: #fff1f0 !important;
+}

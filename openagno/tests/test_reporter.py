@@ -72,11 +72,20 @@ class TestBuildEvents:
         events = make_events(3)
         assert [e.selected for e in events] == [True, False, False]
 
-    def test_fingerprints_not_raw_ids(self):
+    def test_request_fingerprint_not_raw_id(self):
+        """request_id 不得以明文出现；session 指纹也不等于原始标识。"""
         events = make_events(1)
-        payload = json.dumps(events[0].to_payload())
-        assert "req-1" not in payload
-        assert "session-1" not in payload
+        payload = events[0].to_payload()
+        assert "req-1" not in json.dumps(payload)
+        assert payload["session_fingerprint"] != "session-1"
+
+    def test_plain_session_id_carried(self):
+        """明文 session_id 随事件携带（后台跳转会话详情用），与指纹并存。"""
+        events = make_events(2)
+        for event in events:
+            payload = event.to_payload()
+            assert payload["session_id"] == "session-1"
+            assert len(payload["session_fingerprint"]) == 64
 
 
 def run_async(coro):

@@ -106,6 +106,11 @@ sensitiveContent:
   runtimeToken: ""          # internal API token (snapshot / hit-events)
   fingerprintKey: ""        # HMAC key for request/session fingerprints
   existingSecret: ""
+  # Gateway route for the admin/metrics API (frontend-facing). Exposes ONLY
+  # /api/v1/tenants/* (management + metrics + audit-logs); /internal/v1/* stays
+  # cluster-internal. Default public prefix: {gateway.path}/v1/tenants, i.e.
+  # /effyic/v1/tenants -> rewritten to /api/v1/tenants before forwarding.
+  gatewayPath: ""           # override the public prefix; empty = {gateway.path}/v1/tenants
   # Worker-side detection settings (injected into Agno Worker env)
   cachePath: /var/lib/agno/moderation/policy-snapshot.json
   refreshInterval: "30"     # snapshot refresh interval (seconds)

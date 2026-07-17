@@ -13,8 +13,13 @@ from pydantic import BaseModel, Field
 # 规则 pattern 最大长度
 MAX_PATTERN_LENGTH = 512
 
-# action_config 允许的白名单 key（固定/自定义回复文案、脱敏替换符、业务动作名）
-ACTION_CONFIG_ALLOWED_KEYS = frozenset({"reply_text", "replacement", "business_action"})
+# prompt_guidance 最大长度（ADJUST_PROMPT）
+MAX_PROMPT_GUIDANCE_LENGTH = 2000
+
+# action_config 允许的白名单 key（回复文案、脱敏替换符、业务动作名、语气指引）
+ACTION_CONFIG_ALLOWED_KEYS = frozenset(
+    {"reply_text", "replacement", "business_action", "prompt_guidance"}
+)
 
 # 零宽字符集合（归一化时剔除）
 _ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
@@ -30,6 +35,7 @@ class Action(str, Enum):
     LOG_ONLY = "LOG_ONLY"
     BUSINESS_ACTION = "BUSINESS_ACTION"
     CUSTOM_RESPONSE = "CUSTOM_RESPONSE"
+    ADJUST_PROMPT = "ADJUST_PROMPT"
 
 
 class MatchMode(str, Enum):
@@ -125,13 +131,38 @@ def validate_pattern(pattern: str, match_mode: str) -> None:
             )
 
 
-def validate_action_config(action_config: dict[str, Any]) -> None:
-    """action_config 只允许白名单 key。"""
+def validate_action_config(
+    action: Action | str, action_config: dict[str, Any]
+) -> None:
+    """校验 action_config：白名单 key，以及 ADJUST_PROMPT 的 prompt_guidance 语义。
+
+    - ADJUST_PROMPT：必须有非空 prompt_guidance（≤ MAX_PROMPT_GUIDANCE_LENGTH）
+    - 其它 action：不得携带 prompt_guidance（不静默过滤，直接 400）
+    """
+    action_value = action.value if isinstance(action, Action) else str(action)
     extra = set(action_config) - ACTION_CONFIG_ALLOWED_KEYS
     if extra:
         raise ValidationFailure(
             "invalid_action_config",
             f"action_config keys not allowed: {sorted(extra)}",
+        )
+    if action_value == Action.ADJUST_PROMPT.value:
+        guidance = action_config.get("prompt_guidance")
+        if not isinstance(guidance, str) or not guidance.strip():
+            raise ValidationFailure(
+                "invalid_action_config",
+                "ADJUST_PROMPT requires non-empty prompt_guidance",
+            )
+        if len(guidance) > MAX_PROMPT_GUIDANCE_LENGTH:
+            raise ValidationFailure(
+                "invalid_action_config",
+                f"prompt_guidance length {len(guidance)} exceeds "
+                f"limit {MAX_PROMPT_GUIDANCE_LENGTH}",
+            )
+    elif "prompt_guidance" in action_config:
+        raise ValidationFailure(
+            "invalid_action_config",
+            "prompt_guidance is only allowed for ADJUST_PROMPT",
         )
 
 
@@ -176,7 +207,8 @@ def dedup_key(rule: dict[str, Any]) -> tuple[str, bool, bool, str]:
 # ---------------------------------------------------------------------------
 
 class TypeCreate(BaseModel):
-    code: str = Field(min_length=1, max_length=64)
+    # 缺省时由 store.create_type 自动生成（如 t_xxxxxxxxxxxx）
+    code: Optional[str] = Field(default=None, min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=128)
     action: Action
     action_config: dict[str, Any] = Field(default_factory=dict)
@@ -229,6 +261,8 @@ class HitEventIn(BaseModel):
     tenant_id: str
     request_fingerprint: str
     session_fingerprint: str = ""
+    # 明文会话标识（产品决策：供后台跳转查看完整会话；用户原文仍不落库）
+    session_id: str = ""
     policy_version: str = ""
     hit_count: int = 1
     hit_at: Optional[datetime] = None

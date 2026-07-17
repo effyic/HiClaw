@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any, Optional
+from uuid import uuid4
 
 from sqlalchemy import text
 
@@ -208,38 +209,59 @@ def _validate(func: Any, *args: Any) -> None:
         raise StoreError(400, exc.code, exc.message) from exc
 
 
+def _generate_type_code() -> str:
+    """生成类型编码：t_ + 12 位十六进制，满足 1~64 长度约束。"""
+    return f"t_{uuid4().hex[:12]}"
+
+
 def create_type(tenant_id: str, data: TypeCreate, operator: str) -> dict[str, Any]:
-    _validate(validate_action_config, data.action_config)
+    _validate(validate_action_config, data.action, data.action_config)
+    explicit_code = (data.code or "").strip() or None
     with db_connection() as conn:
-        dup = _fetch_one(
-            conn,
-            "SELECT id FROM sensitive_content.sensitive_type "
-            "WHERE tenant_id = :tenant_id AND code = :code AND deleted = FALSE",
-            {"tenant_id": tenant_id, "code": data.code},
-        )
-        if dup:
-            raise StoreError(409, "duplicate_code", f"type code already exists: {data.code}")
-        row = _fetch_one(
-            conn,
-            f"""
-            INSERT INTO sensitive_content.sensitive_type
-                (tenant_id, code, name, action, action_config, priority, description, enabled)
-            VALUES (:tenant_id, :code, :name, :action, CAST(:action_config AS JSONB),
-                    :priority, :description, :enabled)
-            RETURNING {_TYPE_COLUMNS}
-            """,
-            {
-                "tenant_id": tenant_id,
-                "code": data.code,
-                "name": data.name,
-                "action": data.action.value,
-                "action_config": json.dumps(data.action_config, ensure_ascii=False),
-                "priority": data.priority,
-                "description": data.description,
-                "enabled": data.enabled,
-            },
-        )
-        assert row is not None
+        # 显式 code：冲突直接 409；缺省 code：生成并少量重试
+        max_attempts = 1 if explicit_code else 5
+        last_code = explicit_code or ""
+        row: dict[str, Any] | None = None
+        for _ in range(max_attempts):
+            code = explicit_code or _generate_type_code()
+            last_code = code
+            dup = _fetch_one(
+                conn,
+                "SELECT id FROM sensitive_content.sensitive_type "
+                "WHERE tenant_id = :tenant_id AND code = :code AND deleted = FALSE",
+                {"tenant_id": tenant_id, "code": code},
+            )
+            if dup:
+                if explicit_code:
+                    raise StoreError(409, "duplicate_code", f"type code already exists: {code}")
+                continue
+            row = _fetch_one(
+                conn,
+                f"""
+                INSERT INTO sensitive_content.sensitive_type
+                    (tenant_id, code, name, action, action_config, priority, description, enabled)
+                VALUES (:tenant_id, :code, :name, :action, CAST(:action_config AS JSONB),
+                        :priority, :description, :enabled)
+                RETURNING {_TYPE_COLUMNS}
+                """,
+                {
+                    "tenant_id": tenant_id,
+                    "code": code,
+                    "name": data.name,
+                    "action": data.action.value,
+                    "action_config": json.dumps(data.action_config, ensure_ascii=False),
+                    "priority": data.priority,
+                    "description": data.description,
+                    "enabled": data.enabled,
+                },
+            )
+            break
+        if row is None:
+            raise StoreError(
+                409,
+                "duplicate_code",
+                f"failed to allocate unique type code after retries: {last_code}",
+            )
         record_audit(
             conn,
             tenant_id=tenant_id,
@@ -247,7 +269,7 @@ def create_type(tenant_id: str, data: TypeCreate, operator: str) -> dict[str, An
             target_kind="type",
             target_id=int(row["id"]),
             changed_fields={
-                "code": data.code,
+                "code": row["code"],
                 "name": data.name,
                 "action": data.action.value,
                 "action_config": data.action_config,
@@ -305,8 +327,6 @@ def get_type(tenant_id: str, type_id: int) -> dict[str, Any]:
 
 def update_type(tenant_id: str, type_id: int, data: TypeUpdate, operator: str) -> dict[str, Any]:
     fields = data.model_dump(exclude_unset=True, exclude_none=True)
-    if "action_config" in fields:
-        _validate(validate_action_config, fields["action_config"])
     if "action" in fields:
         fields["action"] = data.action.value  # type: ignore[union-attr]
     with db_connection() as conn:
@@ -314,6 +334,14 @@ def update_type(tenant_id: str, type_id: int, data: TypeUpdate, operator: str) -
         _assert_type_mutable(row, tenant_id)
         if not fields:
             return _type_out(row)
+        # 合并当前行与本次补丁后再校验最终 action + action_config
+        final_action = fields.get("action", row["action"])
+        final_config = (
+            fields["action_config"]
+            if "action_config" in fields
+            else _parse_json(row.get("action_config"))
+        )
+        _validate(validate_action_config, final_action, final_config)
         sets = ", ".join(
             f"action_config = CAST(:{k} AS JSONB)" if k == "action_config" else f"{k} = :{k}"
             for k in fields
@@ -918,10 +946,10 @@ def insert_hit_events(events: list[dict[str, Any]]) -> tuple[int, int]:
                     INSERT INTO sensitive_content.hit_event
                         (event_id, rule_id, type_id, rule_action, final_action,
                          selected, final_rule_id, tenant_id, request_fingerprint,
-                         session_fingerprint, policy_version, hit_count, hit_at)
+                         session_fingerprint, session_id, policy_version, hit_count, hit_at)
                     VALUES (:event_id, :rule_id, :type_id, :rule_action, :final_action,
                             :selected, :final_rule_id, :tenant_id, :request_fingerprint,
-                            :session_fingerprint, :policy_version, :hit_count,
+                            :session_fingerprint, :session_id, :policy_version, :hit_count,
                             COALESCE(:hit_at, now()))
                     ON CONFLICT (event_id) DO NOTHING
                     """
@@ -930,6 +958,66 @@ def insert_hit_events(events: list[dict[str, Any]]) -> tuple[int, int]:
             )
             accepted += int(result.rowcount or 0)
     return accepted, len(events) - accepted
+
+
+def list_hit_events(
+    tenant_id: str | None,
+    *,
+    rule_id: int | None = None,
+    type_id: int | None = None,
+    session_id: str | None = None,
+    time_from: datetime | None = None,
+    time_to: datetime | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[dict[str, Any]], int]:
+    """命中事件明细分页查询（tenant_id=None 表示跨租户）。
+
+    响应行携带明文 session_id，供管理端跳转查看对应会话记录。
+    """
+    conds = ["1 = 1"]
+    params: dict[str, Any] = {}
+    if tenant_id is not None:
+        conds.append("tenant_id = :tenant_id")
+        params["tenant_id"] = tenant_id
+    if rule_id is not None:
+        conds.append("rule_id = :rule_id")
+        params["rule_id"] = rule_id
+    if type_id is not None:
+        conds.append("type_id = :type_id")
+        params["type_id"] = type_id
+    if session_id is not None:
+        conds.append("session_id = :session_id")
+        params["session_id"] = session_id
+    if time_from is not None:
+        conds.append("hit_at >= :time_from")
+        params["time_from"] = time_from
+    if time_to is not None:
+        conds.append("hit_at <= :time_to")
+        params["time_to"] = time_to
+    where = " AND ".join(conds)
+    with db_connection() as conn:
+        total_row = _fetch_one(
+            conn,
+            f"SELECT COUNT(*) AS n FROM sensitive_content.hit_event WHERE {where}",
+            params,
+        )
+        rows = _fetch_all(
+            conn,
+            f"""
+            SELECT event_id, rule_id, type_id, rule_action, final_action,
+                   selected, final_rule_id, tenant_id, session_id,
+                   policy_version, hit_count, hit_at
+            FROM sensitive_content.hit_event
+            WHERE {where}
+            ORDER BY hit_at DESC, event_id
+            LIMIT :limit OFFSET :offset
+            """,
+            {**params, "limit": page_size, "offset": (page - 1) * page_size},
+        )
+    for row in rows:
+        row["event_id"] = str(row["event_id"])
+    return rows, int(total_row["n"] if total_row else 0)
 
 
 def purge_expired_hit_events(retention_days: int) -> int:
@@ -1016,7 +1104,10 @@ def metrics_by_rule(
             SELECT rule_id, type_id,
                    COUNT(*) AS events,
                    COALESCE(SUM(hit_count), 0) AS hits,
-                   MAX(hit_at) AS last_hit_at
+                   MAX(hit_at) AS last_hit_at,
+                   -- 最近一次命中的会话标识（示例入口，供跳转会话详情）
+                   (array_agg(session_id ORDER BY hit_at DESC)
+                        FILTER (WHERE session_id <> ''))[1] AS last_session_id
             FROM sensitive_content.hit_event WHERE {where}
             GROUP BY rule_id, type_id
             ORDER BY hits DESC, rule_id

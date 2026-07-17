@@ -5,6 +5,8 @@
   幂等；失败按指数退避重试，超过最大次数丢弃该批并计数。
 - ``request_fingerprint`` / ``session_fingerprint`` 用 HMAC-SHA256（密钥
   ``SENSITIVE_CONTENT_FINGERPRINT_KEY``）生成，事件不含用户原文与规则明文。
+- ``session_id`` 明文随事件上报（产品决策）：后台从命中事件跳转查看完整
+  会话记录，与 ``session_fingerprint`` 并存；用户原文仍不上报。
 """
 from __future__ import annotations
 
@@ -49,6 +51,8 @@ class HitEvent:
     tenant_id: str
     request_fingerprint: str
     session_fingerprint: str
+    # 明文会话标识（供后台跳转查看会话记录，与指纹并存）
+    session_id: str
     policy_version: str
     hit_count: int
     hit_at: str = field(
@@ -67,6 +71,7 @@ class HitEvent:
             "tenant_id": self.tenant_id,
             "request_fingerprint": self.request_fingerprint,
             "session_fingerprint": self.session_fingerprint,
+            "session_id": self.session_id,
             "policy_version": self.policy_version,
             "hit_count": self.hit_count,
             "hit_at": self.hit_at,
@@ -85,6 +90,7 @@ def build_hit_events(
 
     ``request_fingerprint`` 从独立 ``request_id``（uuid4）派生，不得从
     ``session_id`` 派生；``session_fingerprint`` 才由 ``session_id`` 派生。
+    ``session_id`` 明文同时随事件携带（后台会话跳转用）。
     """
     request_fp = hmac_fingerprint(fingerprint_key, request_id)
     session_fp = hmac_fingerprint(fingerprint_key, session_id)
@@ -104,6 +110,7 @@ def build_hit_events(
                 tenant_id=tenant_id,
                 request_fingerprint=request_fp,
                 session_fingerprint=session_fp,
+                session_id=session_id,
                 policy_version=decision.policy_version,
                 hit_count=match.hit_count,
             )

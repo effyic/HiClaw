@@ -101,6 +101,8 @@ class SensitiveContentGuardrail(BaseGuardrail):
 
     def _check_impl(self, run_input: Any) -> None:
         ctx = get_request_context()
+        # 每轮检测开头清空，避免复用上下文时污染上一轮指引
+        ctx.prompt_guidances = []
         text = getattr(run_input, "input_content", None)
         if not isinstance(text, str) or not text:
             # 本期只检测纯文本输入；多模态/结构化输入直接放行
@@ -135,12 +137,14 @@ class SensitiveContentGuardrail(BaseGuardrail):
         if decision.kind == DecisionKind.REDACT:
             # 脱敏后放行：改写 run_input，后续流程与持久化只见脱敏文本
             run_input.input_content = decision.redacted_text
+            ctx.prompt_guidances = list(decision.prompt_guidances)
             return
         if decision.kind in (DecisionKind.CONTINUE, DecisionKind.BUSINESS_ACTION):
-            # LOG_ONLY（或业务动作已执行 / fail-open 降级）：放行
+            # LOG_ONLY / ADJUST_PROMPT（或业务动作已执行 / fail-open 降级）：放行
+            ctx.prompt_guidances = list(decision.prompt_guidances)
             return
 
-        # respond / reject / terminate：中断本次运行。
+        # respond / reject / terminate：中断本次运行（指引保持空列表，不注入）。
         # agno 捕获 InputCheckError 后仍会持久化 run，先清除原文防止落库。
         ctx.pending_decision = decision
         run_input.input_content = BLOCKED_INPUT_PLACEHOLDER

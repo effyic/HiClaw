@@ -29,6 +29,8 @@ class RequestContext:
     pending_decision: Any = None
     # Guardrail 写回：fail-closed 且无有效快照（503 语义）
     policy_unavailable: bool = False
+    # Guardrail 写回：本轮放行时注入的语气指引（阻断路径保持空）
+    prompt_guidances: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

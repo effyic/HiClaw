@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS sensitive_content.schema_migration (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 行为目录表：7 种响应行为的种子数据（只读参考，供管理端展示与校验）
+-- 行为目录表：初始 7 种响应行为种子（0003 追加 ADJUST_PROMPT，合计 8 种）
 CREATE TABLE IF NOT EXISTS sensitive_content.sensitive_action (
     action      TEXT PRIMARY KEY,
     name        TEXT NOT NULL,

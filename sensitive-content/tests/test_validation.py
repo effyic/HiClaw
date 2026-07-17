@@ -9,6 +9,8 @@ import pytest
 from sensitive_content.audit import sanitize_changes
 from sensitive_content.models import (
     MAX_PATTERN_LENGTH,
+    MAX_PROMPT_GUIDANCE_LENGTH,
+    Action,
     ValidationFailure,
     canonical_pattern,
     dedup_key,
@@ -98,15 +100,51 @@ class TestCanonicalPattern:
 
 
 class TestActionConfig:
-    def test_whitelist_keys_accepted(self):
+    def test_whitelist_keys_accepted_for_log_only(self):
         validate_action_config(
-            {"reply_text": "抱歉", "replacement": "*", "business_action": "notify"}
+            Action.LOG_ONLY,
+            {"reply_text": "抱歉", "replacement": "*", "business_action": "notify"},
         )
 
     def test_unknown_key_rejected(self):
         with pytest.raises(ValidationFailure) as exc:
-            validate_action_config({"evil": "x"})
+            validate_action_config(Action.LOG_ONLY, {"evil": "x"})
         assert exc.value.code == "invalid_action_config"
+
+    def test_adjust_prompt_requires_guidance(self):
+        with pytest.raises(ValidationFailure) as exc:
+            validate_action_config(Action.ADJUST_PROMPT, {})
+        assert exc.value.code == "invalid_action_config"
+
+    def test_adjust_prompt_rejects_blank_guidance(self):
+        with pytest.raises(ValidationFailure) as exc:
+            validate_action_config(Action.ADJUST_PROMPT, {"prompt_guidance": "  "})
+        assert exc.value.code == "invalid_action_config"
+
+    def test_adjust_prompt_accepts_guidance(self):
+        validate_action_config(
+            Action.ADJUST_PROMPT, {"prompt_guidance": "以关怀语气回应"}
+        )
+
+    def test_adjust_prompt_guidance_too_long(self):
+        with pytest.raises(ValidationFailure) as exc:
+            validate_action_config(
+                Action.ADJUST_PROMPT,
+                {"prompt_guidance": "x" * (MAX_PROMPT_GUIDANCE_LENGTH + 1)},
+            )
+        assert exc.value.code == "invalid_action_config"
+
+    def test_non_adjust_rejects_prompt_guidance(self):
+        with pytest.raises(ValidationFailure) as exc:
+            validate_action_config(
+                Action.LOG_ONLY, {"prompt_guidance": "不应出现"}
+            )
+        assert exc.value.code == "invalid_action_config"
+
+    def test_string_action_accepted(self):
+        validate_action_config(
+            "ADJUST_PROMPT", {"prompt_guidance": "以关怀语气回应"}
+        )
 
 
 class TestSanitizeChanges:

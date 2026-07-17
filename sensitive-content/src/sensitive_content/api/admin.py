@@ -7,7 +7,12 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, Query
 
 from sensitive_content import store
-from sensitive_content.api import require_admin, resolve_operator, resolve_tenant
+from sensitive_content.api import (
+    GLOBAL_TENANT_PATH,
+    require_admin,
+    resolve_operator,
+    resolve_tenant,
+)
 from sensitive_content.models import RuleCreate, RuleUpdate, TypeCreate, TypeUpdate
 
 router = APIRouter(
@@ -155,6 +160,38 @@ def delete_rule(
     tenant_id: str, rule_id: int, operator: str = Depends(resolve_operator)
 ) -> None:
     store.delete_rule(resolve_tenant(tenant_id), rule_id, operator)
+
+
+# ---------------------------------------------------------------------------
+# 命中事件明细
+# ---------------------------------------------------------------------------
+
+@router.get("/hit-events")
+def list_hit_events(
+    tenant_id: str,
+    rule_id: Optional[int] = Query(None),
+    type_id: Optional[int] = Query(None),
+    session_id: Optional[str] = Query(None),
+    time_from: Optional[datetime] = Query(None, alias="from"),
+    time_to: Optional[datetime] = Query(None, alias="to"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+) -> dict[str, Any]:
+    """命中事件明细分页查询：响应携带明文 session_id，前端可据此
+    调用网关会话接口（/effyic/v1/sessions/{session_id}）查看完整会话。
+    tenant_id=global 表示跨全部租户（命中事件的 tenant_id 均为真实租户）。
+    """
+    items, total = store.list_hit_events(
+        None if tenant_id == GLOBAL_TENANT_PATH else tenant_id,
+        rule_id=rule_id,
+        type_id=type_id,
+        session_id=session_id,
+        time_from=time_from,
+        time_to=time_to,
+        page=page,
+        page_size=page_size,
+    )
+    return {"items": items, **_page_meta(page, page_size, total)}
 
 
 # ---------------------------------------------------------------------------

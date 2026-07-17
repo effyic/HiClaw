@@ -117,4 +117,56 @@ spec:
       port: {{ $port }}
       targetPort: http
       protocol: TCP
+{{- if .Values.gateway.enabled | default true }}
+{{- $publicPath := include "chatai.sensitiveContent.gatewayPath" . }}
+{{- $host := .Values.gateway.host | default "" }}
+---
+# 管理/统计 API 网关路由：{{ $publicPath }}/* → /api/v1/tenants/*。
+# 比 worker 的 {{ include "chatai.gatewayPath" . }} 前缀更长，Higress 按最长匹配优先，
+# 不影响 /effyic/v1/chat 与 /effyic/v1/sessions；/internal/v1/* 不经网关暴露。
+# 鉴权由服务自身完成（Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>）。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ printf "%s-admin" $name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "chatai.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "chatai.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sensitive-content
+    higress.io/resource-definer: higress
+    {{- if $host }}
+    higress.io/domain_{{ $host }}: "true"
+    {{- else }}
+    higress.io/domain_higress-default-domain: "true"
+    {{- end }}
+  annotations:
+    # 前缀重写：{{ $publicPath }}/1/sensitive-rules → /api/v1/tenants/1/sensitive-rules。
+    # 必须用 Prefix + rewrite-path（正则路由优先级低于 Prefix，会被 worker 的
+    # {{ include "chatai.gatewayPath" . }} 前缀路由覆盖而失效）。
+    higress.io/rewrite-path: "/api/v1/tenants"
+    higress.io/ignore-path-case: "true"
+    # X-Operator 仅信任网关注入，剥离客户端伪造值（服务端回退为 admin-token 主体）
+    higress.io/request-header-control-remove: "X-Operator"
+spec:
+  ingressClassName: {{ .Values.gateway.ingressClassName | default "higress" | quote }}
+  rules:
+    - {{- if $host }}
+      host: {{ $host | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: {{ $publicPath | quote }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port:
+                  number: {{ $port }}
+  {{- $tlsSecret := .Values.gateway.tlsSecretName | default "default" }}
+  {{- if and (not $host) $tlsSecret }}
+  tls:
+    - secretName: {{ $tlsSecret | quote }}
+  {{- end }}
+{{- end }}
 {{- end }}

@@ -19,6 +19,7 @@ from agno_worker.hooks.compose import (
 )
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.mcp.loader import build_mcp_tools
+from agno_worker.moderation.context import get_request_context
 from agno_worker.moderation.guardrail import maybe_build_guardrail
 from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill_catalog_summary
 from agno_worker.api.identity import default_debug_request
@@ -28,6 +29,12 @@ from agno_worker.runtime.thinking import attach_thinking_request_params
 from agno_worker.tenant.service import TenantAgentService
 
 logger = logging.getLogger(__name__)
+
+# 敏感内容 ADJUST_PROMPT 注入块标题与冲突说明（与 Guardrail 收集顺序一致）
+_PROMPT_GUIDANCE_HEADER = (
+    "## 本轮对话语气要求（敏感内容策略）\n"
+    "以下要求按顺序排列；如有冲突，以更靠前的要求为准。"
+)
 
 
 def _default_role_name(spec: AgentSpec) -> str:
@@ -130,6 +137,13 @@ class AgentBuilder:
             summary = skill_catalog_summary(catalog)
             if summary:
                 parts.append(summary)
+
+            # Guardrail 放行后写入的语气指引（阻断路径为空，不注入）
+            guidances = list(get_request_context().prompt_guidances or [])
+            if guidances:
+                parts.append(
+                    _PROMPT_GUIDANCE_HEADER + "\n\n" + "\n\n".join(guidances)
+                )
 
             logger.debug("prompt from tenant pipeline (role=%s, tenant=%s)", active_role, user_profile.get("tenant_id"))
             return "\n\n".join(parts)
