@@ -250,8 +250,13 @@ disabled
 {{- end }}
 
 {{- define "chatai.sensitiveContent.image" -}}
-{{- $repo := .Values.sensitiveContent.image.repository | default "hiclaw/sensitive-content" -}}
-{{- $tag := .Values.sensitiveContent.image.tag | default "latest" -}}
+{{- /* --reuse-values 时旧 release 可能没有 sensitiveContent.image，需做空值保护 */ -}}
+{{- $img := dict -}}
+{{- if and .Values.sensitiveContent .Values.sensitiveContent.image -}}
+{{- $img = .Values.sensitiveContent.image -}}
+{{- end -}}
+{{- $repo := index $img "repository" | default "hiclaw/sensitive-content" -}}
+{{- $tag := index $img "tag" | default "latest" -}}
 {{- printf "%s:%s" $repo $tag -}}
 {{- end }}
 
