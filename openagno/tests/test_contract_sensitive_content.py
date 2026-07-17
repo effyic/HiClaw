@@ -34,6 +34,7 @@ from sensitive_content import store as sc_store  # noqa: E402
 from sensitive_content.api import create_app  # noqa: E402
 from sensitive_content.models import HitEventIn  # noqa: E402
 
+from agno_worker.moderation import actions  # noqa: E402
 from agno_worker.moderation.config import ModerationConfig  # noqa: E402
 from agno_worker.moderation.models import (  # noqa: E402
     ActionType,
@@ -266,6 +267,23 @@ class TestSnapshotContract:
         assert types[20].action is ActionType.FIXED_REPLY
         assert types[20].action_config == {"reply_text": "该话题不予讨论"}
         assert types[20].tenant_id == TENANT
+
+        # 管理端 action_config 的正式字段必须能直接驱动 Worker 响应，不能
+        # 因客户端仍读取旧 reply/message 字段而悄悄退回默认文案。
+        decision = actions.decide(
+            [
+                Match(
+                    rule_id=30,
+                    type_id=20,
+                    action=ActionType.FIXED_REPLY,
+                    spans=((0, 5),),
+                )
+            ],
+            "租户敏感词",
+            {20: types[20].action_config},
+            make_client_config(tmp_path),
+        )
+        assert decision.message == "该话题不予讨论"
 
         # 快照可直接编译为可执行策略（detector 消费端）
         assert client.get_policy(TENANT, AGENT_ID) is not None

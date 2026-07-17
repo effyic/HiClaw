@@ -220,6 +220,45 @@ class TestEightActions:
         assert request_ctx.prompt_guidances == ["以关怀语气回应"]
 
 
+class TestInitialPolicyFetch:
+    def test_first_async_request_fetches_policy_before_detection(
+        self, config, tmp_path, request_ctx
+    ):
+        cfg = ModerationConfig(
+            service_url=config.service_url,
+            fingerprint_key=config.fingerprint_key,
+            fail_mode=config.fail_mode,
+            cache_path=str(tmp_path / "policy-snapshot.json"),
+        )
+        client = SnapshotClient(cfg)
+        reporter = CaptureReporter()
+        guardrail = SensitiveContentGuardrail(
+            cfg, snapshot_client=client, reporter=reporter
+        )
+        fetched: list[tuple[str, int]] = []
+
+        async def fetch(tenant_id: str, agent_id: int = 0, **_: object) -> bool:
+            fetched.append((tenant_id, agent_id))
+            client._install_snapshot(
+                make_snapshot(
+                    [make_type(1, ActionType.BLOCK_REQUEST)],
+                    [make_rule(1, 1, "敏感词")],
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                ),
+                persist=False,
+            )
+            return True
+
+        client.fetch = fetch  # type: ignore[method-assign]
+        run_input = RunInput(input_content="第一条请求就包含敏感词")
+        with pytest.raises(SensitiveContentDecisionError):
+            asyncio.run(guardrail.async_check(run_input))
+
+        assert fetched == [(TENANT, 0)]
+        assert reporter.events
+
+
 class TestPromptGuidancesContext:
     """每轮开头清空；放行写入；阻断保持空；复用上下文无污染。"""
 

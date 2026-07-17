@@ -86,7 +86,25 @@ class SensitiveContentGuardrail(BaseGuardrail):
         self._check_impl(run_input)
 
     async def async_check(self, run_input: Union["RunInput", "TeamRunInput"]) -> None:
-        """异步检测入口：顺带启动后台快照刷新与上报任务（需事件循环）。"""
+        """异步检测入口：首次请求先拉取策略，再启动常驻刷新与上报。"""
+        # 不能把首次策略加载完全交给后台任务：后台 task 要到本协程下一次
+        # yield 才会执行，而 _check_impl 会立刻把“尚未加载”按 fail-open 放行，
+        # 造成配置规则后的第一条敏感请求不触发、也不上报事件。仅在当前没有
+        # 有效快照（包括过期）时同步拉取一次；已有快照仍由后台 ETag 刷新，
+        # 不给每条对话增加网络开销。
+        ctx = get_request_context()
+        if self.snapshot_client.get_policy(ctx.tenant_id, ctx.agent_id) is None:
+            try:
+                await self.snapshot_client.fetch(ctx.tenant_id, ctx.agent_id)
+            except Exception as exc:
+                # 保持既有 fail-open / fail-closed 语义，由 _check_impl 统一处理。
+                logger.warning(
+                    "首次拉取租户 %s Agent %s 敏感内容策略失败：%s",
+                    ctx.tenant_id,
+                    ctx.agent_id,
+                    exc,
+                )
+
         try:
             self.snapshot_client.ensure_background_refresh()
             self.reporter.ensure_started()

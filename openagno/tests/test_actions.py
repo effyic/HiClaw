@@ -43,24 +43,30 @@ class TestActionMapping:
 
     def test_fixed_reply_uses_config_text(self, config):
         decision = decide_one(
-            ActionType.FIXED_REPLY, config, {"reply": "请换个话题"}
+            ActionType.FIXED_REPLY, config, {"reply_text": "请换个话题"}
         )
         assert decision.kind == DecisionKind.RESPOND
         assert decision.message == "请换个话题"
 
     def test_custom_response(self, config):
         decision = decide_one(
-            ActionType.CUSTOM_RESPONSE, config, {"message": "自定义回复"}
+            ActionType.CUSTOM_RESPONSE, config, {"reply_text": "自定义回复"}
         )
         assert decision.kind == DecisionKind.RESPOND
         assert decision.message == "自定义回复"
 
     def test_end_conversation(self, config):
         decision = decide_one(
-            ActionType.END_CONVERSATION, config, {"reply": "会话结束"}
+            ActionType.END_CONVERSATION, config, {"reply_text": "会话结束"}
         )
         assert decision.kind == DecisionKind.TERMINATE
         assert decision.message == "会话结束"
+
+    def test_legacy_reply_key_remains_compatible(self, config):
+        decision = decide_one(
+            ActionType.FIXED_REPLY, config, {"reply": "旧配置回复"}
+        )
+        assert decision.message == "旧配置回复"
 
     def test_redact_and_continue_merges_spans(self, config):
         m1 = Match(rule_id=1, type_id=1, action=ActionType.REDACT_AND_CONTINUE, spans=((0, 3),))
@@ -75,6 +81,20 @@ class TestActionMapping:
             ActionType.REDACT_AND_CONTINUE, config, {"replacement": "#"}
         )
         assert decision.redacted_text.startswith("###")
+
+    def test_business_action_uses_management_api_field(self, config):
+        called = []
+        actions.register_business_action("audit", lambda *args: called.append(args))
+        try:
+            decision = decide_one(
+                ActionType.BUSINESS_ACTION,
+                config,
+                {"business_action": "audit"},
+            )
+        finally:
+            actions.unregister_business_action("audit")
+        assert decision.kind == DecisionKind.BUSINESS_ACTION
+        assert called
 
     def test_adjust_prompt_continues(self, config):
         decision = decide_one(

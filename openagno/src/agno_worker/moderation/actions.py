@@ -93,7 +93,11 @@ def _handle_block_request(
     decision = _base_decision(
         DecisionKind.REJECT, ActionType.BLOCK_REQUEST, match, matches, action_config
     )
-    decision.message = _config_text(action_config, ("message", "reply"), DEFAULT_BLOCK_MESSAGE)
+    decision.message = _config_text(
+        action_config,
+        ("reply_text", "message", "reply"),
+        DEFAULT_BLOCK_MESSAGE,
+    )
     return decision
 
 
@@ -107,7 +111,11 @@ def _handle_fixed_reply(
     decision = _base_decision(
         DecisionKind.RESPOND, ActionType.FIXED_REPLY, match, matches, action_config
     )
-    decision.message = _config_text(action_config, ("reply", "message"), DEFAULT_FIXED_REPLY)
+    decision.message = _config_text(
+        action_config,
+        ("reply_text", "reply", "message"),
+        DEFAULT_FIXED_REPLY,
+    )
     return decision
 
 
@@ -121,7 +129,11 @@ def _handle_custom_response(
     decision = _base_decision(
         DecisionKind.RESPOND, ActionType.CUSTOM_RESPONSE, match, matches, action_config
     )
-    decision.message = _config_text(action_config, ("reply", "message"), DEFAULT_FIXED_REPLY)
+    decision.message = _config_text(
+        action_config,
+        ("reply_text", "reply", "message"),
+        DEFAULT_FIXED_REPLY,
+    )
     return decision
 
 
@@ -136,7 +148,9 @@ def _handle_end_conversation(
         DecisionKind.TERMINATE, ActionType.END_CONVERSATION, match, matches, action_config
     )
     decision.message = _config_text(
-        action_config, ("reply", "message"), DEFAULT_TERMINATE_MESSAGE
+        action_config,
+        ("reply_text", "reply", "message"),
+        DEFAULT_TERMINATE_MESSAGE,
     )
     return decision
 
@@ -169,7 +183,11 @@ def _handle_business_action(
     action_config: dict[str, Any],
     config: ModerationConfig,
 ) -> GuardrailDecision:
-    name = _config_text(action_config, ("handler", "action_name", "name"), "")
+    name = _config_text(
+        action_config,
+        ("business_action", "handler", "action_name", "name"),
+        "",
+    )
     handler = _business_handlers.get(name) if name else None
     if handler is None:
         # 白名单处理器缺失：不静默继续，按 fail 模式处理

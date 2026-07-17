@@ -143,7 +143,7 @@ class TestArunMapping:
 
     def test_fixed_reply_returns_message_without_llm(self, tmp_path):
         runtime, agent, _ = build_runtime(
-            tmp_path, ActionType.FIXED_REPLY, {"reply": "请换个话题"}
+            tmp_path, ActionType.FIXED_REPLY, {"reply_text": "请换个话题"}
         )
         reply, _ = arun(runtime, "有敏感词")
         assert reply == "请换个话题"
@@ -151,7 +151,7 @@ class TestArunMapping:
 
     def test_end_conversation_returns_message_without_llm(self, tmp_path):
         runtime, agent, _ = build_runtime(
-            tmp_path, ActionType.END_CONVERSATION, {"reply": "会话已结束"}
+            tmp_path, ActionType.END_CONVERSATION, {"reply_text": "会话已结束"}
         )
         reply, _ = arun(runtime, "有敏感词")
         assert reply == "会话已结束"
@@ -198,7 +198,7 @@ class TestArunMapping:
 class TestAstreamMapping:
     def test_fixed_reply_stream_single_content_then_completed(self, tmp_path):
         runtime, agent, _ = build_runtime(
-            tmp_path, ActionType.FIXED_REPLY, {"reply": "请换个话题"}
+            tmp_path, ActionType.FIXED_REPLY, {"reply_text": "请换个话题"}
         )
         events = astream(runtime, "有敏感词")
         assert [e["event"] for e in events] == ["RunContent", "RunCompleted"]
@@ -207,7 +207,7 @@ class TestAstreamMapping:
 
     def test_end_conversation_stream(self, tmp_path):
         runtime, _, _ = build_runtime(
-            tmp_path, ActionType.END_CONVERSATION, {"reply": "会话已结束"}
+            tmp_path, ActionType.END_CONVERSATION, {"reply_text": "会话已结束"}
         )
         events = astream(runtime, "有敏感词")
         assert [e["event"] for e in events] == ["RunContent", "RunCompleted"]
