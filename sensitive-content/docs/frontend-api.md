@@ -22,7 +22,8 @@
 
 - **敏感内容类型（sensitive-type）**：一类敏感内容（如"政治敏感"、"隐私信息"），决定命中后的**响应行为**（`action`）。规则必须挂在某个类型下。
 - **敏感内容规则（sensitive-rule）**：具体的词条或正则模式（即"敏感词"本体），命中即触发所属类型的行为。
-- **全局 vs 租户**：`tenant_id` 路径参数取 `global` 时表示全局（平台级）资源；取具体租户 ID 时表示该租户的资源。全局类型/规则对所有租户生效，租户可通过"覆盖规则"（`overrides_global_rule_id`）替换或禁用某条全局规则。
+- **Agent 规则绑定**：规则启用后不会自动对租户内所有 Agent 生效；只有被 `agno_agent.id` 显式绑定的规则才会进入该 Agent 的策略快照。
+- **全局 vs 租户**：`tenant_id` 路径参数取 `global` 时表示全局（平台级）资源；取具体租户 ID 时表示该租户的资源。全局类型/规则对所有租户可见，但仍需逐 Agent 绑定；租户可通过"覆盖规则"（`overrides_global_rule_id`）替换或禁用已绑定的全局规则。
 - **命中事件（hit-event）**：检测端上报的命中记录，**不含用户消息原文**，含明文 `session_id` 供跳转会话详情。
 - **审计日志（audit-log）**：所有写操作的操作记录；`changes` 字段只存字段名 + 值哈希/长度，不含明文。
 
@@ -113,8 +114,10 @@ Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
 | 403 | `forbidden_global_rule` | 租户上下文修改全局规则 | 同上，引导创建覆盖规则 |
 | 404 | `type_not_found` | 类型不存在 / 不属于当前租户可见范围 | 提示"不存在或无权访问" |
 | 404 | `rule_not_found` | 规则不存在 / 属于其他租户 | 同上 |
+| 404 | `agent_not_found` | Agent 不存在或不属于路径租户 | 刷新 Agent 数据后重试 |
 | 409 | `duplicate_code` | 同租户下类型 `code` 重复（显式传入时），或自动分配失败 | 提示冲突并重试 |
 | 409 | `duplicate_rule` | 同租户下存在规范化后等价的规则（message 含已存在规则 id） | 提示已存在等价规则 |
+| 409 | `rule_not_assignable` | 尝试给 Agent 新增停用、类型停用或 orphaned 的规则 | 禁止新选该项；已绑定项仍可保留或解除 |
 | 409 | `type_in_use` | 删除类型时仍被规则引用；扩展字段 `references` 为引用数 | 提示"仍有 N 条规则引用该类型" |
 | 503 | `token_not_configured` | 服务端未配置 Token | 提示联系运维 |
 
@@ -262,8 +265,9 @@ Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
   "selected": true,
   "final_rule_id": 101,
   "tenant_id": "tenant-a",
+  "agent_id": 42,
   "session_id": "sess-20260701-0001",
-  "policy_version": "global-5:tenant-3",
+  "policy_version": "global-5:tenant-3:agent-2",
   "hit_count": 2,
   "hit_at": "2026-07-01T03:12:45+00:00"
 }
@@ -278,8 +282,9 @@ Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
 | `selected` | bool | 本条命中是否为最终裁决所选（一次请求只有一条 `selected=true`） |
 | `final_rule_id` | int | 最终裁决所选的规则 ID |
 | `tenant_id` | string | 真实租户 ID（恒非 global） |
+| `agent_id` | int \| null | 命中所属 `agno_agent.id`；升级前历史数据可能为 null |
 | `session_id` | string | 明文会话 ID；可跳转网关会话接口 `/effyic/v1/sessions/{session_id}` 查看完整会话。**旧数据可能为空串** |
-| `policy_version` | string | 命中时的策略版本（`global-{N}:tenant-{M}`） |
+| `policy_version` | string | 命中时的策略版本（`global-{N}:tenant-{M}:agent-{A}`） |
 | `hit_count` | int | 该规则在该请求中的命中次数 |
 | `hit_at` | string | 命中时间 |
 
@@ -307,7 +312,7 @@ Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `action` | string | `create` / `update` / `delete` / `enable` / `disable` |
-| `target_kind` | string | `rule` / `type` |
+| `target_kind` | string | `rule` / `type` / `agent_binding` |
 | `target_id` | int | 目标对象 ID |
 | `changes` | object | 变更字段元数据：每个字段为 `{"sha256": "...", "length": N}` 或 `{"null": true}`，**不含明文**。前端只展示"哪些字段被改过"即可 |
 | `operator` | string | 操作人（网关注入的 `X-Operator`） |
@@ -467,7 +472,7 @@ GET /api/v1/tenants/{tenant_id}/sensitive-rules
 
 响应：`200`，`{"items": [规则对象...], ...分页}`。排序：`priority` 降序 → `id` 升序。
 
-> 注意：规则列表**只返回路径租户自己的规则**（与类型列表不同，不含全局规则）。展示"对本租户生效的全部词条"时，需要另外用 `tenant_id=global` 请求全局规则列表并在前端合并展示。
+> 注意：规则列表**只返回路径租户自己的规则**（与类型列表不同，不含全局规则）。展示"本租户可绑定的全部词条"时，需要另外用 `tenant_id=global` 请求全局规则列表并在前端合并展示。
 
 #### 4.2.3 规则详情
 
@@ -510,6 +515,57 @@ DELETE /api/v1/tenants/{tenant_id}/sensitive-rules/{rule_id}
 
 > 删除全局规则后，指向它的租户覆盖规则会变为 `orphaned`。
 
+#### 4.2.7 Agent 规则绑定
+
+创建 Agent 的表单可继续使用现有规则列表接口加载选项：并行请求
+`GET /api/v1/tenants/global/sensitive-rules` 与
+`GET /api/v1/tenants/{tenant_id}/sensitive-rules` 后合并。Agent 创建成功并获得
+`agno_agent.id` 后，由 Agent 管理后端调用以下绑定接口。
+
+```
+GET    /api/v1/tenants/{tenant_id}/agents/{agent_id}/sensitive-rules
+PUT    /api/v1/tenants/{tenant_id}/agents/{agent_id}/sensitive-rules
+DELETE /api/v1/tenants/{tenant_id}/agents/{agent_id}/sensitive-rules
+```
+
+`GET` 支持 `keyword`、`type_id`、`page`、`page_size`，一次返回全局与本租户的规则选项：
+
+```json
+{
+  "agent_id": 42,
+  "selected_rule_ids": [101, 205],
+  "items": [
+    {
+      "id": 101,
+      "tenant_id": "",
+      "pattern": "示例规则",
+      "selected": true,
+      "assignable": true,
+      "inactive_reason": null
+    }
+  ],
+  "page": 1,
+  "page_size": 50,
+  "total": 12
+}
+```
+
+`inactive_reason` 可能为 `rule_disabled`、`type_disabled`、
+`tenant_override_disabled` 或 `orphaned`。`assignable=false` 的规则不能新增选择；
+若它已绑定，则仍会出现在 `selected_rule_ids` 中并可在编辑 Agent 时解除。
+
+`PUT` 以完整集合整体替换，重复提交幂等，空数组表示清空：
+
+```json
+{"rule_ids": [101, 205]}
+```
+
+Agent 管理后端应在 Agent 创建/编辑保存后调用 `PUT`，仅在两侧都成功后向页面报告成功；
+删除 Agent 时调用幂等 `DELETE`。绑定失败时 Agent 创建记录保持零绑定，编辑记录保持旧绑定，可安全重试。
+
+绑定全局规则后，租户启用覆盖会自动替换它，禁用覆盖会使该 Agent 不执行它；
+禁用规则不会删除绑定，重新启用后自动恢复。删除规则会自动移除相关 Agent 绑定。
+
 ### 4.3 命中事件明细
 
 ```
@@ -522,6 +578,7 @@ GET /api/v1/tenants/{tenant_id}/hit-events
 |-------|------|------|
 | `rule_id` | int | 按规则筛选 |
 | `type_id` | int | 按类型筛选 |
+| `agent_id` | int | 按 `agno_agent.id` 精确筛选 |
 | `session_id` | string | 按会话精确筛选 |
 | `from` / `to` | datetime | 命中时间范围 |
 | `page` / `page_size` | int | 分页 |
@@ -540,7 +597,7 @@ GET /api/v1/tenants/{tenant_id}/audit-logs
 
 | Query | 类型 | 说明 |
 |-------|------|------|
-| `target_kind` | string | `rule` / `type` |
+| `target_kind` | string | `rule` / `type` / `agent_binding` |
 | `target_id` | int | 目标对象 ID |
 | `action` | string | `create` / `update` / `delete` / `enable` / `disable` |
 | `from` / `to` | datetime | 操作时间范围 |
@@ -689,9 +746,10 @@ GET /healthz
 
 1. **租户切换**：所有接口的租户上下文都在 URL 路径里（`{tenant_id}`），`global` 是特殊值；建议在 API client 层统一注入。
 2. **全局资源只读**：租户视图下，`tenant_id=""` 的类型/规则行禁用编辑、启停、删除操作，规则提供"覆盖"入口。
-3. **写操作即时生效**：每次写操作都会递增策略版本，检测端会在下次拉取快照时生效，前端无需"发布"步骤。
+3. **绑定后才生效**：规则启用只是必要条件；Agent 必须显式绑定。绑定更新会递增 Agent 策略版本，检测端在下次拉取快照时生效，无需"发布"步骤。
 4. **表单预校验**：pattern 非空、≤512 字符可前端预校验；正则合法性与复杂度以服务端校验结果为准（`invalid_regex` / `regex_too_complex` 的 message 可直接展示）。
 5. **三种错误体**：业务错误在 `error.code`，鉴权错误在 `detail.code`，参数校验错误 `detail` 是数组，需分别解析。
 6. **统计与明细联动**：`by-rule` / `by-type` 只返回 ID，需要用规则/类型接口补充名称；`orphaned` 或已删除的规则 ID 可能查不到详情，需容错展示（如"规则 #101（已删除）"）。
 7. **会话跳转**：命中事件与 `by-rule` 的 `last_session_id` 可跳转 `/effyic/v1/sessions/{session_id}`；空值（旧数据）不渲染链接。
 8. **命中事件有保留期**：默认 90 天，超期数据被自动清理，时间筛选器不必提供过久的范围。
+9. **Agent 表单**：创建时先用全局与租户规则列表加载选项，拿到 Agent ID 后由 Agent 后端整体保存绑定；编辑时用 Agent 绑定 GET 回显选中项和停用原因。

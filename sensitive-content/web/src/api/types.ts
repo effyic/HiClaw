@@ -110,6 +110,33 @@ export interface SensitiveRule {
   effective_status: EffectiveStatus
 }
 
+export type RuleInactiveReason =
+  | 'orphaned'
+  | 'tenant_override_disabled'
+  | 'rule_disabled'
+  | 'type_disabled'
+
+export interface AgentRuleOption extends SensitiveRule {
+  selected: boolean
+  assignable: boolean
+  inactive_reason: RuleInactiveReason | null
+}
+
+export interface AgentRuleBindings {
+  agent_id: number
+  selected_rule_ids: number[]
+  items: AgentRuleOption[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface AgentRuleBindingResult {
+  agent_id: number
+  selected_rule_ids: number[]
+  version: number
+}
+
 /** 命中事件对象（文档 3.3） */
 export interface HitEvent {
   event_id: string
@@ -120,6 +147,7 @@ export interface HitEvent {
   selected: boolean
   final_rule_id: number
   tenant_id: string
+  agent_id: number | null
   session_id: string
   policy_version: string
   hit_count: number
@@ -131,7 +159,7 @@ export interface AuditLog {
   id: number
   tenant_id: string
   action: AuditAction
-  target_kind: 'rule' | 'type'
+  target_kind: 'rule' | 'type' | 'agent_binding'
   target_id: number
   changes: Record<string, unknown>
   operator: string

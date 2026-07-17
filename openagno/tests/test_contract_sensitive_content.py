@@ -50,6 +50,7 @@ from agno_worker.moderation.snapshot import SnapshotClient  # noqa: E402
 RUNTIME_TOKEN = "contract-runtime-token"
 SERVICE_URL = "http://sensitive-content.test"
 TENANT = "tenant-a"
+AGENT_ID = 77
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +108,8 @@ def _type_row(
 def build_server_snapshot(
     tenant_id: str,
     *,
+    agent_id: int,
+    binding_rule_ids: list[int],
     global_rules: list[dict[str, Any]],
     tenant_rules: list[dict[str, Any]],
     types: list[dict[str, Any]],
@@ -117,11 +120,13 @@ def build_server_snapshot(
     merged = sc_store.merge_rules(global_rules, tenant_rules, set())
     content = {
         "tenant_id": tenant_id,
+        "agent_id": agent_id,
+        "binding_rule_ids": binding_rule_ids,
         "types": types,
         "rules": [sc_store._snapshot_rule(r) for r in merged],
     }
     return {
-        "version": sc_store.combined_version(global_version, tenant_version),
+        "version": sc_store.combined_version(global_version, tenant_version, 4),
         "etag": sc_store.compute_etag(content),
         **content,
     }
@@ -129,6 +134,8 @@ def build_server_snapshot(
 
 SAMPLE_SNAPSHOT = build_server_snapshot(
     TENANT,
+    agent_id=AGENT_ID,
+    binding_rule_ids=[1, 2, 30],
     global_rules=[
         _rule_row(1, "", 10, "全局敏感词", priority=5),
         _rule_row(
@@ -167,11 +174,15 @@ def server_app(monkeypatch):
 @pytest.fixture()
 def snapshot_calls(monkeypatch):
     """monkeypatch 快照装载：记录 tenant 入参并返回真实序列化的快照。"""
-    calls: list[str] = []
+    calls: list[tuple[str, int]] = []
 
-    def fake_load(tenant_id: str) -> dict[str, Any]:
-        calls.append(tenant_id)
-        return SAMPLE_SNAPSHOT
+    def fake_load(tenant_id: str, agent_id: int) -> dict[str, Any]:
+        calls.append((tenant_id, agent_id))
+        return {
+            **SAMPLE_SNAPSHOT,
+            "agent_id": agent_id,
+            "binding_rule_ids": [1, 2, 30],
+        }
 
     monkeypatch.setattr(sc_store, "load_policy_snapshot", fake_load)
     return calls
@@ -222,13 +233,13 @@ class TestSnapshotContract:
         """真实客户端 → 真实服务端：URL / 鉴权 / 字段逐一解析。"""
         client = SnapshotClient(make_client_config(tmp_path))
         http = make_asgi_client(server_app)
-        ok = asyncio.run(client.fetch(TENANT, client=http))
+        ok = asyncio.run(client.fetch(TENANT, AGENT_ID, client=http))
         assert ok is True
-        assert snapshot_calls == [TENANT]
+        assert snapshot_calls == [(TENANT, AGENT_ID)]
 
-        snapshot = client._snapshots[TENANT]
+        snapshot = client._snapshots[(TENANT, AGENT_ID)]
         # 组合版本字符串格式与 ETag 均来自服务端
-        assert snapshot.version == "global-12:tenant-37"
+        assert snapshot.version == "global-12:tenant-37:agent-4"
         assert snapshot.etag == SAMPLE_SNAPSHOT["etag"]
 
         # 规则字段逐一对齐（含合并语义：租户规则 + 全局规则）
@@ -257,34 +268,34 @@ class TestSnapshotContract:
         assert types[20].tenant_id == TENANT
 
         # 快照可直接编译为可执行策略（detector 消费端）
-        assert client.get_policy(TENANT) is not None
+        assert client.get_policy(TENANT, AGENT_ID) is not None
 
     def test_if_none_match_returns_304_and_renews(self, server_app, snapshot_calls, tmp_path):
         """第二次拉取带 If-None-Match，服务端内容未变返回 304，客户端续期。"""
         statuses: list[int] = []
         client = SnapshotClient(make_client_config(tmp_path))
         http = make_asgi_client(server_app, statuses)
-        asyncio.run(client.fetch(TENANT, client=http))
-        first_version = client._snapshots[TENANT].version
-        asyncio.run(client.fetch(TENANT, client=http))
+        asyncio.run(client.fetch(TENANT, AGENT_ID, client=http))
+        first_version = client._snapshots[(TENANT, AGENT_ID)].version
+        asyncio.run(client.fetch(TENANT, AGENT_ID, client=http))
         assert statuses == [200, 304]
-        assert client._snapshots[TENANT].version == first_version
-        assert client.get_policy(TENANT) is not None
+        assert client._snapshots[(TENANT, AGENT_ID)].version == first_version
+        assert client.get_policy(TENANT, AGENT_ID) is not None
 
     def test_invalid_runtime_token_rejected(self, server_app, snapshot_calls, tmp_path):
         """Bearer Runtime Token 不匹配时服务端返回 401。"""
         client = SnapshotClient(make_client_config(tmp_path, runtime_token="wrong-token"))
         http = make_asgi_client(server_app)
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            asyncio.run(client.fetch(TENANT, client=http))
+            asyncio.run(client.fetch(TENANT, AGENT_ID, client=http))
         assert exc_info.value.response.status_code == 401
 
     def test_empty_tenant_maps_to_global_path(self, server_app, snapshot_calls, tmp_path):
         """客户端空租户请求 /tenants/global/…，服务端映射回库内 ''。"""
         client = SnapshotClient(make_client_config(tmp_path))
         http = make_asgi_client(server_app)
-        asyncio.run(client.fetch("", client=http))
-        assert snapshot_calls == [""]
+        asyncio.run(client.fetch("", AGENT_ID, client=http))
+        assert snapshot_calls == [("", AGENT_ID)]
 
     def test_snapshot_rule_fields_subset_of_client_model(self):
         """防漂移：服务端快照规则字段集必须被客户端模型完整覆盖。"""
@@ -316,7 +327,7 @@ def make_decision() -> GuardrailDecision:
         rule_id=1,
         type_id=10,
         matches=matches,
-        policy_version="global-12:tenant-37",
+        policy_version="global-12:tenant-37:agent-4",
     )
 
 
@@ -325,6 +336,7 @@ class TestHitEventContract:
         return build_hit_events(
             make_decision(),
             tenant_id=TENANT,
+            agent_id=AGENT_ID,
             request_id=uuid.uuid4().hex,
             session_id="session-1",
             fingerprint_key="contract-fingerprint-key",
@@ -349,7 +361,8 @@ class TestHitEventContract:
             assert row["final_action"] == "BLOCK_REQUEST"
             assert row["final_rule_id"] == 1
             assert row["tenant_id"] == TENANT
-            assert row["policy_version"] == "global-12:tenant-37"
+            assert row["agent_id"] == AGENT_ID
+            assert row["policy_version"] == "global-12:tenant-37:agent-4"
             # 明文 session_id 通过服务端校验并原样落到写入入参
             assert row["session_id"] == "session-1"
             # event_id 为合法 UUID（服务端已完成 UUID 解析）

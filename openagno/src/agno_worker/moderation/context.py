@@ -22,6 +22,7 @@ class RequestContext:
     """一次对话请求的身份信息与 Guardrail 决策回传通道。"""
 
     tenant_id: str = ""
+    agent_id: int = 0
     user_id: str = ""
     session_id: str = ""
     request_id: str = ""
@@ -47,6 +48,7 @@ def new_request_id() -> str:
 def set_request_context(
     *,
     tenant_id: str = "",
+    agent_id: int = 0,
     user_id: str = "",
     session_id: str = "",
     request_id: str = "",
@@ -54,6 +56,7 @@ def set_request_context(
     """写入当前请求上下文，返回 (上下文对象, token)；token 供 finally 复位。"""
     ctx = RequestContext(
         tenant_id=tenant_id,
+        agent_id=agent_id,
         user_id=user_id,
         session_id=session_id,
         request_id=request_id or new_request_id(),

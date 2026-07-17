@@ -13,7 +13,13 @@ from sensitive_content.api import (
     resolve_operator,
     resolve_tenant,
 )
-from sensitive_content.models import RuleCreate, RuleUpdate, TypeCreate, TypeUpdate
+from sensitive_content.models import (
+    AgentRuleBindingUpdate,
+    RuleCreate,
+    RuleUpdate,
+    TypeCreate,
+    TypeUpdate,
+)
 
 router = APIRouter(
     prefix="/api/v1/tenants/{tenant_id}",
@@ -163,6 +169,56 @@ def delete_rule(
 
 
 # ---------------------------------------------------------------------------
+# Agent 规则绑定
+# ---------------------------------------------------------------------------
+
+@router.get("/agents/{agent_id}/sensitive-rules")
+def get_agent_rule_bindings(
+    tenant_id: str,
+    agent_id: int,
+    keyword: Optional[str] = Query(None),
+    type_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+) -> dict[str, Any]:
+    items, selected_rule_ids, total = store.get_agent_rule_bindings(
+        resolve_tenant(tenant_id),
+        agent_id,
+        keyword=keyword,
+        type_id=type_id,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "agent_id": agent_id,
+        "selected_rule_ids": selected_rule_ids,
+        "items": items,
+        **_page_meta(page, page_size, total),
+    }
+
+
+@router.put("/agents/{agent_id}/sensitive-rules")
+def replace_agent_rule_bindings(
+    tenant_id: str,
+    agent_id: int,
+    body: AgentRuleBindingUpdate,
+    operator: str = Depends(resolve_operator),
+) -> dict[str, Any]:
+    return store.replace_agent_rule_bindings(
+        resolve_tenant(tenant_id), agent_id, body.rule_ids, operator
+    )
+
+
+@router.delete("/agents/{agent_id}/sensitive-rules", status_code=204)
+def clear_agent_rule_bindings(
+    tenant_id: str,
+    agent_id: int,
+    operator: str = Depends(resolve_operator),
+) -> None:
+    store.clear_agent_rule_bindings(resolve_tenant(tenant_id), agent_id, operator)
+
+
+# ---------------------------------------------------------------------------
 # 命中事件明细
 # ---------------------------------------------------------------------------
 
@@ -171,6 +227,7 @@ def list_hit_events(
     tenant_id: str,
     rule_id: Optional[int] = Query(None),
     type_id: Optional[int] = Query(None),
+    agent_id: Optional[int] = Query(None),
     session_id: Optional[str] = Query(None),
     time_from: Optional[datetime] = Query(None, alias="from"),
     time_to: Optional[datetime] = Query(None, alias="to"),
@@ -185,6 +242,7 @@ def list_hit_events(
         None if tenant_id == GLOBAL_TENANT_PATH else tenant_id,
         rule_id=rule_id,
         type_id=type_id,
+        agent_id=agent_id,
         session_id=session_id,
         time_from=time_from,
         time_to=time_to,

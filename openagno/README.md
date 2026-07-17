@@ -44,7 +44,7 @@ spec:
 
 ## 敏感内容检测（moderation 模块）
 
-`src/agno_worker/moderation/` 是顶层 `sensitive-content/` 管理服务的检测端：配置 `SENSITIVE_CONTENT_SERVICE_URL` 后，`SensitiveContentGuardrail` 自动挂载到 Agent `pre_hooks` **首位**，对用户输入执行敏感内容规则匹配（文本 + 正则，NFKC/零宽字符/大小写归一化），按命中类型配置执行八种响应行为（结束对话 / 固定回复 / 阻断 / 脱敏放行 / 仅记录 / 业务动作 / 自定义回复 / 语气调整），并把匿名命中事件（HMAC 指纹，不含用户原文与规则明文）批量上报管理服务。策略快照本地缓存（内存 + JSON 落盘），管理服务故障不影响 Agent 可用性；**未配置 `SENSITIVE_CONTENT_SERVICE_URL` 时行为与原来完全一致**。
+`src/agno_worker/moderation/` 是顶层 `sensitive-content/` 管理服务的检测端：配置 `SENSITIVE_CONTENT_SERVICE_URL` 后，`SensitiveContentGuardrail` 自动挂载到 Agent `pre_hooks` **首位**。运行时从实际解析到的 `agno_agent.id` 拉取 Agent 专属策略，只有启用且已绑定的规则才参与匹配；未绑定规则的 Agent 获得合法空策略。检测支持文本/正则与归一化，按命中类型执行八种响应行为，并把带 `agent_id` 的匿名命中事件（HMAC 指纹，不含用户原文与规则明文）批量上报。快照按 `(tenant_id, agent_id)` 在内存与 JSON 中隔离缓存；旧租户级缓存会在升级后自动丢弃。管理服务故障不影响 Agent 可用性；**未配置 `SENSITIVE_CONTENT_SERVICE_URL` 时行为与原来完全一致**。
 
 | 变量 | 默认 | 说明 |
 |------|------|------|

@@ -108,7 +108,7 @@ class SensitiveContentGuardrail(BaseGuardrail):
             # 本期只检测纯文本输入；多模态/结构化输入直接放行
             return
 
-        policy = self.snapshot_client.get_policy(ctx.tenant_id)
+        policy = self.snapshot_client.get_policy(ctx.tenant_id, ctx.agent_id)
         if policy is None:
             self._handle_no_policy(ctx, run_input)
             return
@@ -154,13 +154,15 @@ class SensitiveContentGuardrail(BaseGuardrail):
         """无有效快照（或快照超过过期上限）：按 fail 模式处理。"""
         if self.config.fail_open:
             logger.warning(
-                "租户 %s 无有效敏感内容策略快照，fail-open 跳过检测",
+                "租户 %s Agent %s 无有效敏感内容策略快照，fail-open 跳过检测",
                 ctx.tenant_id,
+                ctx.agent_id,
             )
             return
         logger.error(
-            "租户 %s 无有效敏感内容策略快照，fail-closed 拒绝请求",
+            "租户 %s Agent %s 无有效敏感内容策略快照，fail-closed 拒绝请求",
             ctx.tenant_id,
+            ctx.agent_id,
         )
         ctx.policy_unavailable = True
         # 输入未经过检测，清除原文防止落库
@@ -174,6 +176,7 @@ class SensitiveContentGuardrail(BaseGuardrail):
         events = build_hit_events(
             decision,
             tenant_id=ctx.tenant_id,
+            agent_id=ctx.agent_id,
             request_id=ctx.request_id,
             session_id=ctx.session_id,
             fingerprint_key=self.config.fingerprint_key,

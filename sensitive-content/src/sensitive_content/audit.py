@@ -76,3 +76,22 @@ def bump_policy_version(conn: Any, tenant_id: str) -> int:
         {"tenant_id": tenant_id},
     ).first()
     return int(row[0])
+
+
+def bump_agent_policy_version(conn: Any, tenant_id: str, agent_id: int) -> int:
+    """递增单个 Agent 的绑定版本，返回新版本号。"""
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO sensitive_content.agent_policy_version
+                (tenant_id, agent_id, version, updated_at)
+            VALUES (:tenant_id, :agent_id, 1, now())
+            ON CONFLICT (tenant_id, agent_id) DO UPDATE
+                SET version = sensitive_content.agent_policy_version.version + 1,
+                    updated_at = now()
+            RETURNING version
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id},
+    ).first()
+    return int(row[0])

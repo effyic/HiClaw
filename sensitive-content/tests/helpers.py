@@ -34,11 +34,53 @@ def create_rule(client, tenant: str, type_id: int, **overrides: Any) -> dict[str
     return resp.json()
 
 
+def create_agent(tenant: str, role_code: str | None = None) -> int:
+    from sqlalchemy import text
+
+    from sensitive_content.db import db_connection
+
+    role = role_code or "snapshot-default"
+    with db_connection() as conn:
+        row = conn.execute(
+            text(
+                "INSERT INTO agno_agent (tenant_id, role_code, enabled) "
+                "VALUES (:tenant_id, :role_code, TRUE) "
+                "ON CONFLICT (tenant_id, role_code) DO UPDATE SET enabled = TRUE "
+                "RETURNING id"
+            ),
+            {"tenant_id": tenant, "role_code": role},
+        ).first()
+    assert row is not None
+    return int(row[0])
+
+
+def bind_all_assignable_rules(client, tenant: str, agent_id: int) -> list[int]:
+    options = client.get(
+        f"/api/v1/tenants/{tenant}/agents/{agent_id}/sensitive-rules",
+        headers=ADMIN_HEADERS,
+        params={"page_size": 500},
+    )
+    assert options.status_code == 200, options.text
+    rule_ids = [item["id"] for item in options.json()["items"] if item["assignable"]]
+    bound = client.put(
+        f"/api/v1/tenants/{tenant}/agents/{agent_id}/sensitive-rules",
+        headers=ADMIN_HEADERS,
+        json={"rule_ids": rule_ids},
+    )
+    assert bound.status_code == 200, bound.text
+    return rule_ids
+
+
 def get_snapshot(client, tenant: str, **kwargs: Any):
+    agent_id = int(kwargs.pop("agent_id", 0) or create_agent(tenant))
+    if kwargs.pop("bind_all", True):
+        bind_all_assignable_rules(client, tenant, agent_id)
     headers = dict(RUNTIME_HEADERS)
     headers.update(kwargs.pop("headers", {}))
     return client.get(
-        f"/internal/v1/tenants/{tenant}/policy-snapshot", headers=headers, **kwargs
+        f"/internal/v1/tenants/{tenant}/agents/{agent_id}/policy-snapshot",
+        headers=headers,
+        **kwargs,
     )
 
 

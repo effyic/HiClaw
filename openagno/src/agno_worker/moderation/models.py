@@ -122,10 +122,12 @@ class SensitiveRule:
 
 @dataclass
 class PolicySnapshot:
-    """一个租户的策略快照（含全局+租户合并后的规则集与组合版本）。"""
+    """一个 Agent 的策略快照（含全局、租户和 Agent 组合版本）。"""
 
     tenant_id: str
-    version: str = ""  # 组合版本，如 "global-12:tenant-37"
+    agent_id: int = 0
+    binding_rule_ids: list[int] = field(default_factory=list)
+    version: str = ""  # 如 "global-12:tenant-37:agent-4"
     etag: str = ""
     rules: list[SensitiveRule] = field(default_factory=list)
     types: dict[int, SensitiveType] = field(default_factory=dict)
@@ -137,7 +139,9 @@ class PolicySnapshot:
         return (current - self.fetched_at) > max_stale
 
     @classmethod
-    def from_payload(cls, tenant_id: str, data: dict[str, Any]) -> "PolicySnapshot":
+    def from_payload(
+        cls, tenant_id: str, data: dict[str, Any], agent_id: int = 0
+    ) -> "PolicySnapshot":
         types = {
             t.id: t
             for t in (SensitiveType.from_payload(item) for item in data.get("types") or [])
@@ -145,6 +149,8 @@ class PolicySnapshot:
         rules = [SensitiveRule.from_payload(item) for item in data.get("rules") or []]
         return cls(
             tenant_id=tenant_id,
+            agent_id=int(data.get("agent_id") or agent_id),
+            binding_rule_ids=[int(item) for item in data.get("binding_rule_ids") or []],
             version=str(data.get("version", "")),
             etag=str(data.get("etag", "")),
             rules=rules,
@@ -154,6 +160,9 @@ class PolicySnapshot:
 
     def to_payload(self) -> dict[str, Any]:
         return {
+            "tenant_id": self.tenant_id,
+            "agent_id": self.agent_id,
+            "binding_rule_ids": list(self.binding_rule_ids),
             "version": self.version,
             "etag": self.etag,
             "fetched_at": self.fetched_at,

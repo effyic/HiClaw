@@ -98,6 +98,22 @@ def migrated_db(pg_url: str) -> Iterator[str]:
 
     reset_engine()
     run_migrations(MIGRATIONS_DIR, max_wait_seconds=30)
+    from sensitive_content.db import db_connection
+    from sqlalchemy import text
+    with db_connection() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS agno_agent (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id VARCHAR(64) NOT NULL,
+                    role_code VARCHAR(64) NOT NULL DEFAULT 'default',
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    UNIQUE (tenant_id, role_code)
+                )
+                """
+            )
+        )
     yield pg_url
     reset_engine()
 
@@ -117,11 +133,14 @@ def db(migrated_db: str) -> Iterator[str]:
                          sensitive_content.sensitive_type,
                          sensitive_content.hit_event,
                          sensitive_content.audit_log,
-                         sensitive_content.policy_version
+                         sensitive_content.policy_version,
+                         sensitive_content.agent_rule_binding,
+                         sensitive_content.agent_policy_version
                 RESTART IDENTITY CASCADE
                 """
             )
         )
+        conn.execute(text("TRUNCATE agno_agent RESTART IDENTITY"))
         # 重放含种子数据的迁移片段（幂等）；0002 仅为 DDL，无需重放
         conn.exec_driver_sql(
             (MIGRATIONS_DIR / "0001_init.sql").read_text(encoding="utf-8")

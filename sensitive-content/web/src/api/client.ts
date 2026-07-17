@@ -1,5 +1,7 @@
 // API 请求封装：Bearer Token 注入、三种错误体统一解析（文档 2.2 / 2.6）
 import type {
+  AgentRuleBindingResult,
+  AgentRuleBindings,
   AuditLog,
   ByActionResponse,
   ByRuleItem,
@@ -61,6 +63,9 @@ const CODE_MESSAGES: Record<string, string> = {
   forbidden_global_rule: '租户上下文不能修改全局规则，请创建覆盖规则',
   type_not_found: '类型不存在或无权访问',
   rule_not_found: '规则不存在或无权访问',
+  agent_not_found: 'Agent 不存在或不属于当前租户',
+  invalid_agent_scope: '全局上下文不能配置 Agent 规则绑定',
+  rule_not_assignable: '所选规则当前不可绑定，请检查启用状态与覆盖关系',
   duplicate_code: '类型编码冲突，请重试',
   duplicate_rule: '已存在等价规则（规范化后重复）',
   type_in_use: '该类型仍被规则引用，无法删除',
@@ -196,10 +201,23 @@ export const api = {
   deleteRule: (tenantId: string, ruleId: number) =>
     request<void>('DELETE', `${tenantBase(tenantId)}/sensitive-rules/${ruleId}`),
 
+  // ---- Agent 规则绑定（供 Agent 管理端复用） ----
+  getAgentRuleBindings: (
+    tenantId: string,
+    agentId: number,
+    params?: ListParams & { keyword?: string; type_id?: number },
+  ) => request<AgentRuleBindings>('GET', `${tenantBase(tenantId)}/agents/${agentId}/sensitive-rules`, { params }),
+  replaceAgentRuleBindings: (tenantId: string, agentId: number, ruleIds: number[]) =>
+    request<AgentRuleBindingResult>('PUT', `${tenantBase(tenantId)}/agents/${agentId}/sensitive-rules`, {
+      body: { rule_ids: ruleIds },
+    }),
+  clearAgentRuleBindings: (tenantId: string, agentId: number) =>
+    request<void>('DELETE', `${tenantBase(tenantId)}/agents/${agentId}/sensitive-rules`),
+
   // ---- 命中事件（文档 4.3） ----
   listHitEvents: (
     tenantId: string,
-    params?: ListParams & { rule_id?: number; type_id?: number; session_id?: string; from?: string; to?: string },
+    params?: ListParams & { rule_id?: number; type_id?: number; agent_id?: number; session_id?: string; from?: string; to?: string },
   ) => request<Paged<HitEvent>>('GET', `${tenantBase(tenantId)}/hit-events`, { params }),
 
   // ---- 审计日志（文档 4.4） ----

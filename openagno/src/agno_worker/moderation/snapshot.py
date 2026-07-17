@@ -32,13 +32,13 @@ class SnapshotClient:
 
     def __init__(self, config: ModerationConfig) -> None:
         self._config = config
-        self._snapshots: dict[str, PolicySnapshot] = {}
-        self._policies: dict[str, CompiledPolicy] = {}
-        self._known_tenants: set[str] = set()
+        self._snapshots: dict[tuple[str, int], PolicySnapshot] = {}
+        self._policies: dict[tuple[str, int], CompiledPolicy] = {}
+        self._known_agents: set[tuple[str, int]] = set()
         self._disk_enabled = True
         self._refresh_task: asyncio.Task | None = None
         self._stopping = False
-        self._stale_warned: set[str] = set()
+        self._stale_warned: set[tuple[str, int]] = set()
         self._ensure_cache_dir()
         self._load_from_disk()
 
@@ -46,40 +46,45 @@ class SnapshotClient:
     # 对外接口
     # ------------------------------------------------------------------
 
-    def get_policy(self, tenant_id: str) -> CompiledPolicy | None:
-        """获取租户的有效编译策略；无有效快照（含过期超限）返回 None。
+    def get_policy(self, tenant_id: str, agent_id: int = 0) -> CompiledPolicy | None:
+        """获取 Agent 的有效编译策略；无有效快照（含过期超限）返回 None。
 
         纯内存读取，不发起网络请求；刷新由后台任务负责。
         """
         tenant_id = tenant_id or ""
-        self._known_tenants.add(tenant_id)
-        snapshot = self._snapshots.get(tenant_id)
+        key = (tenant_id, int(agent_id))
+        self._known_agents.add(key)
+        snapshot = self._snapshots.get(key)
         if snapshot is None:
             return None
         if snapshot.is_stale(self._config.max_stale):
-            if tenant_id not in self._stale_warned:
-                self._stale_warned.add(tenant_id)
+            if key not in self._stale_warned:
+                self._stale_warned.add(key)
                 logger.warning(
-                    "租户 %s 的策略快照已超过过期上限 %.0fs（版本 %s），视为无有效快照",
+                    "租户 %s Agent %s 的策略快照已超过过期上限 %.0fs（版本 %s），视为无有效快照",
                     tenant_id,
+                    agent_id,
                     self._config.max_stale,
                     snapshot.version,
                 )
             return None
-        return self._policies.get(tenant_id)
+        return self._policies.get(key)
 
-    async def fetch(self, tenant_id: str, *, client: httpx.AsyncClient | None = None) -> bool:
-        """立即刷新一个租户的快照；返回是否仍持有有效快照。"""
+    async def fetch(
+        self, tenant_id: str, agent_id: int = 0, *, client: httpx.AsyncClient | None = None
+    ) -> bool:
+        """立即刷新一个 Agent 的快照；返回是否仍持有有效快照。"""
         tenant_id = tenant_id or ""
-        self._known_tenants.add(tenant_id)
+        key = (tenant_id, int(agent_id))
+        self._known_agents.add(key)
         own_client = client is None
         http = client or httpx.AsyncClient(timeout=10.0)
         try:
-            await self._refresh_tenant(http, tenant_id)
+            await self._refresh_agent(http, tenant_id, int(agent_id))
         finally:
             if own_client:
                 await http.aclose()
-        snapshot = self._snapshots.get(tenant_id)
+        snapshot = self._snapshots.get(key)
         return snapshot is not None and not snapshot.is_stale(self._config.max_stale)
 
     def ensure_background_refresh(self) -> None:
@@ -126,8 +131,10 @@ class SnapshotClient:
         try:
             with open(self._config.cache_path, encoding="utf-8") as fh:
                 data = json.load(fh)
-            tenants = data.get("tenants")
-            if not isinstance(tenants, dict):
+            if data.get("format_version") != 2:
+                raise ValueError("legacy tenant-scoped cache")
+            snapshots = data.get("snapshots")
+            if not isinstance(snapshots, list):
                 raise ValueError("invalid cache structure")
         except (json.JSONDecodeError, ValueError, OSError) as exc:
             # 损坏的缓存文件自愈：删除并视为无缓存
@@ -139,21 +146,23 @@ class SnapshotClient:
             except OSError:
                 pass
             return
-        for tenant_id, payload in tenants.items():
+        for payload in snapshots:
             try:
-                snapshot = PolicySnapshot.from_payload(str(tenant_id), payload)
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid snapshot entry")
+                tenant_id = str(payload.get("tenant_id") or "")
+                agent_id = int(payload.get("agent_id") or 0)
+                snapshot = PolicySnapshot.from_payload(tenant_id, payload, agent_id)
                 self._install_snapshot(snapshot, persist=False)
             except Exception as exc:
-                logger.warning("租户 %s 的落盘快照解析失败：%s", tenant_id, exc)
+                logger.warning("Agent 落盘快照解析失败：%s", exc)
 
     def _persist_to_disk(self) -> None:
         if not self._disk_enabled:
             return
         data = {
-            "tenants": {
-                tenant_id: snapshot.to_payload()
-                for tenant_id, snapshot in self._snapshots.items()
-            }
+            "format_version": 2,
+            "snapshots": [snapshot.to_payload() for snapshot in self._snapshots.values()],
         }
         cache_dir = os.path.dirname(self._config.cache_path) or "."
         try:
@@ -182,16 +191,17 @@ class SnapshotClient:
         while not self._stopping:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
-                    for tenant_id in sorted(self._known_tenants):
+                    for tenant_id, agent_id in sorted(self._known_agents):
                         try:
-                            await self._refresh_tenant(client, tenant_id)
+                            await self._refresh_agent(client, tenant_id, agent_id)
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:
                             # 管理服务不可用：沿用最后有效快照
                             logger.warning(
-                                "刷新租户 %s 策略快照失败（沿用缓存）：%s",
+                                "刷新租户 %s Agent %s 策略快照失败（沿用缓存）：%s",
                                 tenant_id,
+                                agent_id,
                                 exc,
                             )
             except asyncio.CancelledError:
@@ -200,15 +210,18 @@ class SnapshotClient:
                 logger.warning("敏感内容快照刷新循环异常：%s", exc)
             await asyncio.sleep(self._config.refresh_interval)
 
-    async def _refresh_tenant(self, client: httpx.AsyncClient, tenant_id: str) -> None:
+    async def _refresh_agent(
+        self, client: httpx.AsyncClient, tenant_id: str, agent_id: int
+    ) -> None:
         url = (
             f"{self._config.service_url}/internal/v1/tenants/"
-            f"{tenant_id or 'global'}/policy-snapshot"
+            f"{tenant_id or 'global'}/agents/{agent_id}/policy-snapshot"
         )
         headers: dict[str, str] = {}
         if self._config.runtime_token:
             headers["Authorization"] = f"Bearer {self._config.runtime_token}"
-        cached = self._snapshots.get(tenant_id)
+        key = (tenant_id, agent_id)
+        cached = self._snapshots.get(key)
         if cached is not None and cached.etag:
             headers["If-None-Match"] = cached.etag
         response = await client.get(url, headers=headers)
@@ -216,12 +229,12 @@ class SnapshotClient:
             # 内容未变：仅续期，保持有效
             if cached is not None:
                 cached.fetched_at = time.time()
-                self._stale_warned.discard(tenant_id)
+                self._stale_warned.discard(key)
                 self._persist_to_disk()
             return
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
-        snapshot = PolicySnapshot.from_payload(tenant_id, payload)
+        snapshot = PolicySnapshot.from_payload(tenant_id, payload, agent_id)
         snapshot.fetched_at = time.time()
         etag = response.headers.get("etag", "")
         if etag and not snapshot.etag:
@@ -230,17 +243,19 @@ class SnapshotClient:
         self._install_snapshot(snapshot, persist=True)
         if old_version != snapshot.version:
             logger.info(
-                "租户 %s 策略快照更新：%s -> %s（规则 %d 条）",
+                "租户 %s Agent %s 策略快照更新：%s -> %s（规则 %d 条）",
                 tenant_id,
+                agent_id,
                 old_version,
                 snapshot.version,
                 len(snapshot.rules),
             )
 
     def _install_snapshot(self, snapshot: PolicySnapshot, *, persist: bool) -> None:
-        self._snapshots[snapshot.tenant_id] = snapshot
-        self._policies[snapshot.tenant_id] = compile_policy(snapshot)
-        self._known_tenants.add(snapshot.tenant_id)
-        self._stale_warned.discard(snapshot.tenant_id)
+        key = (snapshot.tenant_id, snapshot.agent_id)
+        self._snapshots[key] = snapshot
+        self._policies[key] = compile_policy(snapshot)
+        self._known_agents.add(key)
+        self._stale_warned.discard(key)
         if persist:
             self._persist_to_disk()

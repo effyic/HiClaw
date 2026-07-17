@@ -55,6 +55,7 @@ class HitEvent:
     session_id: str
     policy_version: str
     hit_count: int
+    agent_id: int = 0
     hit_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -69,6 +70,7 @@ class HitEvent:
             "selected": self.selected,
             "final_rule_id": self.final_rule_id,
             "tenant_id": self.tenant_id,
+            "agent_id": self.agent_id or None,
             "request_fingerprint": self.request_fingerprint,
             "session_fingerprint": self.session_fingerprint,
             "session_id": self.session_id,
@@ -85,6 +87,7 @@ def build_hit_events(
     request_id: str,
     session_id: str,
     fingerprint_key: str,
+    agent_id: int = 0,
 ) -> list[HitEvent]:
     """由决策构建命中事件：每条命中一条事件，仅排序第一条 ``selected=TRUE``。
 
@@ -108,6 +111,7 @@ def build_hit_events(
                 selected=index == 0,
                 final_rule_id=final_rule_id,
                 tenant_id=tenant_id,
+                agent_id=agent_id,
                 request_fingerprint=request_fp,
                 session_fingerprint=session_fp,
                 session_id=session_id,

@@ -15,6 +15,7 @@ export default function HitEvents() {
 
   const [ruleId, setRuleId] = useState<number | undefined>()
   const [typeId, setTypeId] = useState<number | undefined>()
+  const [agentId, setAgentId] = useState<number | undefined>()
   const [sessionId, setSessionId] = useState('')
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null)
   const [page, setPage] = useState(1)
@@ -23,6 +24,7 @@ export default function HitEvents() {
   const params = {
     rule_id: ruleId,
     type_id: typeId,
+    agent_id: agentId,
     session_id: sessionId || undefined,
     from: range?.[0]?.toISOString(),
     to: range?.[1]?.toISOString(),
@@ -49,6 +51,12 @@ export default function HitEvents() {
       cols.push({ title: '租户', dataIndex: 'tenant_id', width: 120 })
     }
     cols.push(
+      {
+        title: 'Agent',
+        dataIndex: 'agent_id',
+        width: 90,
+        render: (v: number | null) => (v == null ? '-' : `#${v}`),
+      },
       { title: '规则', dataIndex: 'rule_id', width: 90, render: (v: number) => `#${v}` },
       { title: '类型', dataIndex: 'type_id', width: 90, render: (v: number) => `#${v}` },
       {
@@ -114,6 +122,15 @@ export default function HitEvents() {
           value={typeId}
           onChange={(v) => {
             setTypeId(v ?? undefined)
+            setPage(1)
+          }}
+        />
+        <InputNumber
+          placeholder="Agent ID"
+          min={1}
+          value={agentId}
+          onChange={(v) => {
+            setAgentId(v ?? undefined)
             setPage(1)
           }}
         />

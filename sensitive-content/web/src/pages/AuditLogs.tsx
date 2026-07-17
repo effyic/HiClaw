@@ -16,6 +16,12 @@ const ACTION_COLORS: Record<AuditAction, string> = {
   disable: 'orange',
 }
 
+const TARGET_LABELS: Record<AuditLog['target_kind'], string> = {
+  rule: '规则',
+  type: '类型',
+  agent_binding: 'Agent 绑定',
+}
+
 const columns: ColumnsType<AuditLog> = [
   { title: 'ID', dataIndex: 'id', width: 80 },
   {
@@ -34,7 +40,7 @@ const columns: ColumnsType<AuditLog> = [
     title: '目标',
     key: 'target',
     width: 130,
-    render: (_, r) => `${r.target_kind === 'rule' ? '规则' : '类型'} #${r.target_id}`,
+    render: (_, r) => `${TARGET_LABELS[r.target_kind]} #${r.target_id}`,
   },
   {
     title: '变更字段',
@@ -98,6 +104,7 @@ export default function AuditLogs() {
           options={[
             { value: 'rule', label: '规则' },
             { value: 'type', label: '类型' },
+            { value: 'agent_binding', label: 'Agent 绑定' },
           ]}
         />
         <InputNumber

@@ -119,6 +119,15 @@ class AgnoRuntime:
     def db(self) -> Any:
         return self._db
 
+    def _resolve_moderation_agent_id(self, tenant_id: str, role_code: str) -> int:
+        try:
+            return self._tenant_service.resolve_agent_id(
+                tenant_id or "default", role_code or "default"
+            )
+        except RuntimeError as exc:
+            logger.warning("Unable to resolve moderation agent id: %s", exc)
+            return 0
+
     def run(
         self,
         message: str,
@@ -174,8 +183,15 @@ class AgnoRuntime:
         thinking_token = set_enable_thinking(enable_thinking)
         # 每个请求生成独立 request_id（uuid4）注入 contextvars 供敏感内容
         # Guardrail 读取；request_fingerprint 由它派生，不得从 session_id 派生
+        moderation_tenant = str(
+            ctx.tenant_id or tenant_id or run_metadata.get("tenant_id") or "default"
+        )
+        moderation_role = str(
+            ctx.role_code or run_metadata.get("role_code") or "default"
+        )
         mod_ctx, mod_token = set_request_context(
-            tenant_id=ctx.tenant_id or tenant_id,
+            tenant_id=moderation_tenant,
+            agent_id=self._resolve_moderation_agent_id(moderation_tenant, moderation_role),
             user_id=ctx.user_id or user_id,
             session_id=ctx.session_id or session_id,
             request_id=new_request_id(),
@@ -275,8 +291,15 @@ class AgnoRuntime:
 
         thinking_token = set_enable_thinking(enable_thinking)
         # 与 arun 一致：请求级 request_id 注入 contextvars 供 Guardrail 读取
+        moderation_tenant = str(
+            ctx.tenant_id or tenant_id or run_metadata.get("tenant_id") or "default"
+        )
+        moderation_role = str(
+            ctx.role_code or run_metadata.get("role_code") or "default"
+        )
         mod_ctx, mod_token = set_request_context(
-            tenant_id=ctx.tenant_id or tenant_id,
+            tenant_id=moderation_tenant,
+            agent_id=self._resolve_moderation_agent_id(moderation_tenant, moderation_role),
             user_id=ctx.user_id or user_id,
             session_id=ctx.session_id or session_id,
             request_id=new_request_id(),

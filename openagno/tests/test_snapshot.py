@@ -52,6 +52,34 @@ class TestMemoryAndDisk:
         client = SnapshotClient(make_config(tmp_path))
         assert client.get_policy(TENANT) is None
 
+    def test_agent_caches_are_isolated(self, tmp_path):
+        client = SnapshotClient(make_config(tmp_path))
+        client._install_snapshot(
+            make_snapshot(
+                [make_type(1)], [make_rule(1, 1, "one")],
+                tenant_id=TENANT, agent_id=1, binding_rule_ids=[1],
+            ),
+            persist=False,
+        )
+        client._install_snapshot(
+            make_snapshot(
+                [make_type(1)], [make_rule(2, 1, "two")],
+                tenant_id=TENANT, agent_id=2, binding_rule_ids=[2],
+            ),
+            persist=False,
+        )
+        assert client.get_policy(TENANT, 1).snapshot.rules[0].pattern == "one"
+        assert client.get_policy(TENANT, 2).snapshot.rules[0].pattern == "two"
+
+    def test_legacy_tenant_cache_is_discarded(self, tmp_path):
+        cfg = make_config(tmp_path)
+        os.makedirs(os.path.dirname(cfg.cache_path), exist_ok=True)
+        with open(cfg.cache_path, "w", encoding="utf-8") as fh:
+            json.dump({"tenants": {TENANT: snapshot_payload()}}, fh)
+        client = SnapshotClient(cfg)
+        assert not os.path.exists(cfg.cache_path)
+        assert client.get_policy(TENANT, 1) is None
+
     def test_stale_snapshot_returns_none_and_warns(self, tmp_path, caplog):
         client = SnapshotClient(make_config(tmp_path, max_stale=10))
         stale = make_snapshot(
@@ -74,7 +102,8 @@ class TestMemoryAndDisk:
         assert os.path.exists(cfg.cache_path)
         with open(cfg.cache_path, encoding="utf-8") as fh:
             data = json.load(fh)
-        assert TENANT in data["tenants"]
+        assert data["format_version"] == 2
+        assert data["snapshots"][0]["tenant_id"] == TENANT
         leftovers = [f for f in os.listdir(os.path.dirname(cfg.cache_path)) if f.endswith(".tmp")]
         assert leftovers == []
         # 新客户端启动时加载落盘缓存
@@ -132,7 +161,7 @@ class TestRefresh:
 
     def test_fetch_installs_snapshot(self, tmp_path):
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == f"/internal/v1/tenants/{TENANT}/policy-snapshot"
+            assert request.url.path == f"/internal/v1/tenants/{TENANT}/agents/0/policy-snapshot"
             return httpx.Response(200, json=snapshot_payload())
 
         client, http = self._client_with_transport(tmp_path, handler)
@@ -153,7 +182,7 @@ class TestRefresh:
 
         client, http = self._client_with_transport(tmp_path, handler, max_stale=5)
         asyncio.run(client.fetch(TENANT, client=http))
-        snapshot = client._snapshots[TENANT]
+        snapshot = client._snapshots[(TENANT, 0)]
         # 人为做旧后 304 续期
         snapshot.fetched_at = time.time() - 100
         assert client.get_policy(TENANT) is None  # 已过期

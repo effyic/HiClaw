@@ -250,6 +250,12 @@ class RuleUpdate(BaseModel):
     remark: Optional[str] = None
 
 
+class AgentRuleBindingUpdate(BaseModel):
+    """Agent 规则绑定整体替换请求。"""
+
+    rule_ids: list[int] = Field(default_factory=list)
+
+
 class HitEventIn(BaseModel):
     event_id: UUID
     rule_id: int
@@ -259,6 +265,7 @@ class HitEventIn(BaseModel):
     selected: bool = False
     final_rule_id: int
     tenant_id: str
+    agent_id: Optional[int] = None
     request_fingerprint: str
     session_fingerprint: str = ""
     # 明文会话标识（产品决策：供后台跳转查看完整会话；用户原文仍不落库）

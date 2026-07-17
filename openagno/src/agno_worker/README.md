@@ -454,6 +454,13 @@ Worker.start()
 | `SensitiveContentDecisionError` | 敏感内容命中且最终行为为 `BLOCK_REQUEST`             | 422 `sensitive_content_blocked` |
 | `SensitivePolicyUnavailableError` | 无有效策略快照且 `SENSITIVE_CONTENT_FAIL_MODE=closed` | 503 `sensitive_policy_unavailable` |
 
+敏感内容策略按实际解析到的 `agno_agent.id` 隔离。运行时请求
+`/internal/v1/tenants/{tenant_id}/agents/{agent_id}/policy-snapshot`，本地缓存键为
+`(tenant_id, agent_id)`；未绑定规则返回合法空策略，不属于“策略不可用”。同租户角色回退到
+`default` 时使用实际默认 Agent 的绑定，跨租户模板回退或数据库中没有对应 Agent 时使用空策略。
+命中事件同时上报 `agent_id`，策略版本格式为
+`global-{G}:tenant-{T}:agent-{A}`。升级后的缓存格式版本为 2，旧租户级缓存会被删除重拉。
+
 
 PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 
@@ -487,5 +494,4 @@ PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 | `moderation/snapshot.py`  | 策略快照客户端（内存 + 落盘 + 后台刷新）      |
 | `moderation/reporter.py`  | 命中事件批量上报（有界队列 + HMAC 指纹）      |
 | `examples/hooks/`    | PVC Hook 参考实现                            |
-
 
