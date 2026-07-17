@@ -127,8 +127,13 @@ class TenantAgentService:
     def get_mcp_servers(self, run_context: Any) -> list[MCPServerConfig]:
         if not is_run_prepared(run_context):
             self.prepare_run_context(run_context)
+        # Base servers are cached without collection write-gates so that mid-run
+        # collection_complete can unlock tools on the next Agno tools() resolve.
+        from agno_worker.tenant.collection import apply_collection_mcp_excludes
+
         servers = ensure_run_cache(run_context).get("mcp_servers")
-        return list(servers) if isinstance(servers, list) else []
+        base = list(servers) if isinstance(servers, list) else []
+        return apply_collection_mcp_excludes(run_context, base)
 
     def get_skill_catalog(
         self,
@@ -291,10 +296,7 @@ class TenantAgentService:
             list(transformed) if isinstance(transformed, list) else list(servers)
         )
         self.mcp.apply_forwarded_headers(run_context, finalized)
-        with_headers = self._apply_mcp_headers_hook(run_context, finalized)
-        from agno_worker.tenant.collection import apply_collection_mcp_excludes
-
-        return apply_collection_mcp_excludes(run_context, with_headers)
+        return self._apply_mcp_headers_hook(run_context, finalized)
 
     def _apply_mcp_headers_hook(
         self,

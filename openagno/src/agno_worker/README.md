@@ -254,16 +254,18 @@ HTTP role-code / x-role-code（或 query role_code）
 
 | 工具 | 作用 |
 |------|------|
-| `collection_load_schema` | 加载字段清单 |
-| `collection_update_fields` | 合并采集值并重算 missing |
+| `collection_load_schema` | 加载字段清单（`schema.source=inline` 时通常已自动加载） |
+| `collection_update_fields` | 合并采集值（**仅允许 schema 内字段名**）并重算 missing |
 | `collection_status` | 只读进度 |
 | `collection_confirm` | 用户确认 |
-| `collection_complete` | 写入 draft，授权完成 |
+| `collection_complete` | 写入 draft，设置 `completion_authorized`（**写库闸门**） |
 | `collection_mark_done` | 写库副作用成功后收尾 |
 
-闸门：必填未齐或未确认时，将 `gated_mcp_tools` / `complete_action.tool` 加入 MCP `exclude_tools`。客户端可用请求头 `x-collection-confirm: true` 在本轮解锁确认。同步回复末尾会附加 `<!--COLLECTION_STATUS {...}-->`。
+**写库闸门（Scheme A）**：必填未齐、未确认、或未调用 `collection_complete` 时，将 `gated_mcp_tools` / `complete_action.tool` 加入 MCP `exclude_tools`。`cache_callables=False` 下 Agno 每步重算 tools，同轮 `collection_complete` 后可解锁写库 MCP。
 
-实现：`tenant/collection.py`；接线：`tenant/service.py`、`tenant/session.py`、`tenant/prompt.py`、`tenant/data.py`、`runtime/storage.py`。
+客户端可用请求头 `x-collection-confirm: true` 在本轮标记确认。同步回复末尾附加 `<!--COLLECTION_STATUS {...}-->`；流式场景请读 `session_state.collection` 或 run `metadata.collection_status`（不要只依赖 SSE 文本标记）。
+
+实现：`tenant/collection.py`；接线：`tenant/service.py`、`tenant/session.py`、`tenant/prompt.py`、`tenant/data.py`、`runtime/storage.py`、`runtime/builder.py`。
 
 ---
 

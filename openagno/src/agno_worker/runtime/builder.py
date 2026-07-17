@@ -266,17 +266,31 @@ class AgentBuilder:
             from agno_worker.tenant.collection import (
                 COLLECTION_STATE_KEY,
                 append_status_marker,
+                collection_status_payload,
                 is_collection_enabled,
             )
 
             workflow = (run_context.session_state or {}).get("workflow") or {}
             if is_collection_enabled(workflow if isinstance(workflow, dict) else {}):
                 coll = (run_context.session_state or {}).get(COLLECTION_STATE_KEY) or {}
+                if not isinstance(coll, dict):
+                    coll = {}
                 if run_output is not None and hasattr(run_output, "content"):
                     run_output.content = append_status_marker(
                         getattr(run_output, "content", None),
-                        coll if isinstance(coll, dict) else {},
+                        coll,
                     )
+                # Prefer metadata for streaming H5 clients (reply chunks omit marker).
+                status = collection_status_payload(coll)
+                if run_output is not None:
+                    if not isinstance(getattr(run_output, "metadata", None), dict):
+                        run_output.metadata = {}
+                    run_output.metadata["collection_status"] = status
+                metadata = getattr(run_context, "metadata", None)
+                if metadata is None:
+                    run_context.metadata = {"collection_status": status}
+                elif isinstance(metadata, dict):
+                    metadata["collection_status"] = status
 
             metadata = getattr(run_context, "metadata", None) or {}
             debug_request = bool(metadata.get("debug_request", default_debug_request()))

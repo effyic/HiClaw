@@ -220,7 +220,7 @@ def advance_collection_phase(
 
 
 def is_write_authorized(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
-    """Gated MCP write tools are visible when required slots are filled and confirmed."""
+    """Gated MCP write tools unlock only after collection_complete (Scheme A)."""
     current = ensure_collection_state(state, config)
     if current["completed"]:
         return False
@@ -230,7 +230,27 @@ def is_write_authorized(state: dict[str, Any], config: dict[str, Any] | None) ->
         return False
     if confirm_required(config) and not current["user_confirmed"]:
         return False
-    return True
+    return bool(current.get("completion_authorized"))
+
+
+def _request_confirm_flag(run_context: Any) -> bool:
+    metadata = getattr(run_context, "metadata", None) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    for key in ("confirm", "collection_confirm", "user_confirmed"):
+        if key in metadata and _as_bool(metadata.get(key), False):
+            return True
+
+    headers = metadata.get("request_headers")
+    if not isinstance(headers, dict):
+        return False
+    lower = {str(k).lower(): v for k, v in headers.items()}
+    for key in ("x-collection-confirm", "x-confirm", "collection-confirm"):
+        if key in headers and _as_bool(headers.get(key), False):
+            return True
+        if key.lower() in lower and _as_bool(lower[key.lower()], False):
+            return True
+    return False
 
 
 def apply_metadata_flags(
@@ -240,23 +260,7 @@ def apply_metadata_flags(
 ) -> dict[str, Any]:
     """Honor client confirm flags from metadata / headers (cluster-safe)."""
     out = ensure_collection_state(state, config)
-    metadata = getattr(run_context, "metadata", None) or {}
-    headers = metadata.get("request_headers") if isinstance(metadata, dict) else None
-    if not isinstance(headers, dict):
-        headers = {}
-
-    confirm = False
-    for key in ("confirm", "collection_confirm", "user_confirmed"):
-        if key in metadata and _as_bool(metadata.get(key), False):
-            confirm = True
-    for key in ("x-collection-confirm", "x-confirm", "collection-confirm"):
-        if key in headers and _as_bool(headers.get(key), False):
-            confirm = True
-        lower = {str(k).lower(): v for k, v in headers.items()}
-        if key.lower() in lower and _as_bool(lower[key.lower()], False):
-            confirm = True
-
-    if confirm and not out["missing"] and out["schema"]:
+    if _request_confirm_flag(run_context) and not out["missing"] and out["schema"]:
         out["user_confirmed"] = True
     return advance_collection_phase(out, config)
 
@@ -289,6 +293,14 @@ def load_schema_into_state(
     return advance_collection_phase(out, config)
 
 
+def schema_field_names(schema: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(field.get("name") or "").strip()
+        for field in schema
+        if str(field.get("name") or "").strip()
+    }
+
+
 def update_collected_fields(
     state: dict[str, Any],
     updates: dict[str, Any],
@@ -297,6 +309,21 @@ def update_collected_fields(
     out = ensure_collection_state(state, config)
     if not isinstance(updates, dict) or not updates:
         raise ValueError("fields must be a non-empty object of {name: value}")
+    if not out["schema"]:
+        raise ValueError(
+            "schema is empty; call collection_load_schema before collection_update_fields"
+        )
+
+    allowed = schema_field_names(out["schema"])
+    unknown = [str(k).strip() for k in updates if str(k).strip() and str(k).strip() not in allowed]
+    if unknown:
+        raise ValueError(
+            "unknown field names (must match schema): "
+            + ", ".join(unknown)
+            + "; allowed="
+            + ", ".join(sorted(allowed))
+        )
+
     collected = dict(out["collected"])
     for key, value in updates.items():
         name = str(key).strip()
@@ -437,7 +464,11 @@ def apply_collection_mcp_excludes(
     run_context: Any,
     servers: list[MCPServerConfig],
 ) -> list[MCPServerConfig]:
-    """Hide gated write MCP tools until collection_complete authorizes them."""
+    """Hide gated write MCP tools until collection_complete sets completion_authorized.
+
+    Safe to call on every tools() resolution: with ``cache_callables=False``, Agno
+    re-resolves tools after each tool step, so mid-run complete can unlock writes.
+    """
     workflow = workflow_from_run_context(run_context)
     config = resolve_collection_config(workflow)
     if not config or not servers:
@@ -478,6 +509,15 @@ def apply_collection_mcp_excludes(
     return updated
 
 
+def schema_source(config: dict[str, Any] | None) -> str:
+    if not config:
+        return "inline"
+    schema_cfg = config.get("schema")
+    if not isinstance(schema_cfg, dict):
+        return "inline"
+    return str(schema_cfg.get("source") or "inline").strip() or "inline"
+
+
 def collection_instructions_appendix(
     state: dict[str, Any],
     config: dict[str, Any] | None,
@@ -486,48 +526,76 @@ def collection_instructions_appendix(
     batch = ask_batch_size(config)
     missing = current.get("missing") or []
     focus = missing[:batch]
+    source = schema_source(config)
     lines = [
         "## collection_protocol",
         f"phase: {current.get('phase')}",
+        f"schema_source: {source}",
         f"ask_batch_size: {batch}",
         f"confirm_required: {confirm_required(config)}",
         f"user_confirmed: {current.get('user_confirmed')}",
+        f"completion_authorized: {current.get('completion_authorized')}",
         f"completed: {current.get('completed')}",
         f"missing: {json.dumps(missing, ensure_ascii=False)}",
         f"collected: {json.dumps(current.get('collected') or {}, ensure_ascii=False)}",
         "",
         "Rules:",
-        "1. If schema is empty, call collection_load_schema first "
-        "(inline schema needs no args; MCP schema: fetch fields then pass fields_json).",
-        f"2. Each turn ask at most {batch} items from missing; then call collection_update_fields.",
-        "3. Do not invent completion; call collection_status to inspect progress.",
-        "4. When missing is empty, summarize for the user"
-        + (" and ask for confirmation, then collection_confirm." if confirm_required(config) else "."),
-        "5. After confirmation call collection_complete with the final payload, "
-        "then call the configured MCP write tool, then collection_mark_done.",
-        "6. Never call gated write MCP tools before required fields are complete"
-        + (" and the user has confirmed." if confirm_required(config) else "."),
     ]
+    if source == "mcp" or not current.get("schema"):
+        lines.append(
+            "1. If schema is empty, call collection_load_schema "
+            "(MCP schema: fetch fields via MCP then pass fields_json)."
+        )
+    else:
+        lines.append(
+            "1. Inline schema is already loaded; do not reload unless fields changed."
+        )
+    lines.extend(
+        [
+            f"2. Each turn ask at most {batch} items from missing; then call "
+            "collection_update_fields with ONLY schema field names.",
+            "3. Do not invent completion; call collection_status to inspect progress.",
+            "4. When missing is empty, summarize for the user"
+            + (
+                " and ask for confirmation, then collection_confirm."
+                if confirm_required(config)
+                else "."
+            ),
+            "5. After confirmation call collection_complete(draft_payload=...) — "
+            "this is required to unlock gated MCP write tools.",
+            "6. Only after collection_complete succeeds, call the configured MCP write "
+            "tool, then collection_mark_done. Never call write MCP tools earlier.",
+        ]
+    )
     if focus:
         lines.append(f"7. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
     action = (config or {}).get("complete_action")
     if isinstance(action, dict) and action.get("tool"):
         lines.append(
-            f"8. complete_action MCP tool when authorized: {action.get('tool')}"
+            f"8. complete_action MCP tool after authorize: {action.get('tool')}"
         )
     return "\n".join(lines)
 
 
-def format_status_marker(state: dict[str, Any]) -> str:
-    payload = {
+def collection_status_payload(state: dict[str, Any]) -> dict[str, Any]:
+    """Structured progress for H5 / SSE metadata (prefer over parsing reply text)."""
+    return {
         "phase": state.get("phase"),
-        "missing": state.get("missing") or [],
+        "missing": list(state.get("missing") or []),
         "ready": not bool(state.get("missing")) and bool(state.get("schema")),
         "user_confirmed": bool(state.get("user_confirmed")),
+        "completion_authorized": bool(state.get("completion_authorized")),
         "completed": bool(state.get("completed")),
         "collected_keys": sorted((state.get("collected") or {}).keys()),
     }
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def format_status_marker(state: dict[str, Any]) -> str:
+    body = json.dumps(
+        collection_status_payload(state),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return f"{STATUS_MARKER_PREFIX} {body}{STATUS_MARKER_SUFFIX}"
 
 
@@ -706,8 +774,9 @@ def build_collection_tools() -> list[Any]:
     @tool(
         name="collection_complete",
         description=(
-            "Authorize completion after fields are filled (and confirmed if required). "
-            "Pass draft_payload (e.g. markdown case). Unlocks gated MCP write tools."
+            "Required gate before write MCP tools: fields must be complete "
+            "(and confirmed if required). Pass draft_payload (e.g. markdown). "
+            "Sets completion_authorized=true so gated MCP write tools become visible."
         ),
     )
     def collection_complete(
