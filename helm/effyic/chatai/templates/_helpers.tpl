@@ -262,7 +262,7 @@ disabled
 
 {{- define "chatai.sensitiveContent.port" -}}
 {{- /* 默认端口与服务实现/镜像默认值（SENSITIVE_CONTENT_PORT=8091）保持一致 */ -}}
-{{- .Values.sensitiveContent.port | default 8091 -}}
+{{- dig "port" 8091 (.Values.sensitiveContent | default dict) -}}
 {{- end }}
 
 {{/*
@@ -271,8 +271,9 @@ disabled
 /api/v1/tenants；仅暴露管理/统计 API，/internal/v1/* 不出集群。
 */}}
 {{- define "chatai.sensitiveContent.gatewayPath" -}}
-{{- if .Values.sensitiveContent.gatewayPath -}}
-{{- .Values.sensitiveContent.gatewayPath | trimSuffix "/" -}}
+{{- $sc := .Values.sensitiveContent | default dict -}}
+{{- if index $sc "gatewayPath" -}}
+{{- index $sc "gatewayPath" | trimSuffix "/" -}}
 {{- else -}}
 {{- printf "%s/v1/tenants" (include "chatai.gatewayPath" . | trimSuffix "/") -}}
 {{- end -}}
@@ -287,8 +288,9 @@ Credentials Secret name: sensitiveContent.existingSecret wins, otherwise the
 chart-managed Secret rendered in sensitive-content.yaml.
 */}}
 {{- define "chatai.sensitiveContent.secretName" -}}
-{{- if .Values.sensitiveContent.existingSecret -}}
-{{- .Values.sensitiveContent.existingSecret -}}
+{{- $sc := .Values.sensitiveContent | default dict -}}
+{{- if index $sc "existingSecret" -}}
+{{- index $sc "existingSecret" -}}
 {{- else -}}
 {{- printf "%s-auth" (include "chatai.sensitiveContent.name" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -301,7 +303,8 @@ Call with dict: root=$ valueKey=<values field> secretKey=<Secret data key>.
 */}}
 {{- define "chatai.sensitiveContent.credential" -}}
 {{- $root := .root -}}
-{{- $configured := index $root.Values.sensitiveContent .valueKey | default "" -}}
+{{- $sc := $root.Values.sensitiveContent | default dict -}}
+{{- $configured := index $sc .valueKey | default "" -}}
 {{- if $configured -}}
 {{- $configured -}}
 {{- else -}}
@@ -348,7 +351,7 @@ Call with dict: root=$ valueKey=<values field> secretKey=<Secret data key>.
        string map (no valueFrom/secretKeyRef support), so token values are
        resolved by the chart — same pattern as AGNO_CONTROL_TOKEN above. */ -}}
 {{- if eq (include "chatai.sensitiveContentEnabled" $root) "enabled" -}}
-{{- $sc := $root.Values.sensitiveContent -}}
+{{- $sc := $root.Values.sensitiveContent | default dict -}}
 {{- if not (index $merged "SENSITIVE_CONTENT_SERVICE_URL" | default "") -}}
 {{- $_ := set $merged "SENSITIVE_CONTENT_SERVICE_URL" (include "chatai.sensitiveContent.serviceURL" $root) -}}
 {{- end -}}
@@ -359,16 +362,16 @@ Call with dict: root=$ valueKey=<values field> secretKey=<Secret data key>.
 {{- $_ := set $merged "SENSITIVE_CONTENT_FINGERPRINT_KEY" (include "chatai.sensitiveContent.fingerprintKey" $root) -}}
 {{- end -}}
 {{- if not (index $merged "SENSITIVE_CONTENT_CACHE_PATH" | default "") -}}
-{{- $_ := set $merged "SENSITIVE_CONTENT_CACHE_PATH" ($sc.cachePath | default "/var/lib/agno/moderation/policy-snapshot.json") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_CACHE_PATH" (dig "cachePath" "/var/lib/agno/moderation/policy-snapshot.json" $sc) -}}
 {{- end -}}
 {{- if not (index $merged "SENSITIVE_CONTENT_REFRESH_INTERVAL" | default "") -}}
-{{- $_ := set $merged "SENSITIVE_CONTENT_REFRESH_INTERVAL" ($sc.refreshInterval | default "30" | toString) -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_REFRESH_INTERVAL" (dig "refreshInterval" "30" $sc | toString) -}}
 {{- end -}}
 {{- if not (index $merged "SENSITIVE_CONTENT_MAX_STALE" | default "") -}}
-{{- $_ := set $merged "SENSITIVE_CONTENT_MAX_STALE" ($sc.maxStale | default "600" | toString) -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_MAX_STALE" (dig "maxStale" "600" $sc | toString) -}}
 {{- end -}}
 {{- if not (index $merged "SENSITIVE_CONTENT_FAIL_MODE" | default "") -}}
-{{- $_ := set $merged "SENSITIVE_CONTENT_FAIL_MODE" ($sc.failMode | default "open") -}}
+{{- $_ := set $merged "SENSITIVE_CONTENT_FAIL_MODE" (dig "failMode" "open" $sc) -}}
 {{- end -}}
 {{- end -}}
 {{- $merged | toYaml -}}

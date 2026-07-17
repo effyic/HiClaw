@@ -1,7 +1,8 @@
 {{- if eq (include "chatai.sensitiveContentEnabled" .) "enabled" }}
+{{- $sc := .Values.sensitiveContent | default dict }}
 {{- $name := include "chatai.sensitiveContent.name" . }}
 {{- $port := include "chatai.sensitiveContent.port" . | int }}
-{{- if not .Values.sensitiveContent.existingSecret }}
+{{- if not (index $sc "existingSecret") }}
 ---
 # Chart-managed credentials Secret (skipped when sensitiveContent.existingSecret
 # references a pre-created Secret). Values follow the chatai.authToken pattern:
@@ -32,7 +33,7 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: sensitive-content
 spec:
-  replicas: {{ .Values.sensitiveContent.replicas | default 1 }}
+  replicas: {{ dig "replicas" 1 $sc }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
@@ -67,7 +68,7 @@ spec:
             - name: SENSITIVE_CONTENT_PORT
               value: {{ $port | quote }}
             - name: SENSITIVE_CONTENT_RETENTION_DAYS
-              value: {{ .Values.sensitiveContent.retentionDays | default 90 | quote }}
+              value: {{ dig "retentionDays" 90 $sc | quote }}
             - name: SENSITIVE_CONTENT_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -93,9 +94,9 @@ spec:
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
-          {{- if .Values.sensitiveContent.resources }}
+          {{- if index $sc "resources" }}
           resources:
-            {{- toYaml .Values.sensitiveContent.resources | nindent 12 }}
+            {{- toYaml (index $sc "resources") | nindent 12 }}
           {{- end }}
 ---
 apiVersion: v1

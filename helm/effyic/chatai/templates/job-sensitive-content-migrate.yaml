@@ -24,8 +24,9 @@ metadata:
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  backoffLimit: {{ .Values.sensitiveContent.migrate.backoffLimit | default 3 }}
-  activeDeadlineSeconds: {{ .Values.sensitiveContent.migrate.activeDeadlineSeconds | default 300 }}
+  # --reuse-values 时旧 release 可能没有 migrate 子树，用 dig 回落默认值
+  backoffLimit: {{ dig "migrate" "backoffLimit" 3 (.Values.sensitiveContent | default dict) }}
+  activeDeadlineSeconds: {{ dig "migrate" "activeDeadlineSeconds" 300 (.Values.sensitiveContent | default dict) }}
   template:
     metadata:
       labels:
