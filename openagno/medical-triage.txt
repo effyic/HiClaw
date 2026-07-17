@@ -1,0 +1,147 @@
+{
+  "kind": "collection_dialogue",
+  "phase": "triage",
+  "confirm_required": false,
+  "ask_batch_size": 2,
+  "prompt_append": "",
+  "instructions_append": "",
+  "knowledge_provider": "",
+  "schema": {
+    "source": "inline",
+    "fields": []
+  },
+  "complete_action": {
+    "type": "mcp",
+    "tool": "mec_create_emr_case"
+  }
+}
+
+
+
+medical-triage.json — 分诊 Agent workflow 配置说明
+================================================
+依据：HiClaw/openagno/src/agno_worker 源码
+发布：MedicalAgentWorkflowTemplates 加载本模板 → Assembler 把产品
+      collectConfig.fields 写入 schema.fields → 写入 agno_agent.workflow。
+
+一、启用方式（collection.py :: resolve_collection_config）
+--------------------------------------------------------
+本模板采用顶层形态：
+  kind == "collection_dialogue"
+此时整份 JSON 既是 agno_agent.workflow，也是采集协议 config
+（prompt/session 读顶层；collection_* 工具也读同一对象）。
+
+等价嵌套形态（代码亦支持，本模板未采用）：
+  { "kind": "任意非 collection_dialogue", "collection": { ...协议字段... } }
+嵌套时协议字段必须放在 collection 内；prompt_append 等仍在顶层。
+
+
+二、字段一览（仅列出源码会读取的键）
+------------------------------------
+
+[顶层 / 协议共用]
+
+kind
+  代码：resolve_collection_config
+  本值："collection_dialogue"
+  作用：启用采集 FSM，并注入 collection_* 工具与 instructions 附录。
+
+phase
+  代码：store.workflow_phase / session.build_session_updates
+  本值："triage"
+  作用：场景标签。注意：一旦启用 collection，session 不会用本字段覆盖
+        session_state.phase；运行时 phase 来自 collection FSM
+        （init/collecting/ready/confirmed/done）。本字段对采集会话基本无效，
+        仅保留便于人读与非 collection 场景兼容。
+
+confirm_required
+  代码：collection.confirm_required → advance_collection_phase
+  本值：false
+  默认（缺省时）：true
+  作用：必填采齐后是否进入 ready、等待 collection_confirm /
+        请求头 x-collection-confirm。分诊为 false：采齐后直接 confirmed。
+
+ask_batch_size
+  代码：collection.ask_batch_size → collection_instructions_appendix
+  本值：2
+  默认：2；非法则回退 2；最终钳制到 [1, 5]
+  作用：每轮 prompt 提示最多追问几个 missing 字段。
+
+prompt_append
+  代码：prompt._collect_prompt_supplements
+  本值：""（空串在 Python 中为假，不追加）
+  作用：非空时追加到 system_prompt。
+
+instructions_append
+  代码：同上 → _build_instructions
+  本值：""
+  作用：非空时追加到 instructions。
+
+knowledge_provider
+  代码：prompt._build_context_filters
+  本值：""
+  作用：非空时写入 context_filters["provider"]；空则回退环境变量
+        AGNO_KNOWLEDGE_PROVIDER。
+
+
+[schema]
+
+schema.source
+  代码：ensure_collection_state / load_schema_into_state / schema_source
+  本值："inline"
+  作用：
+    - "inline"：会话同步时若 state.schema 为空，用 schema.fields 自动装载，
+      并可将 phase 从 init 推到 collecting。
+    - 其它值（含 "mcp"）：不会自动装载；需模型传入 fields_json 调用
+      collection_load_schema。
+
+schema.fields
+  代码：normalize_schema_fields
+  模板初值：[]
+  发布时：Assembler.fillTriageCollectionFields 用产品 collectConfig 覆盖。
+  每项会被规范为 { name, description, required }：
+    - name ← name | fieldKey | label（皆空则丢弃）
+    - enabled === false 则丢弃
+    - required 缺省为 true（布尔或 "1"/"true"/"yes"/"on"）
+  作用：槽位清单；required=true 且未填入 collected 的计入 missing，驱动追问。
+
+
+[complete_action]
+
+complete_action.type
+  代码：suggested_write_tool
+  本值："mcp"
+  作用：必须为 "mcp" 才会解析 tool；否则不提示写库工具。
+
+complete_action.tool
+  代码：suggested_write_tool → instructions 附录第 8 条
+  本值："mec_create_emr_case"
+  作用：仅 prompt 提示「建议调用的写库 MCP」；Worker 不会自动调用。
+        产品要求分诊也可生成病例，故与问诊相同。
+        写库成功后模型应再调 collection_mark_done 记账。
+
+
+三、代码明确不读、勿依赖的键
+----------------------------
+- schema.tool：collection.py 无任何读取；source=mcp 时也不会按本键自动调 MCP。
+- route_key / catalog_type 等：tenant 采集路径未使用。
+
+
+四、分诊运行时要点（代码行为）
+------------------------------
+1. inline + 发布注入的 fields → 首轮 ensure_collection_state 自动装 schema。
+2. confirm_required=false → 无 ready 确认阶段。
+3. complete_action 提示 mec_create_emr_case；是否真写库取决于模型 + MCP 暴露。
+4. Agent 切换靠请求头 role-code，不靠 workflow.phase / kind。
+
+
+五、源码锚点
+------------
+- tenant/collection.py  resolve_collection_config, confirm_required,
+                        ask_batch_size, suggested_write_tool,
+                        ensure_collection_state, advance_collection_phase,
+                        collection_instructions_appendix
+- tenant/prompt.py      prompt_append / instructions_append / knowledge_provider
+- tenant/session.py     collection 启用时不同步 workflow.phase
+- tenant/store.py       workflow_phase
+- aip-hub Assembler     fillTriageCollectionFields → schema.fields

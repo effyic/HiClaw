@@ -1,0 +1,152 @@
+{
+  "kind": "collection_dialogue",
+  "phase": "inquiry",
+  "confirm_required": true,
+  "ask_batch_size": 2,
+  "prompt_append": "",
+  "instructions_append": "",
+  "knowledge_provider": "",
+  "schema": {
+    "source": "mcp",
+    "fields": []
+  },
+  "complete_action": {
+    "type": "mcp",
+    "tool": "mec_create_emr_case"
+  }
+}
+
+
+medical-inquiry.json — 问诊 Agent workflow 配置说明
+================================================
+依据：HiClaw/openagno/src/agno_worker 源码
+发布：MedicalAgentWorkflowTemplates 加载本模板 → 原样写入 agno_agent.workflow
+     （问诊不注入 collectConfig；字段清单运行时由 MCP 拉取）。
+
+一、启用方式（collection.py :: resolve_collection_config）
+--------------------------------------------------------
+本模板采用顶层形态：
+  kind == "collection_dialogue"
+此时整份 JSON 既是 agno_agent.workflow，也是采集协议 config。
+
+等价嵌套形态（代码亦支持，本模板未采用）：
+  { "kind": "任意非 collection_dialogue", "collection": { ...协议字段... } }
+
+
+二、字段一览（仅列出源码会读取的键）
+------------------------------------
+
+[顶层 / 协议共用]
+
+kind
+  代码：resolve_collection_config
+  本值："collection_dialogue"
+  作用：启用采集 FSM + collection_* 工具 + instructions 附录。
+
+phase
+  代码：store.workflow_phase / session.build_session_updates
+  本值："inquiry"
+  作用：场景标签。启用 collection 后不会写入 session_state.phase；
+        运行时 phase 来自 collection FSM。对本会话基本无效，仅人读/兼容。
+
+confirm_required
+  代码：collection.confirm_required → advance_collection_phase /
+        collection_instructions_appendix
+  本值：true
+  默认（缺省时）：true
+  作用：必填采齐后进入 ready，需 collection_confirm 或请求头
+        x-collection-confirm / metadata.confirm 等后再到 confirmed。
+        问诊需要患者确认再写病历，故显式 true。
+
+ask_batch_size
+  代码：collection.ask_batch_size
+  本值：2
+  默认：2；钳制 [1, 5]
+  作用：每轮最多追问几个 missing 字段（写入 prompt 附录）。
+
+prompt_append
+  代码：prompt._collect_prompt_supplements
+  本值：""
+  作用：非空则追加 system_prompt。
+
+instructions_append
+  代码：同上
+  本值：""
+  作用：非空则追加 instructions。
+
+knowledge_provider
+  代码：prompt._build_context_filters
+  本值：""
+  作用：非空则 context_filters["provider"]；否则 AGNO_KNOWLEDGE_PROVIDER。
+
+
+[schema]
+
+schema.source
+  代码：ensure_collection_state / load_schema_into_state / schema_source
+  本值："mcp"
+  作用：不会在 ensure_collection_state 里用 fields 自动装载。
+        模型须先拿到字段列表 JSON，再调用：
+          collection_load_schema(fields_json=...)
+        若无 fields_json 且 source != "inline"，load_schema_into_state 会报错。
+        instructions 附录在 source=="mcp" 或 schema 为空时会提示先 load schema。
+
+schema.fields
+  代码：仅当 source=="inline" 时用于自动装载；source=="mcp" 时本数组不参与自动装载
+  本值：[]
+  作用：占位；问诊字段来自 MCP（产品工具 mec_get_emr_field_list）返回结果，
+        经模型传入 collection_load_schema。normalize_schema_fields 接受的键：
+        name | fieldKey | label、description、required、enabled。
+
+
+[complete_action]
+
+complete_action.type
+  代码：suggested_write_tool
+  本值："mcp"
+  作用：须为 "mcp" 才识别 tool。
+
+complete_action.tool
+  代码：suggested_write_tool → instructions 附录
+  本值："mec_create_emr_case"
+  作用：仅提示建议写库 MCP；不自动调用。成功后应 collection_mark_done。
+
+
+三、代码明确不读、勿依赖的键
+----------------------------
+- schema.tool：源码无读取。source=mcp 时 Worker 不会按配置自动调用
+  mec_get_emr_field_list；依赖 MCP 工具暴露 + Agent instructions /
+  工具 description 引导模型先调字段列表 MCP，再 collection_load_schema。
+- route_key / catalog_type：tenant 采集路径未使用。
+
+
+四、问诊运行时要点（代码行为）
+------------------------------
+1. 首轮 schema 为空 → phase=init；附录要求先 load schema（MCP 路径）。
+2. confirm_required=true → 采齐后 ready，确认后 confirmed，再写库更符合流程。
+3. 写库 MCP 始终可由模型调用（含早写/多次写）；completed 表示至少写过一次，
+   不冻结 FSM，仍可继续 update_fields 再写。
+4. Agent 切换靠 role-code，不靠 workflow.phase。
+
+
+五、与分诊模板的差异（产品 + 代码）
+----------------------------------
+| 项                 | 分诊 (medical-triage)     | 问诊 (medical-inquiry)        |
+|--------------------|---------------------------|-------------------------------|
+| phase              | triage                    | inquiry                       |
+| confirm_required   | false                     | true                          |
+| schema.source      | inline                    | mcp                           |
+| schema.fields      | 发布时 collectConfig 注入 | 运行时 MCP → load_schema      |
+| complete_action    | mec_create_emr_case       | mec_create_emr_case（同）     |
+
+
+六、源码锚点
+------------
+- tenant/collection.py  resolve_collection_config, load_schema_into_state,
+                        confirm_required, ask_batch_size, suggested_write_tool,
+                        collection_instructions_appendix, build_collection_tools
+- tenant/prompt.py      prompt_append / instructions_append / knowledge_provider
+- tenant/session.py     sync_collection_into_session_state
+- tenant/data.py        is_collection_enabled → 挂载 collection_* 工具
+- aip-hub MCP           mec_get_emr_field_list / mec_create_emr_case
+                        （工具名在 MCP 侧，不在本 JSON 的 schema.tool）
