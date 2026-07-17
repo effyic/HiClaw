@@ -5,6 +5,11 @@ import os
 import time
 from typing import Any
 
+# Stored on run_context as a private attribute — MUST NOT live in
+# ``dependencies`` (those are injected into the LLM prompt when
+# ``add_dependencies_to_context=True`` and would explode token usage).
+RUN_CACHE_ATTR = "_effyic_tenant_run_cache"
+# Legacy key kept for docs / grep; no longer written into dependencies.
 RUN_CACHE_KEY = "_tenant_run_cache"
 _MISSING = object()
 
@@ -43,15 +48,15 @@ class TTLCache:
 
 
 def ensure_run_cache(run_context: Any) -> dict[str, Any]:
-    """Return per-run cache dict stored on run_context.dependencies."""
-    deps = getattr(run_context, "dependencies", None)
-    if deps is None:
-        run_context.dependencies = {}
-        deps = run_context.dependencies
-    cache = deps.get(RUN_CACHE_KEY)
+    """Return per-run cache dict stored privately on run_context."""
+    cache = getattr(run_context, RUN_CACHE_ATTR, None)
     if not isinstance(cache, dict):
         cache = {}
-        deps[RUN_CACHE_KEY] = cache
+        setattr(run_context, RUN_CACHE_ATTR, cache)
+    # Drop legacy dependency key if a previous code path left it behind.
+    deps = getattr(run_context, "dependencies", None)
+    if isinstance(deps, dict):
+        deps.pop(RUN_CACHE_KEY, None)
     return cache
 
 

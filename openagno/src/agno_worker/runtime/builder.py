@@ -81,7 +81,10 @@ class AgentBuilder:
             pre_hooks=[self._make_pre_hook()],
             post_hooks=[self._make_post_hook()],
             add_history_to_context=True,
-            add_dependencies_to_context=True,
+            # Only slim public deps (tenant / user_profile / role_catalog) belong in
+            # the LLM prompt. Heavy objects stay in dependencies for hooks/tools but
+            # must not be serialized into <additional context>.
+            add_dependencies_to_context=False,
             markdown=True,
             cache_callables=False,
             dependencies={

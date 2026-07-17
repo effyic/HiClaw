@@ -52,8 +52,8 @@ class TenantAgentService:
             getattr(run_context, "session_state", None) or {}
         )
         tenant_ctx = self._resolver.resolve(run_context)
-        # Sync collection FSM before MCP/prompt so confirm headers unlock write tools
-        # on this same run (required for multi-replica chat continuity).
+        # Sync collection FSM before MCP/prompt so confirm headers apply this run
+        # (required for multi-replica chat continuity).
         from agno_worker.tenant.collection import (
             is_collection_enabled,
             sync_collection_into_session_state,
@@ -127,13 +127,8 @@ class TenantAgentService:
     def get_mcp_servers(self, run_context: Any) -> list[MCPServerConfig]:
         if not is_run_prepared(run_context):
             self.prepare_run_context(run_context)
-        # Base servers are cached without collection write-gates so that mid-run
-        # collection_complete can unlock tools on the next Agno tools() resolve.
-        from agno_worker.tenant.collection import apply_collection_mcp_excludes
-
         servers = ensure_run_cache(run_context).get("mcp_servers")
-        base = list(servers) if isinstance(servers, list) else []
-        return apply_collection_mcp_excludes(run_context, base)
+        return list(servers) if isinstance(servers, list) else []
 
     def get_skill_catalog(
         self,

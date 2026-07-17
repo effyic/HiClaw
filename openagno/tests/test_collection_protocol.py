@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agno_worker.hooks.protocols import MCPServerConfig
 from agno_worker.runtime.storage import SLIM_SESSION_STATE_KEYS, slim_session_state
 from agno_worker.tenant.collection import (
     COLLECTION_STATE_KEY,
@@ -14,14 +13,12 @@ from agno_worker.tenant.collection import (
     PHASE_DONE,
     PHASE_READY,
     advance_collection_phase,
-    apply_collection_mcp_excludes,
-    authorize_complete,
     confirm_collection,
     ensure_collection_state,
-    is_write_authorized,
     load_schema_into_state,
     mark_collection_done,
     resolve_collection_config,
+    store_collection_draft,
     sync_collection_into_session_state,
     update_collected_fields,
 )
@@ -43,7 +40,6 @@ INQUIRY_WORKFLOW = {
             ],
         },
         "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"},
-        "gated_mcp_tools": ["mec_create_emr_case"],
     },
 }
 
@@ -71,43 +67,6 @@ def test_slim_persists_collection_for_cluster():
     assert "_debug_request" not in slim
 
 
-def test_confirm_alone_does_not_unlock_write_tools():
-    config = resolve_collection_config(INQUIRY_WORKFLOW)
-    state = load_schema_into_state({}, None, config)
-    state = update_collected_fields(state, {"主诉": "头痛", "持续时间": "3天"}, config)
-    assert state["phase"] == PHASE_READY
-    assert not is_write_authorized(state, config)
-
-    state = confirm_collection(state, config)
-    assert state["phase"] == PHASE_CONFIRMED
-    # Scheme A: confirm is not enough — need collection_complete
-    assert not is_write_authorized(state, config)
-
-    servers = [
-        MCPServerConfig(
-            name="medical",
-            url="http://example/mcp",
-            include_tools=["mec_get_emr_field_list", "mec_create_emr_case"],
-        )
-    ]
-    ctx = SimpleNamespace(
-        session_state={
-            "workflow": INQUIRY_WORKFLOW,
-            COLLECTION_STATE_KEY: state,
-        },
-        metadata={},
-        dependencies={},
-    )
-    excluded = apply_collection_mcp_excludes(ctx, servers)
-    assert "mec_create_emr_case" in excluded[0].exclude_tools
-
-    state = authorize_complete(state, config, "# 病历")
-    assert is_write_authorized(state, config)
-    ctx.session_state[COLLECTION_STATE_KEY] = state
-    opened = apply_collection_mcp_excludes(ctx, servers)
-    assert "mec_create_emr_case" not in (opened[0].exclude_tools or [])
-
-
 def test_unknown_field_names_rejected():
     config = resolve_collection_config(INQUIRY_WORKFLOW)
     state = load_schema_into_state({}, None, config)
@@ -128,21 +87,41 @@ def test_update_requires_schema():
         update_collected_fields(state, {"主诉": "头痛"}, config)
 
 
-def test_complete_and_done():
+def test_early_write_and_continue_asking():
+    """Allow mark_done with missing fields; FSM returns to collecting."""
+    config = resolve_collection_config(INQUIRY_WORKFLOW)
+    state = load_schema_into_state({}, None, config)
+    state = update_collected_fields(state, {"主诉": "咳嗽"}, config)
+    assert state["phase"] == PHASE_COLLECTING
+    assert "持续时间" in state["missing"]
+
+    state = mark_collection_done(state, config, result="partial-ok")
+    assert state["completed"] is True
+    assert state["phase"] == PHASE_COLLECTING
+    assert "持续时间" in state["missing"]
+
+
+def test_complete_done_then_supplement_and_rewrite():
     config = resolve_collection_config(INQUIRY_WORKFLOW)
     state = load_schema_into_state({}, None, config)
     state = update_collected_fields(
         state, {"主诉": "咳嗽", "持续时间": "1周"}, config
     )
+    assert state["phase"] == PHASE_READY
     state = confirm_collection(state, config)
-    state = authorize_complete(state, config, "# 病历\n咳嗽一周")
-    assert state["completion_authorized"] is True
+    assert state["phase"] == PHASE_CONFIRMED
+    state = store_collection_draft(state, config, "# 病历\n咳嗽一周")
     assert state["draft_payload"].startswith("# 病历")
-    assert is_write_authorized(state, config)
     state = mark_collection_done(state, config, result="ok")
     assert state["phase"] == PHASE_DONE
     assert state["completed"] is True
-    assert not is_write_authorized(state, config)
+
+    # User later adds optional field — stay writable
+    state = update_collected_fields(state, {"过敏史": "青霉素"}, config)
+    assert state["completed"] is True
+    assert state["phase"] == PHASE_DONE
+    state = mark_collection_done(state, config, result="updated")
+    assert state["complete_result"] == "updated"
 
 
 def test_sync_does_not_use_workflow_scenario_phase():
@@ -169,4 +148,3 @@ def test_sync_does_not_use_workflow_scenario_phase():
         resolve_collection_config(INQUIRY_WORKFLOW),
     )
     assert advanced["phase"] == PHASE_CONFIRMED
-    assert not is_write_authorized(advanced, resolve_collection_config(INQUIRY_WORKFLOW))

@@ -206,7 +206,7 @@ RequestFilterPipeline.apply_post_filter()  # request_post_filter_hook (可选)
 
 ### 5.1 角色（Agent）解析 — 选定 `agno_agent` 行
 
-**Worker 不会根据** `workflow` **JSON、**`route_key` **或** `kind` **自动切换 Agent。** 每次 run 加载哪一行配置，仅由解析出的 `role_code` 决定：
+**Worker 不会根据** `workflow` **JSON 的** `kind` **/** `phase` **自动切换 Agent。** 每次 run 加载哪一行配置，仅由解析出的 `role_code` 决定：
 
 ```
 HTTP role-code / x-role-code（或 query role_code）
@@ -244,8 +244,7 @@ HTTP role-code / x-role-code（或 query role_code）
         {"name": "持续时间", "required": true}
       ]
     },
-    "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"},
-    "gated_mcp_tools": ["mec_create_emr_case"]
+    "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"}
   }
 }
 ```
@@ -257,11 +256,11 @@ HTTP role-code / x-role-code（或 query role_code）
 | `collection_load_schema` | 加载字段清单（`schema.source=inline` 时通常已自动加载） |
 | `collection_update_fields` | 合并采集值（**仅允许 schema 内字段名**）并重算 missing |
 | `collection_status` | 只读进度 |
-| `collection_confirm` | 用户确认 |
-| `collection_complete` | 写入 draft，设置 `completion_authorized`（**写库闸门**） |
-| `collection_mark_done` | 写库副作用成功后收尾 |
+| `collection_confirm` | 用户确认（可选，由 `confirm_required` 控制） |
+| `collection_complete` | 可选：写入 `draft_payload` 快照 |
+| `collection_mark_done` | 写库 / 更新成功后记账；允许早写与多次写 |
 
-**写库闸门（Scheme A）**：必填未齐、未确认、或未调用 `collection_complete` 时，将 `gated_mcp_tools` / `complete_action.tool` 加入 MCP `exclude_tools`。`cache_callables=False` 下 Agno 每步重算 tools，同轮 `collection_complete` 后可解锁写库 MCP。
+写库 MCP（如 `mec_create_emr_case`）始终对模型可见，可早写、可多次更新。缺必填字段时由 prompt + `missing` 驱动继续追问；`completed` 表示「至少成功写过一次」，不冻结 FSM——用户补充病情后可再 `update_fields` 并再次写库。
 
 客户端可用请求头 `x-collection-confirm: true` 在本轮标记确认。同步回复末尾附加 `<!--COLLECTION_STATUS {...}-->`；流式场景请读 `session_state.collection` 或 run `metadata.collection_status`（不要只依赖 SSE 文本标记）。
 

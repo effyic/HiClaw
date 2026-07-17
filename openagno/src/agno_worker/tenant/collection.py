@@ -4,6 +4,10 @@ State lives only in ``session_state["collection"]``, which is persisted with the
 Agno session row (``AGNO_DB_URL``). That makes multi-turn progress safe under
 clustered agno_worker replicas — no in-process memory is required.
 
+Write/update MCP tools from agent config stay visible. Missing required fields
+drive follow-up questions via prompt + ``collection_*`` tools; the model may
+still save or update a case early or repeatedly.
+
 Enable by publishing ``agno_agent.workflow`` as either::
 
     {"kind": "collection_dialogue", "schema": {...}, "complete_action": {...}}
@@ -17,8 +21,6 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
-
-from agno_worker.hooks.protocols import MCPServerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -79,19 +81,15 @@ def ask_batch_size(config: dict[str, Any] | None) -> int:
     return max(1, min(size, 5))
 
 
-def gated_mcp_tools(config: dict[str, Any] | None) -> list[str]:
+def suggested_write_tool(config: dict[str, Any] | None) -> str | None:
+    """Return complete_action MCP tool name for prompt hints."""
     if not config:
-        return []
-    names: list[str] = []
-    raw = config.get("gated_mcp_tools")
-    if isinstance(raw, list):
-        names.extend(str(item).strip() for item in raw if str(item).strip())
+        return None
     action = config.get("complete_action")
     if isinstance(action, dict) and str(action.get("type") or "").strip() == "mcp":
         tool = str(action.get("tool") or "").strip()
-        if tool and tool not in names:
-            names.append(tool)
-    return names
+        return tool or None
+    return None
 
 
 def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
@@ -145,7 +143,6 @@ def empty_collection_state() -> dict[str, Any]:
         "collected": {},
         "missing": [],
         "user_confirmed": False,
-        "completion_authorized": False,
         "completed": False,
         "draft_payload": None,
         "complete_result": None,
@@ -170,9 +167,6 @@ def ensure_collection_state(
         phase = str(existing.get("phase") or PHASE_INIT).strip()
         state["phase"] = phase if phase in _VALID_PHASES else PHASE_INIT
         state["user_confirmed"] = _as_bool(existing.get("user_confirmed"), False)
-        state["completion_authorized"] = _as_bool(
-            existing.get("completion_authorized"), False
-        )
         state["completed"] = _as_bool(existing.get("completed"), False)
 
     if config and not state["schema"]:
@@ -192,13 +186,13 @@ def advance_collection_phase(
     state: dict[str, Any],
     config: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Deterministically advance phase from collected/missing/confirm flags."""
-    out = ensure_collection_state(state, config)
-    if out["completed"]:
-        out["phase"] = PHASE_DONE
-        out["missing"] = []
-        return out
+    """Deterministically advance phase from collected/missing/confirm flags.
 
+    ``completed`` means \"wrote at least once\" and does not freeze the FSM:
+    if the user later supplies more fields (or required ones are still missing),
+    phase returns to collecting so the model keeps asking.
+    """
+    out = ensure_collection_state(state, config)
     if not out["schema"]:
         out["phase"] = PHASE_INIT
         return out
@@ -206,31 +200,19 @@ def advance_collection_phase(
     out["missing"] = compute_missing(out["schema"], out["collected"])
     if out["missing"]:
         out["phase"] = PHASE_COLLECTING
-        out["completion_authorized"] = False
         return out
 
     # schema loaded and required fields filled
     if confirm_required(config) and not out["user_confirmed"]:
         out["phase"] = PHASE_READY
-        out["completion_authorized"] = False
+        return out
+
+    if out["completed"]:
+        out["phase"] = PHASE_DONE
         return out
 
     out["phase"] = PHASE_CONFIRMED
     return out
-
-
-def is_write_authorized(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
-    """Gated MCP write tools unlock only after collection_complete (Scheme A)."""
-    current = ensure_collection_state(state, config)
-    if current["completed"]:
-        return False
-    if not current["schema"]:
-        return False
-    if current["missing"]:
-        return False
-    if confirm_required(config) and not current["user_confirmed"]:
-        return False
-    return bool(current.get("completion_authorized"))
 
 
 def _request_confirm_flag(run_context: Any) -> bool:
@@ -356,26 +338,18 @@ def confirm_collection(
     return advance_collection_phase(out, config)
 
 
-def authorize_complete(
+def store_collection_draft(
     state: dict[str, Any],
     config: dict[str, Any] | None,
     draft_payload: str | None = None,
 ) -> dict[str, Any]:
+    """Store an optional draft_payload snapshot (e.g. markdown case text)."""
     out = ensure_collection_state(state, config)
-    if out["missing"]:
-        raise ValueError(
-            "cannot complete while required fields are missing: "
-            + ", ".join(out["missing"])
-        )
-    if confirm_required(config) and not out["user_confirmed"]:
-        raise ValueError("user confirmation required before complete")
-    out["user_confirmed"] = True
-    out["completion_authorized"] = True
     if draft_payload is not None and str(draft_payload).strip():
         out["draft_payload"] = str(draft_payload).strip()
-    out = advance_collection_phase(out, config)
-    out["phase"] = PHASE_CONFIRMED
-    return out
+    if not out["missing"] and out["schema"]:
+        out["user_confirmed"] = True
+    return advance_collection_phase(out, config)
 
 
 def mark_collection_done(
@@ -383,22 +357,14 @@ def mark_collection_done(
     config: dict[str, Any] | None,
     result: Any = None,
 ) -> dict[str, Any]:
+    """Record that a write / update MCP succeeded. Allows early and repeated writes."""
     out = ensure_collection_state(state, config)
-    if out["missing"]:
-        raise ValueError(
-            "cannot mark done while required fields are missing: "
-            + ", ".join(out["missing"])
-        )
-    if confirm_required(config) and not out["user_confirmed"]:
-        raise ValueError("user confirmation required before mark_done")
     out["completed"] = True
-    out["completion_authorized"] = False
-    out["phase"] = PHASE_DONE
     if result is not None:
         out["complete_result"] = (
             result if isinstance(result, (str, dict, list)) else str(result)
         )
-    return out
+    return advance_collection_phase(out, config)
 
 
 def workflow_from_run_context(run_context: Any) -> dict[str, Any]:
@@ -460,55 +426,6 @@ def sync_collection_into_session_state(
     return merged
 
 
-def apply_collection_mcp_excludes(
-    run_context: Any,
-    servers: list[MCPServerConfig],
-) -> list[MCPServerConfig]:
-    """Hide gated write MCP tools until collection_complete sets completion_authorized.
-
-    Safe to call on every tools() resolution: with ``cache_callables=False``, Agno
-    re-resolves tools after each tool step, so mid-run complete can unlock writes.
-    """
-    workflow = workflow_from_run_context(run_context)
-    config = resolve_collection_config(workflow)
-    if not config or not servers:
-        return servers
-
-    gated = gated_mcp_tools(config)
-    if not gated:
-        return servers
-
-    state = get_collection_state(run_context)
-    if is_write_authorized(state, config):
-        return servers
-
-    gated_set = set(gated)
-    updated: list[MCPServerConfig] = []
-    for server in servers:
-        exclude = list(server.exclude_tools or [])
-        changed = False
-        for name in gated_set:
-            if name not in exclude:
-                exclude.append(name)
-                changed = True
-        if not changed:
-            updated.append(server)
-            continue
-        updated.append(
-            MCPServerConfig(
-                name=server.name,
-                url=server.url,
-                command=server.command,
-                transport=server.transport,
-                env=dict(server.env or {}),
-                headers=dict(server.headers or {}),
-                include_tools=list(server.include_tools or []),
-                exclude_tools=exclude,
-            )
-        )
-    return updated
-
-
 def schema_source(config: dict[str, Any] | None) -> str:
     if not config:
         return "inline"
@@ -527,6 +444,7 @@ def collection_instructions_appendix(
     missing = current.get("missing") or []
     focus = missing[:batch]
     source = schema_source(config)
+    write_tool = suggested_write_tool(config)
     lines = [
         "## collection_protocol",
         f"phase: {current.get('phase')}",
@@ -534,8 +452,7 @@ def collection_instructions_appendix(
         f"ask_batch_size: {batch}",
         f"confirm_required: {confirm_required(config)}",
         f"user_confirmed: {current.get('user_confirmed')}",
-        f"completion_authorized: {current.get('completion_authorized')}",
-        f"completed: {current.get('completed')}",
+        f"completed_once: {current.get('completed')}",
         f"missing: {json.dumps(missing, ensure_ascii=False)}",
         f"collected: {json.dumps(current.get('collected') or {}, ensure_ascii=False)}",
         "",
@@ -554,26 +471,24 @@ def collection_instructions_appendix(
         [
             f"2. Each turn ask at most {batch} items from missing; then call "
             "collection_update_fields with ONLY schema field names.",
-            "3. Do not invent completion; call collection_status to inspect progress.",
-            "4. When missing is empty, summarize for the user"
+            "3. While missing is non-empty, keep asking the patient for those fields. "
+            "You may still call write/update MCP if the user asks to save a partial case.",
+            "4. Do not invent completion; call collection_status to inspect progress.",
+            "5. When missing is empty, summarize for the user"
             + (
-                " and ask for confirmation, then collection_confirm."
+                " and ask for confirmation (collection_confirm or wait for confirm)."
                 if confirm_required(config)
                 else "."
             ),
-            "5. After confirmation call collection_complete(draft_payload=...) — "
-            "this is required to unlock gated MCP write tools.",
-            "6. Only after collection_complete succeeds, call the configured MCP write "
-            "tool, then collection_mark_done. Never call write MCP tools earlier.",
+            "6. Write/update MCP tools are always available. After a successful write, "
+            "call collection_mark_done(result=...). User may later add symptoms — "
+            "update fields and write again.",
         ]
     )
     if focus:
         lines.append(f"7. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
-    action = (config or {}).get("complete_action")
-    if isinstance(action, dict) and action.get("tool"):
-        lines.append(
-            f"8. complete_action MCP tool after authorize: {action.get('tool')}"
-        )
+    if write_tool:
+        lines.append(f"8. Suggested write/update MCP tool: {write_tool}")
     return "\n".join(lines)
 
 
@@ -584,7 +499,6 @@ def collection_status_payload(state: dict[str, Any]) -> dict[str, Any]:
         "missing": list(state.get("missing") or []),
         "ready": not bool(state.get("missing")) and bool(state.get("schema")),
         "user_confirmed": bool(state.get("user_confirmed")),
-        "completion_authorized": bool(state.get("completion_authorized")),
         "completed": bool(state.get("completed")),
         "collected_keys": sorted((state.get("collected") or {}).keys()),
     }
@@ -741,7 +655,6 @@ def build_collection_tools() -> list[Any]:
                 "collected": state["collected"],
                 "schema": state["schema"],
                 "user_confirmed": state["user_confirmed"],
-                "completion_authorized": state["completion_authorized"],
                 "completed": state["completed"],
             },
             ensure_ascii=False,
@@ -774,9 +687,8 @@ def build_collection_tools() -> list[Any]:
     @tool(
         name="collection_complete",
         description=(
-            "Required gate before write MCP tools: fields must be complete "
-            "(and confirmed if required). Pass draft_payload (e.g. markdown). "
-            "Sets completion_authorized=true so gated MCP write tools become visible."
+            "Optional: store a draft_payload snapshot (e.g. markdown case text) "
+            "before or after calling the write/update MCP tool."
         ),
     )
     def collection_complete(
@@ -793,28 +705,26 @@ def build_collection_tools() -> list[Any]:
                 ensure_ascii=False,
             )
         try:
-            state = authorize_complete(
+            state = store_collection_draft(
                 get_collection_state(ctx),
                 config,
                 draft_payload or None,
             )
             set_collection_state(ctx, state)
-            action = config.get("complete_action") if isinstance(config, dict) else None
-            next_tool = None
-            if isinstance(action, dict) and str(action.get("type") or "") == "mcp":
-                next_tool = str(action.get("tool") or "").strip() or None
+            next_tool = suggested_write_tool(config)
             return json.dumps(
                 {
                     "ok": True,
                     "phase": state["phase"],
-                    "completion_authorized": True,
+                    "missing": state["missing"],
                     "draft_payload": state.get("draft_payload"),
-                    "call_mcp_tool": next_tool,
+                    "suggested_mcp_tool": next_tool,
                     "hint": (
-                        f"Now call MCP tool {next_tool} with the draft payload, "
-                        "then collection_mark_done."
+                        f"Call MCP tool {next_tool} with the draft (or current collected "
+                        "fields), then collection_mark_done. You may write again later "
+                        "after the user adds more information."
                         if next_tool
-                        else "Completion authorized; call collection_mark_done when finished."
+                        else "Draft stored; call collection_mark_done after write succeeds."
                     ),
                 },
                 ensure_ascii=False,
@@ -824,7 +734,10 @@ def build_collection_tools() -> list[Any]:
 
     @tool(
         name="collection_mark_done",
-        description="Mark collection completed after gated write MCP (or side effect) succeeded.",
+        description=(
+            "Record that a write/update MCP call succeeded. Safe after early or "
+            "partial saves; user may continue adding fields and write again."
+        ),
     )
     def collection_mark_done(
         result: str = "",
@@ -847,7 +760,17 @@ def build_collection_tools() -> list[Any]:
             )
             set_collection_state(ctx, state)
             return json.dumps(
-                {"ok": True, "phase": state["phase"], "completed": True},
+                {
+                    "ok": True,
+                    "phase": state["phase"],
+                    "completed": True,
+                    "missing": state["missing"],
+                    "hint": (
+                        "Keep asking for missing fields."
+                        if state.get("missing")
+                        else "Required fields complete; further updates still allowed."
+                    ),
+                },
                 ensure_ascii=False,
             )
         except Exception as exc:
@@ -870,6 +793,5 @@ def snapshot_collection_for_log(state: dict[str, Any]) -> dict[str, Any]:
         "missing": list(state.get("missing") or []),
         "collected_keys": sorted((state.get("collected") or {}).keys()),
         "user_confirmed": bool(state.get("user_confirmed")),
-        "completion_authorized": bool(state.get("completion_authorized")),
         "completed": bool(state.get("completed")),
     }
