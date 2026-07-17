@@ -1,8 +1,8 @@
 # ============================================================
-# HiClaw sensitive-content — 敏感内容规则管理服务
+# HiClaw sensitive-content — 敏感内容规则管理后端
 # ============================================================
 # python-slim 多阶段构建：build 阶段装依赖进 venv，运行阶段仅
-# 携带 venv + migrations，镜像内不含构建工具链。
+# 携带 venv + migrations。不含 web/ 前端（本地联调，不部署）。
 #
 # Build args:
 #   HIGRESS_REGISTRY - 基础镜像 registry

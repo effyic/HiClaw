@@ -88,6 +88,38 @@ curl -X DELETE "http://localhost/effyic/v1/sessions/<agno-session-id>" \
 
 
 
+## 敏感词后端（可选）
+
+仅部署 `sensitive-content` **API 后端**（不部署 `sensitive-content/web` 前端）。  
+PostgreSQL 与 openagno Worker 共用上方 `postgres.*`（独立 schema `sensitive_content`）。
+
+前置：目标库已存在（ChatAI 已装过且 `dbInit` 跑完，或已手工建库）；镜像已构建并装入集群。
+
+```bash
+make build-sensitive-content
+minikube image load hiclaw/sensitive-content:latest
+
+helm upgrade effyic-chatai helm/effyic/chatai \
+  --namespace effyic \
+  --reuse-values \
+  --set sensitiveContent.enabled=true \
+  --timeout 10m
+```
+
+验证：
+
+```bash
+kubectl get deploy,svc,ingress -l app.kubernetes.io/component=sensitive-content -n effyic
+
+ADMIN=$(kubectl get secret effyic-chatai-sensitive-content-auth -n effyic \
+  -o jsonpath='{.data.SENSITIVE_CONTENT_ADMIN_TOKEN}' | base64 -d)
+
+curl "http://localhost/effyic/v1/tenants/1/sensitive-rules?page=1&page_size=50" \
+  -H "Authorization: Bearer $ADMIN"
+```
+
+前端请在本地 `sensitive-content/web` 开发联调，指向上述网关地址即可。
+
 ## 卸载
 
 ```bash

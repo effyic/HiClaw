@@ -1,0 +1,13 @@
+# 前端本地联调，不进后端镜像构建上下文
+web/
+**/__pycache__/
+**/*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.git/
+tests/
+docs/
+scripts/

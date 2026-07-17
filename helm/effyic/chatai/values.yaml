@@ -76,47 +76,37 @@ auth:
   token: ""                 # leave empty to auto-generate
   secretKey: CHATAI_API_TOKEN
 
-# ── Sensitive content moderation service (optional) ───────────────────────
-# Rule/type management + policy snapshot service consumed by Agno Workers.
-# Shares the chatai PostgreSQL database (dedicated sensitive_content schema);
-# DDL is applied only by the pre-install/pre-upgrade migration Job.
+# ── Sensitive content 后端（可选）─────────────────────────────────────────
+# 仅部署管理/快照 API（Deployment + migrate Job + 网关 Ingress）。
+# 不包含 sensitive-content/web 前端——前端本地联调，不进镜像、不进 Chart。
+# PostgreSQL：与 openagno Worker 共用上方 postgres.*（独立 schema sensitive_content）。
 #
-# Fresh-install ordering constraint: the migration Job is a pre-install hook,
-# while the db-init Job (which runs `CREATE DATABASE` when postgres.database
-# does not exist yet) is post-install. On a brand-new install against a
-# Postgres server where the target database has NOT been created yet, the
-# migration Job will retry for up to 120s and then fail, aborting the install.
-# Either pre-create postgres.database manually, or install first with
-# `sensitiveContent.enabled=false` and enable it via `helm upgrade` afterwards
-# (the pre-upgrade migration Job then finds the database created by db-init).
+# 全新安装顺序：migrate 是 pre-install，db-init 是 post-install。
+# 目标库尚不存在时，先保持 enabled=false 装完 ChatAI，再建库后再 upgrade 开启；
+# 或事先手工 CREATE DATABASE。升级场景（库已存在）可直接 enabled=true。
 sensitiveContent:
   enabled: false
   image:
     repository: hiclaw/sensitive-content
     tag: latest
   replicas: 1
-  port: 8091                # keep in sync with the image default SENSITIVE_CONTENT_PORT
-  retentionDays: 90         # hit_event retention (days)
+  port: 8091                # 与镜像默认 SENSITIVE_CONTENT_PORT 保持一致
+  retentionDays: 90         # hit_event 保留天数
   resources: {}
-  # Credentials — leave empty to auto-generate into a chart-managed Secret,
-  # or set existingSecret to reference a pre-created Secret containing keys:
-  #   SENSITIVE_CONTENT_ADMIN_TOKEN / SENSITIVE_CONTENT_RUNTIME_TOKEN /
-  #   SENSITIVE_CONTENT_FINGERPRINT_KEY
-  adminToken: ""            # management API token (platform admin)
-  runtimeToken: ""          # internal API token (snapshot / hit-events)
-  fingerprintKey: ""        # HMAC key for request/session fingerprints
+  # 凭据：留空则 Chart 自动生成写入 Secret；或用 existingSecret 引用已有 Secret
+  # （键：SENSITIVE_CONTENT_ADMIN_TOKEN / RUNTIME_TOKEN / FINGERPRINT_KEY）
+  adminToken: ""
+  runtimeToken: ""
+  fingerprintKey: ""
   existingSecret: ""
-  # Gateway route for the admin/metrics API (frontend-facing). Exposes ONLY
-  # /api/v1/tenants/* (management + metrics + audit-logs); /internal/v1/* stays
-  # cluster-internal. Default public prefix: {gateway.path}/v1/tenants, i.e.
-  # /effyic/v1/tenants -> rewritten to /api/v1/tenants before forwarding.
-  gatewayPath: ""           # override the public prefix; empty = {gateway.path}/v1/tenants
-  # Worker-side detection settings (injected into Agno Worker env)
+  # 管理 API 网关前缀：默认 {gateway.path}/v1/tenants → 重写为 /api/v1/tenants
+  # 仅暴露管理/统计；/internal/v1/* 仅集群内访问
+  gatewayPath: ""
+  # 注入 Agno Worker 的检测端配置（与后端共用同一 postgres.*）
   cachePath: /var/lib/agno/moderation/policy-snapshot.json
-  refreshInterval: "30"     # snapshot refresh interval (seconds)
-  maxStale: "600"           # max snapshot staleness before warning (seconds)
-  failMode: open            # open = skip detection when no snapshot; closed = 503
-  # Migration Job (helm.sh/hook: pre-install,pre-upgrade)
+  refreshInterval: "30"
+  maxStale: "600"
+  failMode: open            # open = 无快照时跳过检测；closed = 503
   migrate:
     backoffLimit: 3
     activeDeadlineSeconds: 300
