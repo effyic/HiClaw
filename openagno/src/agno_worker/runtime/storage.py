@@ -1,4 +1,4 @@
-"""Per-request session storage scrubbing controlled by x-debug-request header."""
+"""Per-request session storage scrubbing / skip controlled by request headers."""
 from __future__ import annotations
 
 from typing import Any

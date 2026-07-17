@@ -12,7 +12,7 @@ from agno_worker.db import create_agno_db
 from agno_worker.hooks.filters import RequestFilterPipeline
 from agno_worker.hooks.protocols import UserContext
 from agno_worker.hooks.registry import HookRegistry
-from agno_worker.api.identity import resolve_debug_request, resolve_enable_thinking
+from agno_worker.api.identity import resolve_debug_request, resolve_enable_thinking, resolve_ignore_db
 from agno_worker.moderation.context import (
     RequestContext as ModerationRequestContext,
     new_request_id,
@@ -22,6 +22,7 @@ from agno_worker.moderation.context import (
 from agno_worker.moderation.errors import SensitivePolicyUnavailableError
 from agno_worker.moderation.models import DecisionKind
 from agno_worker.runtime.builder import AgentBuilder
+from agno_worker.runtime.ignore_db import reset_ignore_db, set_ignore_db
 from agno_worker.runtime.thinking import reset_enable_thinking, set_enable_thinking
 from agno_worker.tenant.service import TenantAgentService
 from agno_worker.tenant.store import clear_agent_store_cache
@@ -156,12 +157,15 @@ class AgnoRuntime:
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
+        ignore_db = resolve_ignore_db(ctx.headers)
+        run_metadata["ignore_db"] = ignore_db
         enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
         run_metadata["enable_thinking"] = enable_thinking
         self._attach_request_headers(ctx, run_metadata)
         target = self._resolve_run_target()
+        resolved_session_id = ctx.session_id or session_id
         kwargs = self._build_run_kwargs(
-            session_id=ctx.session_id or session_id,
+            session_id=resolved_session_id,
             user_id=ctx.user_id or user_id,
             tenant_id=ctx.tenant_id or tenant_id,
             role_code=ctx.role_code,
@@ -176,11 +180,13 @@ class AgnoRuntime:
             session_id=ctx.session_id or session_id,
             request_id=new_request_id(),
         )
+        ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
         try:
             response = await target.arun(message, **kwargs)
         finally:
             reset_enable_thinking(thinking_token)
             reset_request_context(mod_token)
+            reset_ignore_db(ignore_token)
         resolved_session_id = (
             str(getattr(response, "session_id", "") or "")
             or ctx.session_id
@@ -247,14 +253,17 @@ class AgnoRuntime:
         )
         run_metadata = self._request_filters.apply_pre_filter(ctx, metadata)
         run_metadata["debug_request"] = resolve_debug_request(ctx.headers)
+        ignore_db = resolve_ignore_db(ctx.headers)
+        run_metadata["ignore_db"] = ignore_db
         enable_thinking = self._resolve_enable_thinking(ctx, run_metadata)
         run_metadata["enable_thinking"] = enable_thinking
         self._attach_request_headers(ctx, run_metadata)
         # Agno only emits ReasoningContentDelta when stream_events=True.
         agno_stream_events = bool(stream_events or enable_thinking)
         target = self._resolve_run_target()
+        resolved_session_id = ctx.session_id or session_id
         kwargs = self._build_run_kwargs(
-            session_id=ctx.session_id or session_id,
+            session_id=resolved_session_id,
             user_id=ctx.user_id or user_id,
             tenant_id=ctx.tenant_id or tenant_id,
             role_code=ctx.role_code,
@@ -262,7 +271,6 @@ class AgnoRuntime:
             stream=True,
             stream_events=agno_stream_events,
         )
-        resolved_session_id = ctx.session_id or session_id
         final_reply_parts: list[str] = []
 
         thinking_token = set_enable_thinking(enable_thinking)
@@ -273,6 +281,7 @@ class AgnoRuntime:
             session_id=ctx.session_id or session_id,
             request_id=new_request_id(),
         )
+        ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
         try:
             async for event in target.arun(message, **kwargs):
                 if sid := getattr(event, "session_id", None):
@@ -365,6 +374,7 @@ class AgnoRuntime:
         finally:
             reset_enable_thinking(thinking_token)
             reset_request_context(mod_token)
+            reset_ignore_db(ignore_token)
 
         # 兜底：agno 未发 run_error 事件但 Guardrail 已写回决策的场景
         moderation_events = self._moderation_stream_events(mod_ctx, resolved_session_id)

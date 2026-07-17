@@ -124,6 +124,20 @@ def resolve_debug_request(headers: Mapping[str, str] | None = None) -> bool:
     return _truthy_flag(value)
 
 
+def resolve_ignore_db(headers: Mapping[str, str] | None = None) -> bool:
+    """Return True when ``x-ignore-db`` requests session write skip.
+
+    Expects lowercase header name ``x-ignore-db`` (Starlette/FastAPI norm).
+    Combined with session_id in the runtime:
+    - true + session_id → read history, do not persist
+    - true + no session_id → neither read nor write
+    """
+    if not headers:
+        return False
+    value = str(headers.get("x-ignore-db") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def resolve_enable_thinking(
     *,
     body_enable_thinking: bool | None = None,
