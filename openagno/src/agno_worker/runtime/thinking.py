@@ -24,6 +24,11 @@ def attach_thinking_request_params(model: Any) -> Any:
 
     Uses a ContextVar so concurrent requests on a shared Agent/model do not race
     when mutating ``model.extra_body`` directly.
+
+    The OpenAI Python SDK rejects top-level ``enable_thinking`` on
+    ``responses.create``; it must go through ``extra_body``, which the SDK then
+    merges into the HTTP JSON body (required for DashScope/Qwen to disable
+    thinking).
     """
     if model is None or not hasattr(model, "get_request_params"):
         return model
@@ -34,9 +39,11 @@ def attach_thinking_request_params(model: Any) -> Any:
 
     def _patched(*args: Any, **kwargs: Any) -> dict[str, Any]:
         params = dict(original(*args, **kwargs) or {})
+        enabled = get_enable_thinking()
         extra = dict(params.get("extra_body") or getattr(model, "extra_body", None) or {})
-        extra["enable_thinking"] = get_enable_thinking()
+        extra["enable_thinking"] = enabled
         params["extra_body"] = extra
+        # Never set params["enable_thinking"] — AsyncResponses.create rejects it.
         return params
 
     model.get_request_params = _patched  # type: ignore[method-assign]
