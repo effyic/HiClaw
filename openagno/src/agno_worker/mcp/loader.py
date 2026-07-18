@@ -5,6 +5,7 @@ import logging
 from typing import Any, Protocol
 
 from agno_worker.hooks.protocols import MCPServerConfig
+from agno_worker.mcp.pool import get_default_pool
 
 logger = logging.getLogger(__name__)
 
@@ -26,40 +27,72 @@ def build_mcp_tools(
         logger.warning("MCPTools unavailable (%s); skipping MCP servers", exc)
         return []
 
+    pool = get_default_pool()
     tools: list[Any] = []
     for server in servers:
         try:
-            if hasattr(connection_handler, "on_mcp_connection"):
-                connection_handler.on_mcp_connection(server)
-            elif hasattr(connection_handler, "call"):
-                connection_handler.call("mcp_connection_hook", server)
-            kwargs: dict[str, Any] = {}
-            if server.url:
-                kwargs["transport"] = server.transport
-                if server.headers:
-                    kwargs["server_params"] = StreamableHTTPClientParams(
-                        url=server.url,
-                        headers=server.headers,
-                    )
-                else:
-                    kwargs["url"] = server.url
-            elif server.command:
-                kwargs["command"] = server.command
-            else:
-                logger.warning("Skipping MCP server without url/command: %s", server.name)
+            _notify_connection(connection_handler, server)
+            if not server.url and not server.command:
+                logger.warning(
+                    "Skipping MCP server without url/command: %s", server.name
+                )
                 continue
-            if server.name:
-                kwargs["name"] = server.name
-            if server.env:
-                kwargs["env"] = server.env
-            if server.include_tools:
-                kwargs["include_tools"] = server.include_tools
-            if server.exclude_tools:
-                kwargs["exclude_tools"] = server.exclude_tools
-            # True: ensure MCP tools are connected/listed each run (False caused
-            # "Function xxx not found" when sessions were not yet initialized).
-            kwargs["refresh_connection"] = True
-            tools.append(MCPTools(**kwargs))
+
+            # Bind loop vars explicitly for the factory closure.
+            tools.append(
+                pool.get_or_create(
+                    server,
+                    lambda s=server: _new_mcp_tools(
+                        s, MCPTools, StreamableHTTPClientParams
+                    ),
+                )
+            )
         except Exception as exc:
             logger.warning("Failed to build MCPTools for %s: %s", server.name, exc)
     return tools
+
+
+def _notify_connection(
+    connection_handler: MCPConnectionHandler | Any,
+    server: MCPServerConfig,
+) -> None:
+    if hasattr(connection_handler, "on_mcp_connection"):
+        connection_handler.on_mcp_connection(server)
+    elif hasattr(connection_handler, "call"):
+        connection_handler.call("mcp_connection_hook", server)
+
+
+def _new_mcp_tools(
+    server: MCPServerConfig,
+    mcp_tools_cls: Any,
+    http_params_cls: Any,
+) -> Any:
+    """Construct one MCPTools; pool decides refresh_connection afterward."""
+    kwargs: dict[str, Any] = {}
+    if server.url:
+        kwargs["transport"] = server.transport
+        if server.headers:
+            kwargs["server_params"] = http_params_cls(
+                url=server.url,
+                headers=server.headers,
+            )
+        else:
+            kwargs["url"] = server.url
+    elif server.command:
+        kwargs["command"] = server.command
+    else:
+        raise ValueError(f"MCP server {server.name!r} missing url/command")
+
+    if server.name:
+        kwargs["name"] = server.name
+    if server.env:
+        kwargs["env"] = server.env
+    if server.include_tools:
+        kwargs["include_tools"] = server.include_tools
+    if server.exclude_tools:
+        kwargs["exclude_tools"] = server.exclude_tools
+
+    # Start False; MCPToolsPool.tune_refresh_connection flips to True while cold
+    # so Agno's callable-tools path still connects on first use.
+    kwargs["refresh_connection"] = False
+    return mcp_tools_cls(**kwargs)

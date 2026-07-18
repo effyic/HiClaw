@@ -1,6 +1,7 @@
 """Agno Agent factory with per-request storage scrubbing and ignore-db I/O skip."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from agno_worker.runtime.ignore_db import get_skip_session_read, get_skip_session_write
@@ -88,6 +89,14 @@ class StorageAwareAgent:
 
         _patch_agno_storage_scrub_dispatch()
         _patch_agno_session_io_for_ignore_db()
+        # Default off: outbound posts to os-api.agno.com after each run.
+        # Unrelated to AGNO_ENABLE_AGENTOS (console API). Override with
+        # AGNO_TELEMETRY=true when needed.
+        if "telemetry" not in kwargs:
+            telem = os.environ.get("AGNO_TELEMETRY")
+            kwargs["telemetry"] = (
+                telem.lower() == "true" if telem is not None else False
+            )
         agent = Agent(**kwargs)
         setattr(agent, _STORAGE_AWARE_ATTR, True)
         return agent

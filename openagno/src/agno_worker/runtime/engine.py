@@ -24,6 +24,7 @@ from agno_worker.moderation.models import DecisionKind
 from agno_worker.runtime.builder import AgentBuilder
 from agno_worker.runtime.ignore_db import reset_ignore_db, set_ignore_db
 from agno_worker.runtime.thinking import reset_enable_thinking, set_enable_thinking
+from agno_worker.mcp.pool import clear_mcp_tools_pool
 from agno_worker.tenant.service import TenantAgentService
 from agno_worker.tenant.store import clear_agent_store_cache
 
@@ -103,12 +104,14 @@ class AgnoRuntime:
         self._registry.reload()
         self._tenant_service.clear_cache()
         clear_agent_store_cache()
+        clear_mcp_tools_pool()
         self.build()
 
     def reload_hooks(self) -> None:
         self._registry.reload()
         self._tenant_service.clear_cache()
         clear_agent_store_cache()
+        clear_mcp_tools_pool()
         self.build()
 
     @property
