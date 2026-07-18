@@ -42,19 +42,51 @@ def _fake_tool(**overrides):
     return SimpleNamespace(**base)
 
 
-def test_pool_key_ignores_per_turn_headers():
-    static = {"tenant-id": "1", "campus-id": "1", "X-API-Key": "secret"}
+def test_pool_key_is_name_url_only():
     a = MCPServerConfig(
         name="medical",
         url="http://mcp.example/mcp",
-        headers={**static, "user-id": "u1", "session-id": "s1", "x-debug-request": "true"},
+        headers={
+            "tenant-id": "1",
+            "campus-id": "9",
+            "X-API-Key": "secret-a",
+            "user-id": "u1",
+            "session-id": "s1",
+            "x-request-id": "req-a",
+        },
+        include_tools=["a"],
+        transport="streamable-http",
     )
     b = MCPServerConfig(
         name="medical",
         url="http://mcp.example/mcp",
-        headers={**static, "user-id": "u2", "session-id": "s2"},
+        headers={
+            "tenant-id": "2",
+            "campus-id": "1",
+            "X-API-Key": "secret-b",
+            "user-id": "u2",
+            "session-id": "s2",
+            "x-request-id": "req-b",
+        },
+        include_tools=["b"],
+        transport="sse",
     )
-    assert pool_key(a) == pool_key(b)
+    # Same name+url → same pool entry regardless of tenant/session/headers.
+    assert pool_key(a) == pool_key(b) == ("medical", "http://mcp.example/mcp")
+
+    other_name = MCPServerConfig(
+        name="other",
+        url="http://mcp.example/mcp",
+        headers={"tenant-id": "1"},
+    )
+    assert pool_key(a) != pool_key(other_name)
+
+    other_url = MCPServerConfig(
+        name="medical",
+        url="http://mcp.other/mcp",
+        headers={"tenant-id": "1"},
+    )
+    assert pool_key(a) != pool_key(other_url)
 
 
 def test_pool_reuses_instance_and_disables_refresh_when_ready():
@@ -154,6 +186,8 @@ def test_build_mcp_tools_reuses_via_default_pool(monkeypatch):
             self.session = None
             self._initialized = False
             self.refresh_connection = kwargs.get("refresh_connection", False)
+            self.server_params = kwargs.get("server_params")
+            self.header_provider = kwargs.get("header_provider")
             created.append(self)
 
         async def close(self):
@@ -182,3 +216,46 @@ def test_build_mcp_tools_reuses_via_default_pool(monkeypatch):
     assert first[0] is second[0]
     assert len(created) == 1
     assert len(get_default_pool()) == 1
+    # Static auth stay on server_params; identity (tenant/session/user) via header_provider.
+    assert first[0].server_params.headers == {}
+    assert callable(first[0].header_provider)
+    # Provider reads current run_context so pooled reuse keeps the right session.
+    ctx = SimpleNamespace(
+        user_id="u-9",
+        session_id="s-9",
+        tenant_id="1",
+        role_code=None,
+        metadata={},
+    )
+    assert first[0].header_provider(run_context=ctx) == {
+        "user-id": "u-9",
+        "session-id": "s-9",
+        "tenant-id": "1",
+    }
+
+
+def test_split_static_and_per_run_headers():
+    from agno_worker.mcp.headers import split_static_and_per_run_headers
+
+    static, per_run = split_static_and_per_run_headers(
+        {
+            "tenant-id": "1",
+            "campus-id": "9",
+            "X-API-Key": "secret",
+            "user-id": "u1",
+            "session-id": "s1",
+            "role-code": "medical-inquiry",
+            "x-request-id": "r1",
+        }
+    )
+    assert static == {
+        "campus-id": "9",
+        "X-API-Key": "secret",
+        "x-request-id": "r1",
+    }
+    assert per_run == {
+        "tenant-id": "1",
+        "user-id": "u1",
+        "session-id": "s1",
+        "role-code": "medical-inquiry",
+    }

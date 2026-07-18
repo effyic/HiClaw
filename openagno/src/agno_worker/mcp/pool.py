@@ -9,9 +9,10 @@ more than once). That produced a 5s+ SSE silence after PreHook.
 
 Design
 ------
-* Pool by **stable** server identity (URL/command + non-turn headers).
-  Per-turn headers (user/session/role, debug flags) are ignored in the key so
-  sessions share one connection.
+* Pool key = ``(name, url)`` only. Headers (including ``session-id`` / ``user-id`` /
+  ``tenant-id``), transport, and tool filters are **not** part of the key — one
+  shared connection per MCP endpoint. Per-chat identity is injected at call time
+  via Agno ``header_provider`` (see ``mcp/loader.py``), not by pooling separately.
 * Soft-close: Agno may call ``close()`` on run teardown for list-mounted tools;
   pooled instances must survive.
 * Stable ``is_alive``: many servers lack ping; a failed ping used to force
@@ -38,19 +39,6 @@ from agno_worker.hooks.protocols import MCPServerConfig
 
 logger = logging.getLogger(__name__)
 
-# Per-turn forward headers — must not fragment the pool.
-_TURN_HEADER_NAMES = frozenset(
-    {
-        "user-id",
-        "session-id",
-        "role-code",
-        "user_id",
-        "session_id",
-        "role_code",
-    }
-)
-_TURN_HEADER_PREFIXES = ("x-debug", "x-ignore", "x-enable-thinking")
-
 _MARK = "_effyic_mcp_pooled"
 _ORIG_CLOSE = "_effyic_mcp_orig_close"
 _ORIG_IS_ALIVE = "_effyic_mcp_orig_is_alive"
@@ -60,32 +48,10 @@ def pool_enabled() -> bool:
     return os.environ.get("AGNO_MCP_POOL", "true").lower() in ("1", "true", "yes")
 
 
-def pool_key(server: MCPServerConfig) -> tuple[Any, ...]:
-    """Stable cache key for a server config (excludes per-turn headers)."""
-    return (
-        (server.name or "").strip(),
-        (server.url or "").strip(),
-        (server.command or "").strip(),
-        (server.transport or "streamable-http").strip(),
-        _stable_headers(server.headers),
-        tuple(sorted(str(x) for x in (server.include_tools or []))),
-        tuple(sorted(str(x) for x in (server.exclude_tools or []))),
-    )
-
-
-def _stable_headers(headers: dict[str, str] | None) -> tuple[tuple[str, str], ...]:
-    items: list[tuple[str, str]] = []
-    for raw_key, raw_value in (headers or {}).items():
-        key = str(raw_key).lower().strip()
-        if key in _TURN_HEADER_NAMES:
-            continue
-        if any(key.startswith(p) for p in _TURN_HEADER_PREFIXES):
-            continue
-        value = str(raw_value).strip()
-        if value:
-            items.append((key, value))
-    items.sort(key=lambda kv: kv[0])
-    return tuple(items)
+def pool_key(server: MCPServerConfig) -> tuple[str, str]:
+    """Cache key: name + url (command used when url is empty)."""
+    endpoint = (server.url or "").strip() or (server.command or "").strip()
+    return ((server.name or "").strip(), endpoint)
 
 
 def _env_refresh_override() -> bool | None:
