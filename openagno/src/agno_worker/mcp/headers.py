@@ -1,7 +1,7 @@
 """Forward conversation identity / ``x-*`` headers onto HTTP MCP connections."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from agno_worker.hooks.protocols import MCPServerConfig
 
@@ -11,6 +11,13 @@ IDENTITY_HEADER_KEYS: tuple[tuple[str, str], ...] = (
     ("tenant_id", "tenant-id"),
     ("session_id", "session-id"),
     ("role_code", "role-code"),
+)
+
+# Must be refreshed per agent run when MCPTools is pooled (long-lived connection).
+# Pool key is name+url only, so tenant / session / user / role must not be frozen
+# on the shared connection — they are injected via header_provider each run.
+PER_RUN_IDENTITY_HEADER_NAMES: frozenset[str] = frozenset(
+    {"tenant-id", "user-id", "session-id", "role-code"}
 )
 
 MCP_FORWARD_HEADER_PREFIX = "x-"
@@ -65,6 +72,67 @@ def collect_forwarded_mcp_headers(run_context: Any) -> dict[str, str]:
     headers = collect_identity_mcp_headers(run_context)
     headers.update(collect_x_request_headers(run_context))
     return headers
+
+
+def collect_per_run_mcp_headers(run_context: Any) -> dict[str, str]:
+    """Headers that must not be frozen on a pooled MCP connection."""
+    forwarded = collect_forwarded_mcp_headers(run_context)
+    out: dict[str, str] = {}
+    for key, value in forwarded.items():
+        lower = key.lower()
+        if lower in PER_RUN_IDENTITY_HEADER_NAMES or lower.startswith(
+            MCP_FORWARD_HEADER_PREFIX
+        ):
+            out[key] = value
+    return out
+
+
+def split_static_and_per_run_headers(
+    headers: dict[str, str] | None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Split MCP server headers into connection-static vs per-run identity.
+
+    Only conversation identity headers are per-run. Auth headers such as
+    ``X-API-Key`` stay static even though they start with ``X-`` / ``x-``.
+    """
+    static: dict[str, str] = {}
+    per_run: dict[str, str] = {}
+    for key, raw in (headers or {}).items():
+        value = _non_empty(raw)
+        if not value:
+            continue
+        lower = str(key).lower()
+        if lower in PER_RUN_IDENTITY_HEADER_NAMES:
+            per_run[str(key)] = value
+        else:
+            static[str(key)] = value
+    return static, per_run
+
+
+def make_mcp_header_provider(
+    fallback: dict[str, str] | None = None,
+) -> Callable[..., dict[str, str]]:
+    """Agno ``header_provider``: prefer run_context identity, else build-time fallback.
+
+    Pooled MCPTools keep one TCP/session for tool discovery, but Agno creates a
+    per-run MCP session when ``header_provider`` is set so ``session-id`` /
+    ``user-id`` stay correct for tools like ``mec_create_emr_case``.
+    """
+    fallback_headers = dict(fallback or {})
+
+    def header_provider(
+        run_context: Any = None,
+        agent: Any = None,
+        team: Any = None,
+    ) -> dict[str, str]:
+        del agent, team
+        if run_context is not None:
+            dynamic = collect_per_run_mcp_headers(run_context)
+            if dynamic:
+                return dynamic
+        return dict(fallback_headers)
+
+    return header_provider
 
 
 def apply_forwarded_mcp_headers(
