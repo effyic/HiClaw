@@ -10,6 +10,7 @@ from agno_worker.tenant.cache import TTLCache, _MISSING
 from agno_worker.tenant.db import agent_db_connection, agent_db_url, reset_engine
 
 DEFAULT_ROW: dict[str, Any] = {
+    "id": 0,
     "tenant_id": "default",
     "role_code": "default",
     "workflow": {},
@@ -23,7 +24,7 @@ DEFAULT_ROW: dict[str, Any] = {
 }
 
 _AGENT_SELECT = """
-    SELECT tenant_id, role_code,
+    SELECT id, tenant_id, role_code,
            display_name, description, system_prompt, instructions,
            knowledge_ids, mcp_enabled, mcp_config, workflow
     FROM agno_agent
@@ -94,6 +95,7 @@ def _row_to_config(row: dict[str, Any], tenant_id: str | None = None) -> dict[st
     workflow = parse_workflow(row.get("workflow"))
     tid = row.get("tenant_id", tenant_id or "default")
     return {
+        "id": int(row.get("id") or 0),
         "tenant_id": str(tid),
         "role_code": str(row.get("role_code") or "default"),
         "workflow": workflow,
@@ -197,7 +199,7 @@ def list_agents(tenant_id: str | None = None) -> list[dict[str, Any]]:
             rows = _fetch_all(
                 conn,
                 """
-                SELECT tenant_id, role_code, display_name, description, workflow
+                SELECT id, tenant_id, role_code, display_name, description, workflow
                 FROM agno_agent
                 WHERE enabled IS TRUE AND tenant_id = :tenant_id
                 ORDER BY role_code
@@ -208,7 +210,7 @@ def list_agents(tenant_id: str | None = None) -> list[dict[str, Any]]:
             rows = _fetch_all(
                 conn,
                 """
-                SELECT tenant_id, role_code, display_name, description, workflow
+                SELECT id, tenant_id, role_code, display_name, description, workflow
                 FROM agno_agent
                 WHERE enabled IS TRUE
                 ORDER BY tenant_id, role_code
@@ -216,6 +218,7 @@ def list_agents(tenant_id: str | None = None) -> list[dict[str, Any]]:
             )
         return [
             {
+                "id": int(row.get("id") or 0),
                 "tenant_id": str(row["tenant_id"]),
                 "role_code": str(row.get("role_code") or "default"),
                 "workflow": parse_workflow(row.get("workflow")),

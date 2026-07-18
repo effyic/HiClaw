@@ -160,7 +160,20 @@ class AgnoAPIServer:
 
     def _handle_api_error(self, exc: Exception) -> HTTPException:
         from agno_worker.hooks.errors import HookExecutionError, HookLoadError
+        from agno_worker.moderation.errors import SensitivePolicyUnavailableError
 
+        if isinstance(exc, SensitivePolicyUnavailableError):
+            # 无有效策略快照且 fail-closed：不调用 LLM，返回 503
+            logger.error("Sensitive content policy unavailable (fail-closed)")
+            return HTTPException(
+                status_code=503, detail="sensitive_policy_unavailable"
+            )
+        if self._is_sensitive_decision_error(exc):
+            # BLOCK_REQUEST：响应不含敏感词与用户原文
+            logger.warning("Request blocked by sensitive content policy")
+            return HTTPException(
+                status_code=422, detail="sensitive_content_blocked"
+            )
         if isinstance(exc, RequestRejectedError):
             logger.warning("Request rejected by pre-filter: %s", exc.reason)
             return HTTPException(status_code=403, detail=exc.reason)
@@ -169,6 +182,15 @@ class AgnoAPIServer:
             return HTTPException(status_code=500, detail=str(exc))
         logger.exception("Unhandled error during chat")
         return HTTPException(status_code=500, detail="Internal server error")
+
+    @staticmethod
+    def _is_sensitive_decision_error(exc: Exception) -> bool:
+        """判断是否敏感内容决策异常（延迟导入避免 agno 硬依赖）。"""
+        try:
+            from agno_worker.moderation.guardrail import SensitiveContentDecisionError
+        except Exception:
+            return False
+        return isinstance(exc, SensitiveContentDecisionError)
 
     def resync_agentos(self) -> None:
         if self._agent_os is None or self._base_app is None:

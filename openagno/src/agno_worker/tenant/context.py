@@ -56,6 +56,7 @@ def _first_non_empty(*values: Any) -> str:
 class TenantContext:
     tenant_id: str
     role_code: str
+    agent_id: int = 0
     agent_config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -77,6 +78,11 @@ class TenantContextResolver:
         ctx = TenantContext(
             tenant_id=tenant_id,
             role_code=role_code,
+            agent_id=(
+                int(agent_config.get("id") or 0)
+                if str(agent_config.get("tenant_id") or "") == tenant_id
+                else 0
+            ),
             agent_config=agent_config,
         )
         cache["tenant_context"] = ctx

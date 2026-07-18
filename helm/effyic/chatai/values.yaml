@@ -76,6 +76,41 @@ auth:
   token: ""                 # leave empty to auto-generate
   secretKey: CHATAI_API_TOKEN
 
+# ── Sensitive content 后端（可选）─────────────────────────────────────────
+# 仅部署管理/快照 API（Deployment + migrate Job + 网关 Ingress）。
+# 不包含 sensitive-content/web 前端——前端本地联调，不进镜像、不进 Chart。
+# PostgreSQL：与 openagno Worker 共用上方 postgres.*（独立 schema sensitive_content）。
+#
+# 全新安装顺序：migrate 是 pre-install，db-init 是 post-install。
+# 目标库尚不存在时，先保持 enabled=false 装完 ChatAI，再建库后再 upgrade 开启；
+# 或事先手工 CREATE DATABASE。升级场景（库已存在）可直接 enabled=true。
+sensitiveContent:
+  enabled: false
+  image:
+    repository: hiclaw/sensitive-content
+    tag: latest
+  replicas: 1
+  port: 8091                # 与镜像默认 SENSITIVE_CONTENT_PORT 保持一致
+  retentionDays: 90         # hit_event 保留天数
+  resources: {}
+  # 管理 API 复用首个 Worker 的 ChatAI API Token。以下仅为 Worker 与后端之间的
+  # runtime 凭据：留空则自动生成；或用 existingSecret 引用已有 Secret
+  # （键：SENSITIVE_CONTENT_RUNTIME_TOKEN / SENSITIVE_CONTENT_FINGERPRINT_KEY）。
+  runtimeToken: ""
+  fingerprintKey: ""
+  existingSecret: ""
+  # 管理 API 网关前缀：默认 {gateway.path}/v1/tenants → 重写为 /api/v1/tenants
+  # 仅暴露管理/统计；/internal/v1/* 仅集群内访问
+  gatewayPath: ""
+  # 注入 Agno Worker 的检测端配置（与后端共用同一 postgres.*）
+  cachePath: /var/lib/agno/moderation/policy-snapshot.json
+  refreshInterval: "30"
+  maxStale: "600"
+  failMode: open            # open = 无快照时跳过检测；closed = 503
+  migrate:
+    backoffLimit: 3
+    activeDeadlineSeconds: 300
+
 # ── Worker defaults ───────────────────────────────────────────────────────
 worker:
   image:

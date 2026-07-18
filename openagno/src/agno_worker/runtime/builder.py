@@ -19,6 +19,8 @@ from agno_worker.hooks.compose import (
 )
 from agno_worker.hooks.registry import HookRegistry
 from agno_worker.mcp.loader import build_mcp_tools
+from agno_worker.moderation.context import get_request_context
+from agno_worker.moderation.guardrail import maybe_build_guardrail
 from agno_worker.skills import DynamicSkillsManager, normalize_skill_refs, skill_catalog_summary
 from agno_worker.api.identity import default_debug_request
 from agno_worker.runtime.agent import StorageAwareAgent
@@ -28,6 +30,12 @@ from agno_worker.runtime.thinking import attach_thinking_request_params
 from agno_worker.tenant.service import TenantAgentService
 
 logger = logging.getLogger(__name__)
+
+# 敏感内容 ADJUST_PROMPT 注入块标题与冲突说明（与 Guardrail 收集顺序一致）
+_PROMPT_GUIDANCE_HEADER = (
+    "## 本轮对话语气要求（敏感内容策略）\n"
+    "以下要求按顺序排列；如有冲突，以更靠前的要求为准。"
+)
 
 
 def _default_role_name(spec: AgentSpec) -> str:
@@ -69,6 +77,14 @@ class AgentBuilder:
         default_role = next(iter(self.spec.agents), "default")
         default_defn = self.spec.agents.get(default_role)
 
+        # 敏感内容 Guardrail 插入 pre_hooks 首位（业务 _pre_hook 之前），保证
+        # 脱敏后的文本才进入 user_requirements、Prompt 与会话上下文。
+        # 未配置 SENSITIVE_CONTENT_SERVICE_URL 时返回 None，行为与原来一致。
+        pre_hooks: list[Any] = [self._make_pre_hook()]
+        guardrail = maybe_build_guardrail()
+        if guardrail is not None:
+            pre_hooks.insert(0, guardrail)
+
         return StorageAwareAgent.create(
             name=agent_name,
             description=self.spec.description or "Dynamic multi-role agent",
@@ -78,7 +94,7 @@ class AgentBuilder:
             instructions=self._make_instructions(),
             tools=self._make_tools(),
             db=self.db,
-            pre_hooks=[self._make_pre_hook()],
+            pre_hooks=pre_hooks,
             post_hooks=[self._make_post_hook()],
             add_history_to_context=True,
             # Only slim public deps (tenant / user_profile / role_catalog) belong in
@@ -125,6 +141,13 @@ class AgentBuilder:
             summary = skill_catalog_summary(catalog)
             if summary:
                 parts.append(summary)
+
+            # Guardrail 放行后写入的语气指引（阻断路径为空，不注入）
+            guidances = list(get_request_context().prompt_guidances or [])
+            if guidances:
+                parts.append(
+                    _PROMPT_GUIDANCE_HEADER + "\n\n" + "\n\n".join(guidances)
+                )
 
             logger.debug("prompt from tenant pipeline (role=%s, tenant=%s)", active_role, user_profile.get("tenant_id"))
             return "\n\n".join(parts)

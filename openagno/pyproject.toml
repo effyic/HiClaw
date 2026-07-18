@@ -22,6 +22,8 @@ dependencies = [
     "fastapi>=0.109",
     "python-multipart>=0.0.9",
     "pyjwt>=2.8",
+    "httpx>=0.27",
+    "regex>=2024.5",
 ]
 
 [project.optional-dependencies]

@@ -43,6 +43,8 @@ make build-hiclaw-controller DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 make build-agno-worker DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 # 构建个人助手Agent
 make build-hermes-worker DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
+# 构建敏感词后端（可选；不含 web 前端）
+make build-sensitive-content DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 # 构建manager, 自主协调团队时才会用到
 make build-manager \
   OPENCLAW_BASE_IMAGE=hiclaw/openclaw-base \
@@ -50,7 +52,7 @@ make build-manager \
   DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS}"
 
 # 装入 minikube
-for img in hiclaw/hiclaw-controller:latest hiclaw/agno-worker:latest hiclaw/hermes-worker:latest hiclaw/hiclaw-manager:latest; do
+for img in hiclaw/hiclaw-controller:latest hiclaw/agno-worker:latest hiclaw/hermes-worker:latest hiclaw/hiclaw-manager:latest hiclaw/sensitive-content:latest; do
   load_image "$img"
 done
 ```

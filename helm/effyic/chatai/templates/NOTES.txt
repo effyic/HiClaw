@@ -28,6 +28,19 @@ Example (port-forward higress-gateway 80:80 if needed):
     -d '{"message":"你好"}'
 {{- end }}
 
+{{- if eq (include "chatai.sensitiveContentEnabled" .) "enabled" }}
+
+Sensitive content admin API (frontend-facing, via gateway):
+  Route: {{ include "chatai.sensitiveContent.gatewayPath" . }}/{tenant_id}/... -> /api/v1/tenants/{tenant_id}/...
+  Token (same as the primary ChatAI Worker):
+    kubectl get secret {{ include "chatai.sensitiveContent.adminAuthSecretName" . }} \
+      -n {{ include "chatai.namespace" . }} \
+      -o jsonpath='{.data.{{ .Values.auth.secretKey | default "CHATAI_API_TOKEN" }}}' | base64 -d ; echo
+  Example:
+    curl '{{ include "chatai.gatewayPublicURL" . | trimSuffix "/" }}{{ include "chatai.sensitiveContent.gatewayPath" . }}/1/sensitive-rules?page=1&page_size=50' \
+      -H "Authorization: Bearer <admin-token>"
+{{- end }}
+
 Uninstall:
   helm uninstall {{ .Release.Name }} -n {{ include "chatai.namespace" $ }}
 

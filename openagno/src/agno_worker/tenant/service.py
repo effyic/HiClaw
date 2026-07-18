@@ -35,6 +35,13 @@ class TenantAgentService:
     def clear_cache(self) -> None:
         self._store.clear_cache()
 
+    def resolve_agent_id(self, tenant_id: str, role_code: str = "default") -> int:
+        """返回请求实际解析到的同租户 Agent 主键；跨租户模板回退返回 0。"""
+        config = self._store.load_agent_resolved(tenant_id, role_code=role_code)
+        if str(config.get("tenant_id") or "") != tenant_id:
+            return 0
+        return int(config.get("id") or 0)
+
     def prepare_run_context(
         self,
         run_context: Any,
