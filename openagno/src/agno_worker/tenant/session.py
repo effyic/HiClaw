@@ -4,12 +4,21 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agno_worker.tenant.collection import (
+    is_collection_enabled,
+    sync_collection_into_session_state,
+)
 from agno_worker.tenant.context import TenantContextResolver
 from agno_worker.tenant.store import workflow_phase
 
 
 class TenantSessionManager:
-    """Initialize and update session state with tenant / role / workflow."""
+    """Initialize and update session state with tenant / role / workflow.
+
+    Collection dialogue state is stored under ``session_state["collection"]`` and
+    persisted with the Agno session (shared DB). Do not keep protocol progress in
+    process memory — replicas must reload it from the session row.
+    """
 
     def __init__(self, resolver: TenantContextResolver | None = None) -> None:
         self._resolver = resolver or TenantContextResolver()
@@ -50,8 +59,13 @@ class TenantSessionManager:
         merged["role_code"] = role_code
         merged["workflow"] = workflow
 
-        phase = workflow_phase(workflow) or incoming.get("phase")
-        if phase:
-            merged["phase"] = phase
+        if is_collection_enabled(workflow):
+            # Runtime FSM phase lives in collection.*; do not clobber with
+            # workflow.phase (scenario label such as inquiry/triage).
+            merged = sync_collection_into_session_state(merged, run_context, workflow)
+        else:
+            phase = workflow_phase(workflow) or incoming.get("phase")
+            if phase:
+                merged["phase"] = phase
 
         return merged

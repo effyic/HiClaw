@@ -207,7 +207,7 @@ RequestFilterPipeline.apply_post_filter()  # request_post_filter_hook (可选)
 
 ### 5.1 角色（Agent）解析 — 选定 `agno_agent` 行
 
-**Worker 不会根据** `workflow` **JSON、**`route_key` **或** `kind` **自动切换 Agent。** 每次 run 加载哪一行配置，仅由解析出的 `role_code` 决定：
+**Worker 不会根据** `workflow` **JSON 的** `kind` **/** `phase` **自动切换 Agent。** 每次 run 加载哪一行配置，仅由解析出的 `role_code` 决定：
 
 ```
 HTTP role-code / x-role-code（或 query role_code）
@@ -223,6 +223,49 @@ HTTP role-code / x-role-code（或 query role_code）
 3. 全局租户 `default` + `role_code = 'default'`
 
 多阶段业务（如分诊 → 问诊 → 病历）需在**调用方**切换 `role-code`，或在 `transform_session_state_hook` 中更新 `session_state.active_role` / `role_code`；框架本身不做阶段路由。
+
+### 5.2 采集对话薄协议（collection dialogue）
+
+配置驱动的槽位采集 FSM，适用于问诊 / 分诊 / 问卷等。**进度只写在 `session_state.collection`**，随 Agno session 落库（`AGNO_DB_URL`），精简入库白名单含 `collection`，**集群多副本不丢状态**。
+
+启用方式（`agno_agent.workflow`）：
+
+```json
+{
+  "kind": "medical",
+  "phase": "inquiry",
+  "collection": {
+    "kind": "collection_dialogue",
+    "confirm_required": true,
+    "ask_batch_size": 2,
+    "schema": {
+      "source": "inline",
+      "fields": [
+        {"name": "主诉", "required": true, "description": "主要症状"},
+        {"name": "持续时间", "required": true}
+      ]
+    },
+    "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"}
+  }
+}
+```
+
+也可顶层 `"kind": "collection_dialogue"`。`schema.source=mcp` 时由模型先调字段列表 MCP，再把结果传给 `collection_load_schema(fields_json=...)`。
+
+| 工具 | 作用 |
+|------|------|
+| `collection_load_schema` | 加载字段清单（`schema.source=inline` 时通常已自动加载） |
+| `collection_update_fields` | 合并采集值（**仅允许 schema 内字段名**）并重算 missing |
+| `collection_status` | 只读进度 |
+| `collection_confirm` | 用户确认（可选，由 `confirm_required` 控制） |
+| `collection_complete` | 可选：写入 `draft_payload` 快照 |
+| `collection_mark_done` | 写库 / 更新成功后记账；允许早写与多次写 |
+
+写库 MCP（如 `mec_create_emr_case`）始终对模型可见，可早写、可多次更新。缺必填字段时由 prompt + `missing` 驱动继续追问；`completed` 表示「至少成功写过一次」，不冻结 FSM——用户补充病情后可再 `update_fields` 并再次写库。
+
+客户端可用请求头 `x-collection-confirm: true` 在本轮标记确认。同步回复末尾附加 `<!--COLLECTION_STATUS {...}-->`；流式场景请读 `session_state.collection` 或 run `metadata.collection_status`（不要只依赖 SSE 文本标记）。
+
+实现：`tenant/collection.py`；接线：`tenant/service.py`、`tenant/session.py`、`tenant/prompt.py`、`tenant/data.py`、`runtime/storage.py`、`runtime/builder.py`。
 
 ---
 

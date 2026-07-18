@@ -97,7 +97,10 @@ class AgentBuilder:
             pre_hooks=pre_hooks,
             post_hooks=[self._make_post_hook()],
             add_history_to_context=True,
-            add_dependencies_to_context=True,
+            # Only slim public deps (tenant / user_profile / role_catalog) belong in
+            # the LLM prompt. Heavy objects stay in dependencies for hooks/tools but
+            # must not be serialized into <additional context>.
+            add_dependencies_to_context=False,
             markdown=True,
             cache_callables=False,
             dependencies={
@@ -197,7 +200,7 @@ class AgentBuilder:
                 ]
 
             tools.extend(skills_manager.build_tools(run_context, catalog))
-            tools.extend(tenant.data.get_tools())
+            tools.extend(tenant.data.get_tools(run_context))
             return tenant.filter_mcp_tools(run_context, tools)
 
         return _tools
@@ -285,6 +288,35 @@ class AgentBuilder:
             updates = tenant.build_session_updates(run_context.session_state, run_context)
             if isinstance(updates, dict) and updates:
                 run_context.session_state.update(updates)
+
+            from agno_worker.tenant.collection import (
+                COLLECTION_STATE_KEY,
+                append_status_marker,
+                collection_status_payload,
+                is_collection_enabled,
+            )
+
+            workflow = (run_context.session_state or {}).get("workflow") or {}
+            if is_collection_enabled(workflow if isinstance(workflow, dict) else {}):
+                coll = (run_context.session_state or {}).get(COLLECTION_STATE_KEY) or {}
+                if not isinstance(coll, dict):
+                    coll = {}
+                if run_output is not None and hasattr(run_output, "content"):
+                    run_output.content = append_status_marker(
+                        getattr(run_output, "content", None),
+                        coll,
+                    )
+                # Prefer metadata for streaming H5 clients (reply chunks omit marker).
+                status = collection_status_payload(coll)
+                if run_output is not None:
+                    if not isinstance(getattr(run_output, "metadata", None), dict):
+                        run_output.metadata = {}
+                    run_output.metadata["collection_status"] = status
+                metadata = getattr(run_context, "metadata", None)
+                if metadata is None:
+                    run_context.metadata = {"collection_status": status}
+                elif isinstance(metadata, dict):
+                    metadata["collection_status"] = status
 
             metadata = getattr(run_context, "metadata", None) or {}
             debug_request = bool(metadata.get("debug_request", default_debug_request()))

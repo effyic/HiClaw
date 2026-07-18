@@ -59,6 +59,32 @@ class TenantAgentService:
             getattr(run_context, "session_state", None) or {}
         )
         tenant_ctx = self._resolver.resolve(run_context)
+        # Sync collection FSM before MCP/prompt so confirm headers apply this run
+        # (required for multi-replica chat continuity).
+        from agno_worker.tenant.collection import (
+            is_collection_enabled,
+            sync_collection_into_session_state,
+        )
+
+        workflow = dict(tenant_ctx.agent_config.get("workflow") or {})
+        if is_collection_enabled(workflow):
+            current_state = (
+                session_state
+                if session_state is not None
+                else (getattr(run_context, "session_state", None) or {})
+            )
+            synced = sync_collection_into_session_state(
+                dict(current_state or {}),
+                run_context,
+                workflow,
+            )
+            synced["workflow"] = workflow
+            run_context.session_state = synced
+            state = synced
+            session_state = synced
+        elif getattr(run_context, "session_state", None) is not None:
+            run_context.session_state.setdefault("workflow", workflow)
+
         business = self._build_business_context(run_context, tenant_ctx)
         cache["business_context"] = business
 
