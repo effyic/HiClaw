@@ -93,9 +93,9 @@ sensitiveContent:
   port: 8091                # 与镜像默认 SENSITIVE_CONTENT_PORT 保持一致
   retentionDays: 90         # hit_event 保留天数
   resources: {}
-  # 凭据：留空则 Chart 自动生成写入 Secret；或用 existingSecret 引用已有 Secret
-  # （键：SENSITIVE_CONTENT_ADMIN_TOKEN / RUNTIME_TOKEN / FINGERPRINT_KEY）
-  adminToken: ""
+  # 管理 API 复用首个 Worker 的 ChatAI API Token。以下仅为 Worker 与后端之间的
+  # runtime 凭据：留空则自动生成；或用 existingSecret 引用已有 Secret
+  # （键：SENSITIVE_CONTENT_RUNTIME_TOKEN / SENSITIVE_CONTENT_FINGERPRINT_KEY）。
   runtimeToken: ""
   fingerprintKey: ""
   existingSecret: ""

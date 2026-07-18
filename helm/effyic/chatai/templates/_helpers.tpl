@@ -284,8 +284,19 @@ disabled
 {{- end }}
 
 {{/*
+Sensitive-content management APIs share the primary ChatAI Worker's API token.
+The primary Worker is the first configured worker (the default is effyic-chatai).
+*/}}
+{{- define "chatai.sensitiveContent.adminAuthSecretName" -}}
+{{- $workers := .Values.workers | default (list (dict "name" "effyic-chatai")) -}}
+{{- $worker := first $workers -}}
+{{- include "chatai.authSecretName" (dict "root" . "worker" $worker) -}}
+{{- end }}
+
+{{/*
 Credentials Secret name: sensitiveContent.existingSecret wins, otherwise the
-chart-managed Secret rendered in sensitive-content.yaml.
+chart-managed Secret rendered in sensitive-content.yaml. This Secret contains
+only runtime credentials; the admin token comes from the ChatAI auth Secret.
 */}}
 {{- define "chatai.sensitiveContent.secretName" -}}
 {{- $sc := .Values.sensitiveContent | default dict -}}
@@ -316,10 +327,6 @@ Call with dict: root=$ valueKey=<values field> secretKey=<Secret data key>.
 {{- printf "sensitive-content-%s-%s-%s" $root.Release.Name (include "chatai.namespace" $root) .secretKey | sha256sum | trunc 32 -}}
 {{- end -}}
 {{- end -}}
-{{- end }}
-
-{{- define "chatai.sensitiveContent.adminToken" -}}
-{{- include "chatai.sensitiveContent.credential" (dict "root" . "valueKey" "adminToken" "secretKey" "SENSITIVE_CONTENT_ADMIN_TOKEN") -}}
 {{- end }}
 
 {{- define "chatai.sensitiveContent.runtimeToken" -}}

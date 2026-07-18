@@ -54,16 +54,30 @@ def create_agent(tenant: str, role_code: str | None = None) -> int:
     return int(row[0])
 
 
-def bind_all_assignable_rules(client, tenant: str, agent_id: int) -> list[int]:
+def agent_role(agent_id: int) -> str:
+    from sqlalchemy import text
+
+    from sensitive_content.db import db_connection
+
+    with db_connection() as conn:
+        row = conn.execute(
+            text("SELECT role_code FROM agno_agent WHERE id = :agent_id"),
+            {"agent_id": agent_id},
+        ).first()
+    assert row is not None
+    return str(row[0])
+
+
+def bind_all_assignable_rules(client, tenant: str, role_code: str) -> list[int]:
     options = client.get(
-        f"/api/v1/tenants/{tenant}/agents/{agent_id}/sensitive-rules",
+        f"/api/v1/tenants/{tenant}/agents/{role_code}/sensitive-rules",
         headers=ADMIN_HEADERS,
         params={"page_size": 500},
     )
     assert options.status_code == 200, options.text
     rule_ids = [item["id"] for item in options.json()["items"] if item["assignable"]]
     bound = client.put(
-        f"/api/v1/tenants/{tenant}/agents/{agent_id}/sensitive-rules",
+        f"/api/v1/tenants/{tenant}/agents/{role_code}/sensitive-rules",
         headers=ADMIN_HEADERS,
         json={"rule_ids": rule_ids},
     )
@@ -74,7 +88,7 @@ def bind_all_assignable_rules(client, tenant: str, agent_id: int) -> list[int]:
 def get_snapshot(client, tenant: str, **kwargs: Any):
     agent_id = int(kwargs.pop("agent_id", 0) or create_agent(tenant))
     if kwargs.pop("bind_all", True):
-        bind_all_assignable_rules(client, tenant, agent_id)
+        bind_all_assignable_rules(client, tenant, agent_role(agent_id))
     headers = dict(RUNTIME_HEADERS)
     headers.update(kwargs.pop("headers", {}))
     return client.get(

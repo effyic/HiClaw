@@ -822,16 +822,17 @@ def delete_rule(tenant_id: str, rule_id: int, operator: str) -> None:
 # Agent 规则绑定
 # ---------------------------------------------------------------------------
 
-def _assert_agent(conn: Any, tenant_id: str, agent_id: int) -> dict[str, Any]:
+def _resolve_agent_role(conn: Any, tenant_id: str, role_code: str) -> dict[str, Any]:
     if tenant_id == GLOBAL_TENANT:
         raise StoreError(400, "invalid_agent_scope", "global tenant cannot bind agents")
     row = _fetch_one(
         conn,
-        "SELECT id, tenant_id, enabled FROM agno_agent WHERE id = :agent_id",
-        {"agent_id": agent_id},
+        "SELECT id, tenant_id, role_code, enabled FROM agno_agent "
+        "WHERE tenant_id = :tenant_id AND role_code = :role_code",
+        {"tenant_id": tenant_id, "role_code": role_code},
     )
-    if row is None or str(row["tenant_id"]) != tenant_id:
-        raise StoreError(404, "agent_not_found", "agent not found in tenant")
+    if row is None:
+        raise StoreError(404, "agent_not_found", "agent role not found in tenant")
     return row
 
 
@@ -902,9 +903,9 @@ def _agent_rule_options(
     return rows
 
 
-def get_agent_rule_bindings(
+def get_agent_role_rule_bindings(
     tenant_id: str,
-    agent_id: int,
+    role_code: str,
     *,
     keyword: str | None = None,
     type_id: int | None = None,
@@ -912,7 +913,8 @@ def get_agent_rule_bindings(
     page_size: int = 50,
 ) -> tuple[list[dict[str, Any]], list[int], int]:
     with db_connection() as conn:
-        _assert_agent(conn, tenant_id, agent_id)
+        agent = _resolve_agent_role(conn, tenant_id, role_code)
+        agent_id = int(agent["id"])
         selected = _selected_rule_ids(conn, tenant_id, agent_id)
         rows = _agent_rule_options(conn, tenant_id, selected)
     if keyword:
@@ -931,14 +933,15 @@ def get_agent_rule_bindings(
     return rows[start : start + page_size], sorted(selected), total
 
 
-def replace_agent_rule_bindings(
-    tenant_id: str, agent_id: int, rule_ids: list[int], operator: str
+def replace_agent_role_rule_bindings(
+    tenant_id: str, role_code: str, rule_ids: list[int], operator: str
 ) -> dict[str, Any]:
     requested = {int(rule_id) for rule_id in rule_ids}
     if any(rule_id <= 0 for rule_id in requested):
         raise StoreError(422, "invalid_rule_id", "rule ids must be positive integers")
     with db_connection() as conn:
-        _assert_agent(conn, tenant_id, agent_id)
+        agent = _resolve_agent_role(conn, tenant_id, role_code)
+        agent_id = int(agent["id"])
         current = _selected_rule_ids(conn, tenant_id, agent_id)
         options = {int(row["id"]): row for row in _agent_rule_options(conn, tenant_id, current)}
         missing = sorted(requested - set(options))
@@ -965,7 +968,7 @@ def replace_agent_rule_bindings(
                 {"tenant_id": tenant_id, "agent_id": agent_id},
             )
             return {
-                "agent_id": agent_id,
+                "role_code": role_code,
                 "selected_rule_ids": sorted(current),
                 "version": int(version_row["version"]) if version_row else 0,
             }
@@ -1000,16 +1003,18 @@ def replace_agent_rule_bindings(
             operator=operator,
         )
         return {
-            "agent_id": agent_id,
+            "role_code": role_code,
             "selected_rule_ids": sorted(requested),
             "version": version,
         }
 
 
-def clear_agent_rule_bindings(tenant_id: str, agent_id: int, operator: str) -> None:
-    if tenant_id == GLOBAL_TENANT:
-        raise StoreError(400, "invalid_agent_scope", "global tenant cannot bind agents")
+def clear_agent_role_rule_bindings(
+    tenant_id: str, role_code: str, operator: str
+) -> None:
     with db_connection() as conn:
+        agent = _resolve_agent_role(conn, tenant_id, role_code)
+        agent_id = int(agent["id"])
         current = _selected_rule_ids(conn, tenant_id, agent_id)
         if not current:
             return
@@ -1251,7 +1256,7 @@ def list_hit_events(
     *,
     rule_id: int | None = None,
     type_id: int | None = None,
-    agent_id: int | None = None,
+    role_code: str | None = None,
     session_id: str | None = None,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
@@ -1265,42 +1270,45 @@ def list_hit_events(
     conds = ["1 = 1"]
     params: dict[str, Any] = {}
     if tenant_id is not None:
-        conds.append("tenant_id = :tenant_id")
+        conds.append("h.tenant_id = :tenant_id")
         params["tenant_id"] = tenant_id
     if rule_id is not None:
-        conds.append("rule_id = :rule_id")
+        conds.append("h.rule_id = :rule_id")
         params["rule_id"] = rule_id
     if type_id is not None:
-        conds.append("type_id = :type_id")
+        conds.append("h.type_id = :type_id")
         params["type_id"] = type_id
-    if agent_id is not None:
-        conds.append("agent_id = :agent_id")
-        params["agent_id"] = agent_id
+    if role_code is not None:
+        conds.append("a.role_code = :role_code")
+        params["role_code"] = role_code
     if session_id is not None:
-        conds.append("session_id = :session_id")
+        conds.append("h.session_id = :session_id")
         params["session_id"] = session_id
     if time_from is not None:
-        conds.append("hit_at >= :time_from")
+        conds.append("h.hit_at >= :time_from")
         params["time_from"] = time_from
     if time_to is not None:
-        conds.append("hit_at <= :time_to")
+        conds.append("h.hit_at <= :time_to")
         params["time_to"] = time_to
     where = " AND ".join(conds)
     with db_connection() as conn:
         total_row = _fetch_one(
             conn,
-            f"SELECT COUNT(*) AS n FROM sensitive_content.hit_event WHERE {where}",
+            "SELECT COUNT(*) AS n FROM sensitive_content.hit_event h "
+            "LEFT JOIN agno_agent a ON a.id = h.agent_id "
+            f"AND a.tenant_id = h.tenant_id WHERE {where}",
             params,
         )
         rows = _fetch_all(
             conn,
             f"""
-            SELECT event_id, rule_id, type_id, rule_action, final_action,
-                   selected, final_rule_id, tenant_id, agent_id, session_id,
-                   policy_version, hit_count, hit_at
-            FROM sensitive_content.hit_event
+            SELECT h.event_id, h.rule_id, h.type_id, h.rule_action, h.final_action,
+                   h.selected, h.final_rule_id, h.tenant_id, a.role_code, h.session_id,
+                   h.policy_version, h.hit_count, h.hit_at
+            FROM sensitive_content.hit_event h
+            LEFT JOIN agno_agent a ON a.id = h.agent_id AND a.tenant_id = h.tenant_id
             WHERE {where}
-            ORDER BY hit_at DESC, event_id
+            ORDER BY h.hit_at DESC, h.event_id
             LIMIT :limit OFFSET :offset
             """,
             {**params, "limit": page_size, "offset": (page - 1) * page_size},

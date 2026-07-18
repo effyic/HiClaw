@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 
 from sensitive_content import store
 from sensitive_content.api import (
@@ -172,50 +172,52 @@ def delete_rule(
 # Agent 规则绑定
 # ---------------------------------------------------------------------------
 
-@router.get("/agents/{agent_id}/sensitive-rules")
-def get_agent_rule_bindings(
+@router.get("/agents/{role_code}/sensitive-rules")
+def get_agent_role_rule_bindings(
     tenant_id: str,
-    agent_id: int,
+    role_code: str = Path(min_length=1, max_length=64),
     keyword: Optional[str] = Query(None),
     type_id: Optional[int] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
 ) -> dict[str, Any]:
-    items, selected_rule_ids, total = store.get_agent_rule_bindings(
+    items, selected_rule_ids, total = store.get_agent_role_rule_bindings(
         resolve_tenant(tenant_id),
-        agent_id,
+        role_code,
         keyword=keyword,
         type_id=type_id,
         page=page,
         page_size=page_size,
     )
     return {
-        "agent_id": agent_id,
+        "role_code": role_code,
         "selected_rule_ids": selected_rule_ids,
         "items": items,
         **_page_meta(page, page_size, total),
     }
 
 
-@router.put("/agents/{agent_id}/sensitive-rules")
-def replace_agent_rule_bindings(
+@router.put("/agents/{role_code}/sensitive-rules")
+def replace_agent_role_rule_bindings(
     tenant_id: str,
-    agent_id: int,
     body: AgentRuleBindingUpdate,
+    role_code: str = Path(min_length=1, max_length=64),
     operator: str = Depends(resolve_operator),
 ) -> dict[str, Any]:
-    return store.replace_agent_rule_bindings(
-        resolve_tenant(tenant_id), agent_id, body.rule_ids, operator
+    return store.replace_agent_role_rule_bindings(
+        resolve_tenant(tenant_id), role_code, body.rule_ids, operator
     )
 
 
-@router.delete("/agents/{agent_id}/sensitive-rules", status_code=204)
-def clear_agent_rule_bindings(
+@router.delete("/agents/{role_code}/sensitive-rules", status_code=204)
+def clear_agent_role_rule_bindings(
     tenant_id: str,
-    agent_id: int,
+    role_code: str = Path(min_length=1, max_length=64),
     operator: str = Depends(resolve_operator),
 ) -> None:
-    store.clear_agent_rule_bindings(resolve_tenant(tenant_id), agent_id, operator)
+    store.clear_agent_role_rule_bindings(
+        resolve_tenant(tenant_id), role_code, operator
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +229,7 @@ def list_hit_events(
     tenant_id: str,
     rule_id: Optional[int] = Query(None),
     type_id: Optional[int] = Query(None),
-    agent_id: Optional[int] = Query(None),
+    role_code: Optional[str] = Query(None, min_length=1, max_length=64),
     session_id: Optional[str] = Query(None),
     time_from: Optional[datetime] = Query(None, alias="from"),
     time_to: Optional[datetime] = Query(None, alias="to"),
@@ -242,7 +244,7 @@ def list_hit_events(
         None if tenant_id == GLOBAL_TENANT_PATH else tenant_id,
         rule_id=rule_id,
         type_id=type_id,
-        agent_id=agent_id,
+        role_code=role_code,
         session_id=session_id,
         time_from=time_from,
         time_to=time_to,

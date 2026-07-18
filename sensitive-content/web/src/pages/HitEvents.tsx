@@ -15,7 +15,7 @@ export default function HitEvents() {
 
   const [ruleId, setRuleId] = useState<number | undefined>()
   const [typeId, setTypeId] = useState<number | undefined>()
-  const [agentId, setAgentId] = useState<number | undefined>()
+  const [roleCode, setRoleCode] = useState('')
   const [sessionId, setSessionId] = useState('')
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null)
   const [page, setPage] = useState(1)
@@ -24,7 +24,7 @@ export default function HitEvents() {
   const params = {
     rule_id: ruleId,
     type_id: typeId,
-    agent_id: agentId,
+    role_code: roleCode || undefined,
     session_id: sessionId || undefined,
     from: range?.[0]?.toISOString(),
     to: range?.[1]?.toISOString(),
@@ -53,9 +53,9 @@ export default function HitEvents() {
     cols.push(
       {
         title: 'Agent',
-        dataIndex: 'agent_id',
-        width: 90,
-        render: (v: number | null) => (v == null ? '-' : `#${v}`),
+        dataIndex: 'role_code',
+        width: 180,
+        render: (v: string | null) => v || '-',
       },
       { title: '规则', dataIndex: 'rule_id', width: 90, render: (v: number) => `#${v}` },
       { title: '类型', dataIndex: 'type_id', width: 90, render: (v: number) => `#${v}` },
@@ -125,12 +125,12 @@ export default function HitEvents() {
             setPage(1)
           }}
         />
-        <InputNumber
-          placeholder="Agent ID"
-          min={1}
-          value={agentId}
-          onChange={(v) => {
-            setAgentId(v ?? undefined)
+        <Input.Search
+          style={{ width: 220 }}
+          placeholder="Agent role-code（精确匹配）"
+          allowClear
+          onSearch={(v) => {
+            setRoleCode(v.trim())
             setPage(1)
           }}
         />

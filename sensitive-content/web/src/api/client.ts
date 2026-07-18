@@ -204,20 +204,20 @@ export const api = {
   // ---- Agent 规则绑定（供 Agent 管理端复用） ----
   getAgentRuleBindings: (
     tenantId: string,
-    agentId: number,
+    roleCode: string,
     params?: ListParams & { keyword?: string; type_id?: number },
-  ) => request<AgentRuleBindings>('GET', `${tenantBase(tenantId)}/agents/${agentId}/sensitive-rules`, { params }),
-  replaceAgentRuleBindings: (tenantId: string, agentId: number, ruleIds: number[]) =>
-    request<AgentRuleBindingResult>('PUT', `${tenantBase(tenantId)}/agents/${agentId}/sensitive-rules`, {
+  ) => request<AgentRuleBindings>('GET', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-rules`, { params }),
+  replaceAgentRuleBindings: (tenantId: string, roleCode: string, ruleIds: number[]) =>
+    request<AgentRuleBindingResult>('PUT', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-rules`, {
       body: { rule_ids: ruleIds },
     }),
-  clearAgentRuleBindings: (tenantId: string, agentId: number) =>
-    request<void>('DELETE', `${tenantBase(tenantId)}/agents/${agentId}/sensitive-rules`),
+  clearAgentRuleBindings: (tenantId: string, roleCode: string) =>
+    request<void>('DELETE', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-rules`),
 
   // ---- 命中事件（文档 4.3） ----
   listHitEvents: (
     tenantId: string,
-    params?: ListParams & { rule_id?: number; type_id?: number; agent_id?: number; session_id?: string; from?: string; to?: string },
+    params?: ListParams & { rule_id?: number; type_id?: number; role_code?: string; session_id?: string; from?: string; to?: string },
   ) => request<Paged<HitEvent>>('GET', `${tenantBase(tenantId)}/hit-events`, { params }),
 
   // ---- 审计日志（文档 4.4） ----

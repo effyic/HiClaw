@@ -123,7 +123,7 @@ export interface AgentRuleOption extends SensitiveRule {
 }
 
 export interface AgentRuleBindings {
-  agent_id: number
+  role_code: string
   selected_rule_ids: number[]
   items: AgentRuleOption[]
   page: number
@@ -132,7 +132,7 @@ export interface AgentRuleBindings {
 }
 
 export interface AgentRuleBindingResult {
-  agent_id: number
+  role_code: string
   selected_rule_ids: number[]
   version: number
 }
@@ -147,7 +147,7 @@ export interface HitEvent {
   selected: boolean
   final_rule_id: number
   tenant_id: string
-  agent_id: number | null
+  role_code: string | null
   session_id: string
   policy_version: string
   hit_count: number

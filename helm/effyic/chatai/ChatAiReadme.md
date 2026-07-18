@@ -111,8 +111,8 @@ helm upgrade effyic-chatai helm/effyic/chatai \
 ```bash
 kubectl get deploy,svc,ingress -l app.kubernetes.io/component=sensitive-content -n effyic
 
-ADMIN=$(kubectl get secret effyic-chatai-sensitive-content-auth -n effyic \
-  -o jsonpath='{.data.SENSITIVE_CONTENT_ADMIN_TOKEN}' | base64 -d)
+ADMIN=$(kubectl get secret effyic-chatai-chatai-auth -n effyic \
+  -o jsonpath='{.data.CHATAI_API_TOKEN}' | base64 -d)
 
 curl "http://localhost/effyic/v1/tenants/1/sensitive-rules?page=1&page_size=50" \
   -H "Authorization: Bearer $ADMIN"

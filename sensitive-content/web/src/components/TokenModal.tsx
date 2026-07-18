@@ -33,7 +33,7 @@ export default function TokenModal() {
       destroyOnClose
     >
       <Typography.Paragraph type="secondary">
-        所有管理/统计接口需携带 <code>Authorization: Bearer &lt;SENSITIVE_CONTENT_ADMIN_TOKEN&gt;</code>。
+        所有管理/统计接口需携带 <code>Authorization: Bearer &lt;CHATAI_API_TOKEN&gt;</code>。
         Token 仅保存在本地浏览器（localStorage）。
       </Typography.Paragraph>
       <Input.Password

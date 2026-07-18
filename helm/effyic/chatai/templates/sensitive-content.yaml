@@ -4,9 +4,9 @@
 {{- $port := include "chatai.sensitiveContent.port" . | int }}
 {{- if not (index $sc "existingSecret") }}
 ---
-# Chart-managed credentials Secret (skipped when sensitiveContent.existingSecret
-# references a pre-created Secret). Values follow the chatai.authToken pattern:
-# configured value > existing Secret (lookup) > deterministic generation.
+# Chart-managed runtime credentials Secret (skipped when
+# sensitiveContent.existingSecret references a pre-created Secret). The admin
+# token is shared with the primary ChatAI Worker and is not duplicated here.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -18,7 +18,6 @@ metadata:
     app.kubernetes.io/component: sensitive-content
 type: Opaque
 stringData:
-  SENSITIVE_CONTENT_ADMIN_TOKEN: {{ include "chatai.sensitiveContent.adminToken" . | quote }}
   SENSITIVE_CONTENT_RUNTIME_TOKEN: {{ include "chatai.sensitiveContent.runtimeToken" . | quote }}
   SENSITIVE_CONTENT_FINGERPRINT_KEY: {{ include "chatai.sensitiveContent.fingerprintKey" . | quote }}
 {{- end }}
@@ -72,8 +71,8 @@ spec:
             - name: SENSITIVE_CONTENT_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "chatai.sensitiveContent.secretName" . }}
-                  key: SENSITIVE_CONTENT_ADMIN_TOKEN
+                  name: {{ include "chatai.sensitiveContent.adminAuthSecretName" . }}
+                  key: {{ .Values.auth.secretKey | default "CHATAI_API_TOKEN" }}
             - name: SENSITIVE_CONTENT_RUNTIME_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -125,7 +124,7 @@ spec:
 # 管理/统计 API 网关路由：{{ $publicPath }}/* → /api/v1/tenants/*。
 # 比 worker 的 {{ include "chatai.gatewayPath" . }} 前缀更长，Higress 按最长匹配优先，
 # 不影响 /effyic/v1/chat 与 /effyic/v1/sessions；/internal/v1/* 不经网关暴露。
-# 鉴权由服务自身完成（Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>）。
+# 鉴权由服务自身完成，Bearer Token 与主 ChatAI Worker 的 API Token 相同。
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

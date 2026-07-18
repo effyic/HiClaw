@@ -22,7 +22,7 @@
 
 - **敏感内容类型（sensitive-type）**：一类敏感内容（如"政治敏感"、"隐私信息"），决定命中后的**响应行为**（`action`）。规则必须挂在某个类型下。
 - **敏感内容规则（sensitive-rule）**：具体的词条或正则模式（即"敏感词"本体），命中即触发所属类型的行为。
-- **Agent 规则绑定**：规则启用后不会自动对租户内所有 Agent 生效；只有被 `agno_agent.id` 显式绑定的规则才会进入该 Agent 的策略快照。
+- **Agent 规则绑定**：规则启用后不会自动对租户内所有 Agent 生效；前端使用租户内唯一的 `role_code` 显式绑定，只有绑定规则才会进入该 Agent 的策略快照。
 - **全局 vs 租户**：`tenant_id` 路径参数取 `global` 时表示全局（平台级）资源；取具体租户 ID 时表示该租户的资源。全局类型/规则对所有租户可见，但仍需逐 Agent 绑定；租户可通过"覆盖规则"（`overrides_global_rule_id`）替换或禁用已绑定的全局规则。
 - **命中事件（hit-event）**：检测端上报的命中记录，**不含用户消息原文**，含明文 `session_id` 供跳转会话详情。
 - **审计日志（audit-log）**：所有写操作的操作记录；`changes` 字段只存字段名 + 值哈希/长度，不含明文。
@@ -40,7 +40,7 @@
 所有管理/统计 API 均要求：
 
 ```
-Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
+Authorization: Bearer <CHATAI_API_TOKEN>
 ```
 
 | 情况 | HTTP 状态 | 响应体 |
@@ -49,6 +49,9 @@ Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
 | 服务端未配置 Token | 503 | `{"detail": {"code": "token_not_configured", "message": "admin token not configured"}}` |
 
 **操作人标识**：写操作会记录操作人，取请求头 `X-Operator`。生产环境由认证网关注入（覆盖客户端值），前端**无需也不应**自行设置；本地联调无网关时可手工传入，缺省记为 `admin-token`。
+
+Helm 部署时，服务端的 `SENSITIVE_CONTENT_ADMIN_TOKEN` 直接取自主 ChatAI Worker 的
+`CHATAI_API_TOKEN`，前端无需维护另一份敏感内容管理 Token。
 
 ### 2.3 路径参数 `tenant_id`
 
@@ -265,7 +268,7 @@ Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
   "selected": true,
   "final_rule_id": 101,
   "tenant_id": "tenant-a",
-  "agent_id": 42,
+  "role_code": "medical-triage-18",
   "session_id": "sess-20260701-0001",
   "policy_version": "global-5:tenant-3:agent-2",
   "hit_count": 2,
@@ -282,7 +285,7 @@ Authorization: Bearer <SENSITIVE_CONTENT_ADMIN_TOKEN>
 | `selected` | bool | 本条命中是否为最终裁决所选（一次请求只有一条 `selected=true`） |
 | `final_rule_id` | int | 最终裁决所选的规则 ID |
 | `tenant_id` | string | 真实租户 ID（恒非 global） |
-| `agent_id` | int \| null | 命中所属 `agno_agent.id`；升级前历史数据可能为 null |
+| `role_code` | string \| null | 命中所属 Agent 的租户内唯一角色编码；Agent 已删除时可能为 null |
 | `session_id` | string | 明文会话 ID；可跳转网关会话接口 `/effyic/v1/sessions/{session_id}` 查看完整会话。**旧数据可能为空串** |
 | `policy_version` | string | 命中时的策略版本（`global-{N}:tenant-{M}:agent-{A}`） |
 | `hit_count` | int | 该规则在该请求中的命中次数 |
@@ -520,19 +523,19 @@ DELETE /api/v1/tenants/{tenant_id}/sensitive-rules/{rule_id}
 创建 Agent 的表单可继续使用现有规则列表接口加载选项：并行请求
 `GET /api/v1/tenants/global/sensitive-rules` 与
 `GET /api/v1/tenants/{tenant_id}/sensitive-rules` 后合并。Agent 创建成功并获得
-`agno_agent.id` 后，由 Agent 管理后端调用以下绑定接口。
+`role_code` 后，由 Agent 管理后端调用以下绑定接口。
 
 ```
-GET    /api/v1/tenants/{tenant_id}/agents/{agent_id}/sensitive-rules
-PUT    /api/v1/tenants/{tenant_id}/agents/{agent_id}/sensitive-rules
-DELETE /api/v1/tenants/{tenant_id}/agents/{agent_id}/sensitive-rules
+GET    /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules
+PUT    /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules
+DELETE /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules
 ```
 
 `GET` 支持 `keyword`、`type_id`、`page`、`page_size`，一次返回全局与本租户的规则选项：
 
 ```json
 {
-  "agent_id": 42,
+  "role_code": "medical-triage-18",
   "selected_rule_ids": [101, 205],
   "items": [
     {
@@ -578,7 +581,7 @@ GET /api/v1/tenants/{tenant_id}/hit-events
 |-------|------|------|
 | `rule_id` | int | 按规则筛选 |
 | `type_id` | int | 按类型筛选 |
-| `agent_id` | int | 按 `agno_agent.id` 精确筛选 |
+| `role_code` | string | 按租户内 Agent 角色编码精确筛选 |
 | `session_id` | string | 按会话精确筛选 |
 | `from` / `to` | datetime | 命中时间范围 |
 | `page` / `page_size` | int | 分页 |

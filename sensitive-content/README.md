@@ -36,7 +36,7 @@ sensitive-content/
 | `policy_version` | 每租户策略版本，任何写操作同事务递增 |
 | `agent_rule_binding` | Agent 与具体规则的多对多绑定；未绑定规则不会进入该 Agent 快照 |
 | `agent_policy_version` | 每 Agent 的绑定版本，仅绑定集合实际变化时递增 |
-| `hit_event` | 命中事件（`event_id` UUID 幂等；含 `agent_id`、明文 `session_id`，不含用户原文与规则明文） |
+| `hit_event` | 命中事件（`event_id` UUID 幂等；内部关联 `agent_id`，管理 API 返回 `role_code`；含明文 `session_id`，不含用户原文与规则明文） |
 | `audit_log` | 审计日志（changes 仅存字段名 + 值哈希/长度元数据） |
 | `sensitive_action` | 8 种响应行为目录（种子数据） |
 | `schema_migration` | 迁移版本记录 |
@@ -83,14 +83,14 @@ POST           /api/v1/tenants/{tenant_id}/sensitive-types/{id}:enable|:disable
 POST/GET       /api/v1/tenants/{tenant_id}/sensitive-rules      # keyword/type_id/enabled 筛选 + 分页
 GET/PUT/DELETE /api/v1/tenants/{tenant_id}/sensitive-rules/{id}
 POST           /api/v1/tenants/{tenant_id}/sensitive-rules/{id}:enable|:disable
-GET/PUT/DELETE /api/v1/tenants/{tenant_id}/agents/{agent_id}/sensitive-rules # 规则选项、整体替换、清空绑定
-GET            /api/v1/tenants/{tenant_id}/hit-events           # rule_id/type_id/agent_id/session_id/from/to 筛选
+GET/PUT/DELETE /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules # 规则选项、整体替换、清空绑定
+GET            /api/v1/tenants/{tenant_id}/hit-events           # rule_id/type_id/role_code/session_id/from/to 筛选
 GET            /api/v1/tenants/{tenant_id}/audit-logs           # 目标/操作/时间筛选
 ```
 
 命中事件明细中的 `session_id` 可直接用于网关会话接口（`/effyic/v1/sessions/{session_id}`）查看完整会话记录；`tenant_id=global` 表示跨全部租户查询。旧事件（升级前上报）`session_id` 为空字符串。
 
-规则启用只是生效的必要条件：最终还要求类型启用、Agent 已绑定且覆盖关系有效。绑定接口使用 `agno_agent.id`，写入时校验 Agent 属于路径租户；存量 Agent 不自动绑定规则。禁用规则保留绑定，删除规则自动清理相关绑定。
+规则启用只是生效的必要条件：最终还要求类型启用、Agent 已绑定且覆盖关系有效。绑定接口使用租户内唯一的 `agno_agent.role_code`，服务端解析内部主键后写入绑定；存量 Agent 不自动绑定规则。禁用规则保留绑定，删除规则自动清理相关绑定。
 
 约束：租户上下文不能修改全局类型/规则（403）；规则 `type_id` 须为全局类型或本租户类型；正则规则校验语法、长度（≤512）与嵌套量词复杂度；同租户完全重复规则（规范化后相等）拒绝创建。所有写操作同事务写审计并递增相应策略版本。
 
@@ -123,7 +123,7 @@ GET /api/v1/tenants/{tenant_id}/metrics/trend       # granularity=hour|day|week|
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `SENSITIVE_CONTENT_DB_URL` | （必填） | PostgreSQL URL，如 `postgresql+psycopg://user:pass@host:5432/chatai` |
-| `SENSITIVE_CONTENT_ADMIN_TOKEN` | — | 管理/统计 API Bearer Token |
+| `SENSITIVE_CONTENT_ADMIN_TOKEN` | — | 管理/统计 API Bearer Token；Helm 部署时由主 ChatAI Worker 的 `CHATAI_API_TOKEN` 注入 |
 | `SENSITIVE_CONTENT_RUNTIME_TOKEN` | — | 内部 API Bearer Token |
 | `SENSITIVE_CONTENT_FINGERPRINT_KEY` | — | HMAC 指纹密钥（检测端使用） |
 | `SENSITIVE_CONTENT_RETENTION_DAYS` | `90` | 命中事件保留天数 |

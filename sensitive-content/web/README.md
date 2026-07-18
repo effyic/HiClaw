@@ -23,7 +23,7 @@ npm run dev
 
 默认在 `http://localhost:5180` 启动，`/api`、`/healthz` 会代理到本地 `http://localhost:8091`（可用环境变量 `SC_DEV_API_TARGET` 覆盖代理目标）。
 
-首次进入后点击右上角「设置 Token」，填入服务端的 `SENSITIVE_CONTENT_ADMIN_TOKEN`（保存在浏览器 localStorage）。
+首次进入后点击右上角「设置 Token」，填入 ChatAI 的 `CHATAI_API_TOKEN`（Helm 部署下与服务端管理 Token 相同，保存在浏览器 localStorage）。
 
 ## 构建与部署
 
