@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,11 @@ def suggested_write_tool(config: dict[str, Any] | None) -> str | None:
 
 
 def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
+    """Normalize schema fields; preserve generic constraints (pattern / exports).
+
+    Domain-specific slots (e.g. medical triage dept code) belong in published
+    ``agno_agent.workflow`` or ``transform_workflow_hook``, not in worker code.
+    """
     if not isinstance(raw_fields, list):
         return []
     fields: list[dict[str, Any]] = []
@@ -109,14 +115,126 @@ def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
             continue
         if item.get("enabled") is False:
             continue
-        fields.append(
-            {
-                "name": name,
-                "description": str(item.get("description") or "").strip(),
-                "required": _as_bool(item.get("required"), True),
+        field: dict[str, Any] = {
+            "name": name,
+            "description": str(item.get("description") or "").strip(),
+            "required": _as_bool(item.get("required"), True),
+        }
+        pattern = str(item.get("pattern") or "").strip()
+        if pattern:
+            field["pattern"] = pattern
+        pattern_message = str(item.get("pattern_message") or "").strip()
+        if pattern_message:
+            field["pattern_message"] = pattern_message
+        exports = item.get("exports")
+        if isinstance(exports, dict) and exports:
+            field["exports"] = {
+                str(k): v for k, v in exports.items() if str(k).strip()
             }
-        )
+        fields.append(field)
     return fields
+
+
+def resolve_inline_schema_fields(config: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Resolve inline schema.fields from workflow config only (no domain defaults)."""
+    if not isinstance(config, dict):
+        return []
+    schema_cfg = config.get("schema") if isinstance(config.get("schema"), dict) else {}
+    return normalize_schema_fields(schema_cfg.get("fields"))
+
+
+def _schema_field_by_name(
+    schema: list[dict[str, Any]],
+    name: str,
+) -> dict[str, Any] | None:
+    for field in schema:
+        if str(field.get("name") or "").strip() == name:
+            return field
+    return None
+
+
+def _validate_field_value(
+    schema: list[dict[str, Any]],
+    name: str,
+    text: str,
+) -> str:
+    """Enforce optional per-field ``pattern`` from published schema."""
+    field = _schema_field_by_name(schema, name)
+    if not field:
+        return text
+    pattern = str(field.get("pattern") or "").strip()
+    if not pattern:
+        return text
+    try:
+        matched = re.fullmatch(pattern, text)
+    except re.error as exc:
+        logger.warning("invalid schema pattern for field %s: %s", name, exc)
+        return text
+    if not matched:
+        message = str(field.get("pattern_message") or "").strip() or (
+            f"field {name!r} must match pattern {pattern!r}"
+        )
+        raise ValueError(message)
+    return text
+
+
+def _export_from_text(source: str, spec: Any) -> str:
+    """Extract one export value; ``spec`` is a regex str or {regex, group}."""
+    text = str(source or "")
+    if not text or spec is None:
+        return ""
+    if isinstance(spec, str):
+        regex, group = spec, 1
+    elif isinstance(spec, dict):
+        regex = str(spec.get("regex") or "").strip()
+        group = spec.get("group", 1)
+    else:
+        return ""
+    if not regex:
+        return ""
+    try:
+        matched = re.search(regex, text)
+    except re.error as exc:
+        logger.warning("invalid export regex %r: %s", regex, exc)
+        return ""
+    if not matched:
+        return ""
+    try:
+        if isinstance(group, str):
+            return str(matched.group(group) or "").strip()
+        return str(matched.group(int(group)) or "").strip()
+    except (IndexError, KeyError, ValueError):
+        return ""
+
+
+def apply_schema_exports(
+    schema: list[dict[str, Any]] | None,
+    collected: dict[str, Any] | None,
+    reply_text: str | None = None,
+) -> dict[str, str]:
+    """Project schema field ``exports`` into flat keys for H5 / metadata."""
+    out: dict[str, str] = {}
+    if not isinstance(schema, list):
+        return out
+    collected_map = collected if isinstance(collected, dict) else {}
+    for field in schema:
+        if not isinstance(field, dict):
+            continue
+        exports = field.get("exports")
+        if not isinstance(exports, dict) or not exports:
+            continue
+        name = str(field.get("name") or "").strip()
+        source = str(collected_map.get(name) or "").strip()
+        if not source and reply_text:
+            source = str(reply_text)
+        for export_key, spec in exports.items():
+            key = str(export_key).strip()
+            if not key or key in out:
+                continue
+            value = _export_from_text(source, spec)
+            if value:
+                out[key] = value
+    return out
 
 
 def compute_missing(
@@ -169,17 +287,46 @@ def ensure_collection_state(
         state["user_confirmed"] = _as_bool(existing.get("user_confirmed"), False)
         state["completed"] = _as_bool(existing.get("completed"), False)
 
-    if config and not state["schema"]:
-        schema_cfg = config.get("schema")
-        if isinstance(schema_cfg, dict) and str(schema_cfg.get("source") or "") == "inline":
-            state["schema"] = normalize_schema_fields(schema_cfg.get("fields"))
-            state["missing"] = compute_missing(state["schema"], state["collected"])
-            if state["schema"] and state["phase"] == PHASE_INIT:
-                state["phase"] = PHASE_COLLECTING
-
-    if state["schema"]:
+    # Inline schema is always owned by published agno_agent.workflow (SaaS-editable).
+    # Reconcile every call so admin field edits take effect without writing agent rows
+    # and without freezing the first-turn snapshot in session_state.
+    if config and schema_source(config) == "inline":
+        state = reconcile_inline_schema_from_config(state, config)
+    elif state["schema"]:
         state["missing"] = compute_missing(state["schema"], state["collected"])
     return state
+
+
+def reconcile_inline_schema_from_config(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Adopt latest inline schema.fields; keep collected values only for still-valid keys.
+
+    Never persists back to ``agno_agent`` — only mutates in-memory / session_state
+    collection progress for the current conversation.
+    """
+    out = dict(state or empty_collection_state())
+    latest = resolve_inline_schema_fields(config)
+    allowed = {
+        str(field.get("name") or "").strip()
+        for field in latest
+        if str(field.get("name") or "").strip()
+    }
+    collected_in = out.get("collected") if isinstance(out.get("collected"), dict) else {}
+    out["collected"] = {
+        str(k): v
+        for k, v in collected_in.items()
+        if str(k).strip() and str(k).strip() in allowed
+    }
+    out["schema"] = latest
+    out["missing"] = compute_missing(out["schema"], out["collected"])
+    if out["schema"] and out.get("phase") == PHASE_INIT:
+        out["phase"] = PHASE_COLLECTING
+    elif not out["schema"]:
+        # Published template has empty fields — do not invent domain slots.
+        out["phase"] = PHASE_INIT
+    return out
 
 
 def advance_collection_phase(
@@ -260,7 +407,7 @@ def load_schema_into_state(
         schema_cfg = config.get("schema") if isinstance(config.get("schema"), dict) else {}
         source = str(schema_cfg.get("source") or "inline").strip()
         if source == "inline":
-            schema_fields = normalize_schema_fields(schema_cfg.get("fields"))
+            schema_fields = resolve_inline_schema_fields(config)
         else:
             raise ValueError(
                 f"schema.source={source!r} requires fields_json from MCP "
@@ -268,6 +415,7 @@ def load_schema_into_state(
             )
     if not schema_fields:
         raise ValueError("no schema fields available to load")
+
     out["schema"] = schema_fields
     out["missing"] = compute_missing(out["schema"], out["collected"])
     if out["phase"] == PHASE_INIT:
@@ -319,7 +467,7 @@ def update_collected_fields(
         if not text:
             collected.pop(name, None)
         else:
-            collected[name] = text
+            collected[name] = _validate_field_value(out["schema"], name, text)
     out["collected"] = collected
     return advance_collection_phase(out, config)
 
@@ -489,24 +637,54 @@ def collection_instructions_appendix(
         lines.append(f"7. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
     if write_tool:
         lines.append(f"8. Suggested write/update MCP tool: {write_tool}")
+    patterned = [
+        {
+            "name": f.get("name"),
+            "pattern": f.get("pattern"),
+            "pattern_message": f.get("pattern_message") or "",
+        }
+        for f in (current.get("schema") or [])
+        if isinstance(f, dict) and str(f.get("pattern") or "").strip()
+    ]
+    if patterned:
+        lines.append(
+            "9. Fields with pattern MUST match when calling collection_update_fields: "
+            + json.dumps(patterned, ensure_ascii=False)
+        )
     return "\n".join(lines)
 
 
-def collection_status_payload(state: dict[str, Any]) -> dict[str, Any]:
-    """Structured progress for H5 / SSE metadata (prefer over parsing reply text)."""
-    return {
+def collection_status_payload(
+    state: dict[str, Any],
+    reply_text: str | None = None,
+) -> dict[str, Any]:
+    """Structured progress for H5 / SSE metadata (prefer over parsing reply text).
+
+    Generic payload includes ``collected`` plus optional keys projected from each
+    schema field's ``exports`` (configured at publish time / via workflow hook).
+    """
+    collected = state.get("collected") if isinstance(state.get("collected"), dict) else {}
+    schema = state.get("schema") if isinstance(state.get("schema"), list) else []
+    payload: dict[str, Any] = {
         "phase": state.get("phase"),
         "missing": list(state.get("missing") or []),
-        "ready": not bool(state.get("missing")) and bool(state.get("schema")),
+        "ready": not bool(state.get("missing")) and bool(schema),
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
-        "collected_keys": sorted((state.get("collected") or {}).keys()),
+        "collected_keys": sorted(collected.keys()),
+        "collected": dict(collected),
     }
+    exported = apply_schema_exports(schema, collected, reply_text=reply_text)
+    payload.update(exported)
+    return payload
 
 
-def format_status_marker(state: dict[str, Any]) -> str:
+def format_status_marker(
+    state: dict[str, Any],
+    reply_text: str | None = None,
+) -> str:
     body = json.dumps(
-        collection_status_payload(state),
+        collection_status_payload(state, reply_text=reply_text),
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -515,9 +693,11 @@ def format_status_marker(state: dict[str, Any]) -> str:
 
 def append_status_marker(content: str | None, state: dict[str, Any]) -> str:
     text = str(content or "")
-    marker = format_status_marker(state)
+    marker = format_status_marker(state, reply_text=text)
     if STATUS_MARKER_PREFIX in text:
-        return text
+        # Refresh marker so late-parsed dept_code from the reply is visible to H5.
+        prefix, _, _tail = text.partition(STATUS_MARKER_PREFIX)
+        return f"{prefix.rstrip()}\n\n{marker}" if prefix.strip() else marker
     if text.strip():
         return f"{text.rstrip()}\n\n{marker}"
     return marker

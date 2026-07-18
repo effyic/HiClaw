@@ -301,13 +301,14 @@ class AgentBuilder:
                 coll = (run_context.session_state or {}).get(COLLECTION_STATE_KEY) or {}
                 if not isinstance(coll, dict):
                     coll = {}
+                reply_text = None
                 if run_output is not None and hasattr(run_output, "content"):
-                    run_output.content = append_status_marker(
-                        getattr(run_output, "content", None),
-                        coll,
-                    )
+                    reply_text = str(getattr(run_output, "content", None) or "")
+                    run_output.content = append_status_marker(reply_text, coll)
+                    reply_text = str(run_output.content or "")
                 # Prefer metadata for streaming H5 clients (reply chunks omit marker).
-                status = collection_status_payload(coll)
+                # Include dept_code parsed from collected slots and/or reply text.
+                status = collection_status_payload(coll, reply_text=reply_text)
                 if run_output is not None:
                     if not isinstance(getattr(run_output, "metadata", None), dict):
                         run_output.metadata = {}
