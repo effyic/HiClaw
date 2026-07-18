@@ -317,22 +317,36 @@ class AgentBuilder:
             or model_id
             or "qwen3.6-plus"
         )
+        if ":" in default_model:
+            default_model = default_model.split(":", 1)[-1]
+
         gateway_url = os.environ.get("HICLAW_AI_GATEWAY_URL", "").rstrip("/")
         gateway_key = os.environ.get("HICLAW_WORKER_GATEWAY_KEY", "")
-        if gateway_url and gateway_key:
-            from agno.models.openai import OpenAIChat
+        api_key = gateway_key or os.environ.get("OPENAI_API_KEY", "")
+        base_url = (
+            f"{gateway_url}/v1"
+            if gateway_url and gateway_key
+            else (os.environ.get("OPENAI_BASE_URL", "") or "").rstrip("/")
+        )
 
-            return attach_thinking_request_params(
-                OpenAIChat(
-                    id=default_model,
-                    api_key=gateway_key,
-                    base_url=f"{gateway_url}/v1",
-                    extra_body={"enable_thinking": False},
-                )
-            )
-        if ":" not in default_model:
+        # Always build a concrete model and patch enable_thinking. Passing a bare
+        # ``openai:xxx`` string skips the patch; DashScope then keeps Qwen thinking
+        # on by default and each turn costs several extra seconds.
+        try:
+            from agno.models.openai.responses import OpenAIResponses
+
+            kwargs: dict[str, Any] = {
+                "id": default_model,
+                "extra_body": {"enable_thinking": False},
+            }
+            if api_key:
+                kwargs["api_key"] = api_key
+            if base_url:
+                kwargs["base_url"] = base_url
+            return attach_thinking_request_params(OpenAIResponses(**kwargs))
+        except Exception:
+            logger.exception("Failed to build OpenAIResponses; falling back to model id string")
             return f"openai:{default_model}"
-        return default_model
 
 
 def _extract_session_id(session: Any, run_context: Any) -> str:
