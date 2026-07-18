@@ -56,6 +56,8 @@ def build_mcp_tools(
                 kwargs["include_tools"] = server.include_tools
             if server.exclude_tools:
                 kwargs["exclude_tools"] = server.exclude_tools
+            # True: ensure MCP tools are connected/listed each run (False caused
+            # "Function xxx not found" when sessions were not yet initialized).
             kwargs["refresh_connection"] = True
             tools.append(MCPTools(**kwargs))
         except Exception as exc:

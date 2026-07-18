@@ -13,6 +13,8 @@ from agno_worker.tenant.collection import (
     PHASE_DONE,
     PHASE_READY,
     advance_collection_phase,
+    apply_schema_exports,
+    collection_status_payload,
     confirm_collection,
     ensure_collection_state,
     load_schema_into_state,
@@ -41,6 +43,33 @@ INQUIRY_WORKFLOW = {
         },
         "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"},
     },
+}
+
+
+# Published medical-triage workflow shape (filled by Java assembler / product config).
+TRIAGE_PUBLISHED_WORKFLOW = {
+    "kind": "collection_dialogue",
+    "phase": "triage",
+    "confirm_required": False,
+    "ask_batch_size": 2,
+    "schema": {
+        "source": "inline",
+        "fields": [
+            {"name": "主诉", "required": True},
+            {"name": "持续时间", "required": True},
+            {
+                "name": "推荐科室",
+                "required": True,
+                "pattern": r"^.+\[[A-Za-z0-9_-]+\]$",
+                "pattern_message": "推荐科室 must be 名称[code]",
+                "exports": {
+                    "dept_name": {"regex": r"^\s*(.+?)\s*[\[【]", "group": 1},
+                    "dept_code": {"regex": r"[\[【]\s*([A-Za-z0-9_-]+)\s*[\]】]", "group": 1},
+                },
+            },
+        ],
+    },
+    "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"},
 }
 
 
@@ -148,3 +177,82 @@ def test_sync_does_not_use_workflow_scenario_phase():
         resolve_collection_config(INQUIRY_WORKFLOW),
     )
     assert advanced["phase"] == PHASE_CONFIRMED
+
+
+def test_empty_inline_schema_stays_empty_without_domain_defaults():
+    """SaaS worker must not invent medical triage fields when publish left them empty."""
+    config = resolve_collection_config(
+        {
+            "kind": "collection_dialogue",
+            "phase": "triage",
+            "schema": {"source": "inline", "fields": []},
+        }
+    )
+    state = ensure_collection_state({}, config)
+    assert state["schema"] == []
+    assert state["phase"] == "init"
+
+
+def test_inline_schema_resyncs_from_latest_config_each_turn():
+    """Admin can edit published fields anytime; session must not freeze old schema."""
+    config_v1 = resolve_collection_config(
+        {
+            "kind": "collection_dialogue",
+            "confirm_required": False,
+            "schema": {
+                "source": "inline",
+                "fields": [
+                    {"name": "主诉", "required": True},
+                    {"name": "旧字段", "required": False},
+                ],
+            },
+        }
+    )
+    state = ensure_collection_state({}, config_v1)
+    state = update_collected_fields(
+        state, {"主诉": "头痛", "旧字段": "x"}, config_v1
+    )
+    assert "旧字段" in state["collected"]
+
+    config_v2 = resolve_collection_config(
+        {
+            "kind": "collection_dialogue",
+            "confirm_required": False,
+            "schema": {
+                "source": "inline",
+                "fields": [
+                    {"name": "主诉", "required": True},
+                    {"name": "推荐科室", "required": True},
+                ],
+            },
+        }
+    )
+    state = ensure_collection_state(state, config_v2)
+    names = {f["name"] for f in state["schema"]}
+    assert names == {"主诉", "推荐科室"}
+    assert state["collected"] == {"主诉": "头痛"}
+    assert "推荐科室" in state["missing"]
+    assert "旧字段" not in state["collected"]
+
+
+def test_schema_pattern_and_exports_are_config_driven():
+    config = resolve_collection_config(TRIAGE_PUBLISHED_WORKFLOW)
+    state = ensure_collection_state({}, config)
+    with pytest.raises(ValueError, match="名称\\[code\\]"):
+        update_collected_fields(state, {"推荐科室": "神经内科"}, config)
+    state = update_collected_fields(
+        state,
+        {
+            "主诉": "头痛",
+            "持续时间": "2天",
+            "推荐科室": "神经内科[sjnk]",
+        },
+        config,
+    )
+    assert state["collected"]["推荐科室"] == "神经内科[sjnk]"
+    exported = apply_schema_exports(state["schema"], state["collected"])
+    assert exported["dept_name"] == "神经内科"
+    assert exported["dept_code"] == "sjnk"
+    status = collection_status_payload(state)
+    assert status["dept_code"] == "sjnk"
+    assert status["collected"]["推荐科室"] == "神经内科[sjnk]"
