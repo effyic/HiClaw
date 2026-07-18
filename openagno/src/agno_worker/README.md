@@ -50,17 +50,17 @@ HTTP (/effyic/v1/chat, /effyic/v1/chat/stream, /effyic/v1/sessions*)
 ## 3. HTTP 入口与身份解析
 
 
-| 端点                                                   | 说明                       |
-| ---------------------------------------------------- | ------------------------ |
-| `POST /effyic/v1/chat`                               | 同步对话                     |
-| `POST /effyic/v1/chat/stream`                        | SSE 流式对话                 |
-| `GET /effyic/v1/sessions`                            | 按 `user_id` 分页列出历史会话     |
-| `GET /effyic/v1/sessions/{session_id}`               | 获取会话详情（含 `chat_history`） |
+| 端点                                                   | 说明                                              |
+| ---------------------------------------------------- | ----------------------------------------------- |
+| `POST /effyic/v1/chat`                               | 同步对话                                            |
+| `POST /effyic/v1/chat/stream`                        | SSE 流式对话                                        |
+| `GET /effyic/v1/sessions`                            | 按 `user_id` 分页列出历史会话                            |
+| `GET /effyic/v1/sessions/{session_id}`               | 获取会话详情（含 `chat_history`）                        |
 | `GET /effyic/v1/sessions/{session_id}/conversation`  | 获取纯对话（基于 `run_input`，不含 `<additional context>`） |
-| `GET /effyic/v1/sessions/{session_id}/runs`          | 获取会话下所有 run              |
-| `GET /effyic/v1/sessions/{session_id}/runs/{run_id}` | 获取单次 run 详情              |
-| `GET /effyic/health`                                 | 健康检查                     |
-| `GET /effyic/status`                                 | 运行时状态（Hook 加载来源、指纹等）     |
+| `GET /effyic/v1/sessions/{session_id}/runs`          | 获取会话下所有 run                                     |
+| `GET /effyic/v1/sessions/{session_id}/runs/{run_id}` | 获取单次 run 详情                                     |
+| `GET /effyic/health`                                 | 健康检查                                            |
+| `GET /effyic/status`                                 | 运行时状态（Hook 加载来源、指纹等）                            |
 
 
 
@@ -97,9 +97,9 @@ curl -X POST http://localhost:8090/effyic/v1/chat/stream \
 ### 3.2 跳过会话持久化（`x-ignore-db`）
 
 
-| 请求头     | 行为 |
-| ------- | --- |
-| `true`  | **读但不写** session 表：本次 run 使用空内存会话，结束后不 upsert |
+| 请求头    | 行为                                            |
+| ------ | --------------------------------------------- |
+| `true` | **读但不写** session 表：本次 run 使用空内存会话，结束后不 upsert |
 
 
 适用于后台一次性推理、不希望污染对话历史的接口。优先于 `x-debug-request`。
@@ -196,7 +196,7 @@ RequestFilterPipeline.apply_post_filter()  # request_post_filter_hook (可选)
 | 租户/角色解析   | `tenant/context.py` | `tenant_id`：metadata → session_state → factory → `"default"`；`role_code`：metadata → session_state → `"default"` |
 | 配置加载      | `tenant/store.py`   | `tenant_id` + `role_code` 精确匹配 → 同租户 `default` 行 → 全局 `default` 租户                                              |
 | Prompt 组装 | `tenant/prompt.py`  | system_prompt、instructions、context_filters                                                                      |
-| MCP 配置    | `tenant/mcp.py`     | 从 `mcp_config` 构建 MCPServerConfig；HTTP MCP 默认注入身份 + `x-*` headers                                         |
+| MCP 配置    | `tenant/mcp.py`     | 从 `mcp_config` 构建 MCPServerConfig；HTTP MCP 默认注入身份 + `x-*` headers                                               |
 | Skill 扫描  | `tenant/skills.py`  | 扫描 `AGNO_SKILLS_DIR`，按 tenant_ids 过滤                                                                            |
 | 会话管理      | `tenant/session.py` | init_session、build_session_updates（同步当前行的 `workflow`）                                                           |
 | 数据工具      | `tenant/data.py`    | `query_tenant_data`（当前为配置摘要 stub）                                                                               |
@@ -225,7 +225,7 @@ HTTP role-code / x-role-code（或 query role_code）
 
 ### 5.2 采集对话薄协议（collection dialogue）
 
-配置驱动的槽位采集 FSM，适用于问诊 / 分诊 / 问卷等。**进度只写在 `session_state.collection`**，随 Agno session 落库（`AGNO_DB_URL`），精简入库白名单含 `collection`，**集群多副本不丢状态**。
+配置驱动的槽位采集 FSM，适用于问诊 / 分诊 / 问卷等。**进度只写在** `session_state.collection`，随 Agno session 落库（`AGNO_DB_URL`），精简入库白名单含 `collection`，**集群多副本不丢状态**。
 
 启用方式（`agno_agent.workflow`）：
 
@@ -251,14 +251,16 @@ HTTP role-code / x-role-code（或 query role_code）
 
 也可顶层 `"kind": "collection_dialogue"`。`schema.source=mcp` 时由模型先调字段列表 MCP，再把结果传给 `collection_load_schema(fields_json=...)`。
 
-| 工具 | 作用 |
-|------|------|
-| `collection_load_schema` | 加载字段清单（`schema.source=inline` 时通常已自动加载） |
-| `collection_update_fields` | 合并采集值（**仅允许 schema 内字段名**）并重算 missing |
-| `collection_status` | 只读进度 |
-| `collection_confirm` | 用户确认（可选，由 `confirm_required` 控制） |
-| `collection_complete` | 可选：写入 `draft_payload` 快照 |
-| `collection_mark_done` | 写库 / 更新成功后记账；允许早写与多次写 |
+
+| 工具                         | 作用                                      |
+| -------------------------- | --------------------------------------- |
+| `collection_load_schema`   | 加载字段清单（`schema.source=inline` 时通常已自动加载） |
+| `collection_update_fields` | 合并采集值（**仅允许 schema 内字段名**）并重算 missing   |
+| `collection_status`        | 只读进度                                    |
+| `collection_confirm`       | 用户确认（可选，由 `confirm_required` 控制）        |
+| `collection_complete`      | 可选：写入 `draft_payload` 快照                |
+| `collection_mark_done`     | 写库 / 更新成功后记账；允许早写与多次写                   |
+
 
 写库 MCP（如 `mec_create_emr_case`）始终对模型可见，可早写、可多次更新。缺必填字段时由 prompt + `missing` 驱动继续追问；`completed` 表示「至少成功写过一次」，不冻结 FSM——用户补充病情后可再 `update_fields` 并再次写库。
 
@@ -305,7 +307,7 @@ hooks.py → filters.py → transform.py → business.py → prompt.py
 | `transform_workflow_hook`      | post_hook           | `tenant/service.py`                   | 变换 workflow / session_state 更新              |
 | `transform_session_state_hook` | post_hook           | `tenant/service.py`                   | 变换 session_state 更新                         |
 | `mcp_connection_hook`          | MCP 连接前             | `tenant/service.py` → `mcp/loader.py` | 鉴权、env/headers 注入                           |
-| `mcp_headers_hook`             | MCP headers 默认透传后 | `tenant/service.py`                   | 二次加工 HTTP MCP headers；返回 `None` 表示不改       |
+| `mcp_headers_hook`             | MCP headers 默认透传后   | `tenant/service.py`                   | 二次加工 HTTP MCP headers；返回 `None` 表示不改        |
 | `mcp_tool_filter_hook`         | tools 组装后           | `tenant/service.py`                   | 裁剪最终工具列表                                    |
 | `result_processing_hook`       | 数据查询后               | `tenant/service.py`                   | 格式化 `query_tenant_data` 结果                  |
 | `request_pre_filter_hook`      | HTTP 请求前            | `hooks/filters.py`                    | 准入控制；返回 `{"allowed": False}` 拒绝             |
@@ -403,21 +405,21 @@ def pick_hook_or_spec(hook_value, spec_value):
 pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 
 
-| 字段                                  | 来源               | 说明                                     |
-| ----------------------------------- | ---------------- | -------------------------------------- |
-| `metadata["tenant_id"]`             | HTTP 解析          | 租户 ID                                  |
-| `metadata["user_id"]`               | HTTP 解析          | 用户 ID                                  |
-| `metadata["session_id"]`            | HTTP / Agno      | 会话 ID                                  |
-| `metadata["role_code"]`             | HTTP 解析          | 角色编码                                   |
-| `metadata["request_headers"]`       | HTTP 原始请求头       | 供 `x-*` 透传 / `mcp_headers_hook`；精简持久化时剥离     |
-| `metadata["user_requirements"]`     | pre_hook 从用户消息提取 | Skill 匹配                               |
-| `session_state`                     | Agno 持久化         | 含 `active_role`、`phase`、`workflow` 等   |
-| `knowledge_filters`                 | pre_hook 写入      | WeKnora MCP 知识检索参数                     |
-| `dependencies["tenant"]`            | pre_hook 写入      | `{tenant_id, knowledge_ids, provider}` |
-| `dependencies["user_profile"]`      | pre_hook 写入      | `{user_id, tenant_id}`                 |
-| `dependencies["skill_catalog"]`     | pre_hook 写入      | Skill 元数据列表                            |
-| `dependencies["business_context"]`  | pre_hook 写入      | 含 enrich hook 注入的业务数据                  |
-| `dependencies["_tenant_run_cache"]` | 内部               | run-scoped 缓存，勿依赖其结构                   |
+| 字段                                  | 来源               | 说明                                       |
+| ----------------------------------- | ---------------- | ---------------------------------------- |
+| `metadata["tenant_id"]`             | HTTP 解析          | 租户 ID                                    |
+| `metadata["user_id"]`               | HTTP 解析          | 用户 ID                                    |
+| `metadata["session_id"]`            | HTTP / Agno      | 会话 ID                                    |
+| `metadata["role_code"]`             | HTTP 解析          | 角色编码                                     |
+| `metadata["request_headers"]`       | HTTP 原始请求头       | 供 `x-*` 透传 / `mcp_headers_hook`；精简持久化时剥离 |
+| `metadata["user_requirements"]`     | pre_hook 从用户消息提取 | Skill 匹配                                 |
+| `session_state`                     | Agno 持久化         | 含 `active_role`、`phase`、`workflow` 等     |
+| `knowledge_filters`                 | pre_hook 写入      | WeKnora MCP 知识检索参数                       |
+| `dependencies["tenant"]`            | pre_hook 写入      | `{tenant_id, knowledge_ids, provider}`   |
+| `dependencies["user_profile"]`      | pre_hook 写入      | `{user_id, tenant_id}`                   |
+| `dependencies["skill_catalog"]`     | pre_hook 写入      | Skill 元数据列表                              |
+| `dependencies["business_context"]`  | pre_hook 写入      | 含 enrich hook 注入的业务数据                    |
+| `dependencies["_tenant_run_cache"]` | 内部               | run-scoped 缓存，勿依赖其结构                     |
 
 
 ---
@@ -427,22 +429,23 @@ pre_hook 执行后，Hook 开发者可用的 `run_context` 字段：
 ## 10. 环境变量
 
 
-| 变量                            | 说明                                  | 默认                           |
-| ----------------------------- | ----------------------------------- | ---------------------------- |
-| `AGNO_AGENT_DB_URL`           | 租户配置 PostgreSQL（`agno_agent` 表）     | 必填（`postgresql+psycopg://…`） |
-| `AGNO_DB_URL`                 | 会话持久化 DB                            | Postgres                     |
-| `AGNO_REQUIRE_TENANT_ID`      | 缺失 tenant_id 时拒绝请求                  | `false`                      |
-| `AGNO_AGENT_CONFIG_CACHE_TTL` | agno_agent 配置 TTL 缓存（秒）             | `60`                         |
-| `AGNO_AGENT_DB_POOL_SIZE`     | pg 连接池大小                            | `5`                          |
-| `AGNO_AGENT_DB_POOL_OVERFLOW` | 连接池 overflow                        | `10`                         |
-| `AGNO_HOOKS_DIR`              | 扩展 Hook PVC 挂载路径                    | `/etc/hiclaw/hooks`          |
-| `AGNO_AGENTSPEC_DIR`          | AgentSpec YAML 目录                   | `/etc/hiclaw/agentspec`      |
-| `AGNO_SKILLS_DIR`             | Skill 文件目录                          | `/etc/hiclaw/skills`         |
-| `AGNO_CONTROL_PORT`           | HTTP 端口                             | `8090`                       |
-| `AGNO_ENABLE_SESSION_API`     | 挂载 `/effyic/v1/sessions*` 会话查询 API  | `true`                       |
-| `AGNO_DEBUG_REQUEST_DEFAULT`  | 未传 `x-debug-request` 时是否完整入库        | `false`（精简入库）                |
-| `AGNO_ENABLE_AGENTOS`         | 启用完整 AgentOS（根路径 API + os.agno.com） | `false`                      |
-| `AGNO_SPEC_WATCH_INTERVAL`    | AgentSpec/Hook 热重载间隔（秒）             | `30`                         |
+| 变量                            | 说明                                          | 默认                           |
+| ----------------------------- | ------------------------------------------- | ---------------------------- |
+| `AGNO_AGENT_DB_URL`           | 租户配置 PostgreSQL（`agno_agent` 表）             | 必填（`postgresql+psycopg://…`） |
+| `AGNO_DB_URL`                 | 会话持久化 DB                                    | Postgres                     |
+| `AGNO_REQUIRE_TENANT_ID`      | 缺失 tenant_id 时拒绝请求                          | `false`                      |
+| `AGNO_AGENT_CONFIG_CACHE_TTL` | agno_agent 配置 TTL 缓存（秒）                     | `60`                         |
+| `AGNO_AGENT_DB_POOL_SIZE`     | pg 连接池大小                                    | `5`                          |
+| `AGNO_AGENT_DB_POOL_OVERFLOW` | 连接池 overflow                                | `10`                         |
+| `AGNO_HOOKS_DIR`              | 扩展 Hook PVC 挂载路径                            | `/etc/hiclaw/hooks`          |
+| `AGNO_AGENTSPEC_DIR`          | AgentSpec YAML 目录                           | `/etc/hiclaw/agentspec`      |
+| `AGNO_SKILLS_DIR`             | Skill 文件目录                                  | `/etc/hiclaw/skills`         |
+| `AGNO_CONTROL_PORT`           | HTTP 端口                                     | `8090`                       |
+| `AGNO_ENABLE_SESSION_API`     | 挂载 `/effyic/v1/sessions*` 会话查询 API          | `true`                       |
+| `AGNO_DEBUG_REQUEST_DEFAULT`  | 未传 `x-debug-request` 时是否完整入库                | `false`（精简入库）                |
+| `AGNO_ENABLE_AGENTOS`         | 启用完整 AgentOS（根路径 API + os.agno.com）；与对话延迟无关 | `false`                      |
+| `AGNO_TELEMETRY`              | 上报 os-api.agno.com（非 AgentOS）               | `false`（本仓库默认）               |
+| `AGNO_SPEC_WATCH_INTERVAL`    | AgentSpec/Hook 热重载间隔（秒）                     | `30`                         |
 
 
 ---
@@ -485,24 +488,24 @@ PVC 目录缺失或 Hook 函数未实现**不会**导致启动失败。
 ## 13. 关键源文件索引
 
 
-| 文件                   | 职责                                       |
-| -------------------- | ---------------------------------------- |
-| `api/identity.py`    | tenant / user / session ID 解析            |
-| `api/server.py`      | HTTP 入口                                  |
+| 文件                   | 职责                                                          |
+| -------------------- | ----------------------------------------------------------- |
+| `api/identity.py`    | tenant / user / session ID 解析                               |
+| `api/server.py`      | HTTP 入口                                                     |
 | `api/sessions.py`    | `/effyic/v1/sessions*` AgentOS 会话 API + `/conversation` 纯对话 |
-| `worker.py`          | Worker 生命周期、热重载                          |
-| `runtime/engine.py`  | 单一动态 Agent 构建与 run                       |
-| `runtime/builder.py` | pre/post/instructions/tools 注入点          |
-| `runtime/storage.py` | 按 `x-debug-request` 控制入库裁剪               |
-| `runtime/agent.py`   | StorageAwareAgent（覆盖 Agno scrub 钩子）      |
-| `tenant/service.py`  | 标准流水线编排 + 扩展 Hook 调度                     |
-| `tenant/context.py`  | 租户上下文解析（含 run-scoped 缓存）                 |
-| `tenant/store.py`    | PG agno_agent 配置                         |
-| `tenant/db.py`       | PG 连接池                                   |
-| `hooks/registry.py`  | PVC 扩展 Hook 加载                           |
-| `hooks/protocols.py` | Hook 接口与类型定义                             |
-| `hooks/compose.py`   | 流水线/Spec 合并、dependencies 组装              |
-| `hooks/filters.py`   | 请求 pre/post filter                       |
-| `examples/hooks/`    | PVC Hook 参考实现                            |
+| `worker.py`          | Worker 生命周期、热重载                                             |
+| `runtime/engine.py`  | 单一动态 Agent 构建与 run                                          |
+| `runtime/builder.py` | pre/post/instructions/tools 注入点                             |
+| `runtime/storage.py` | 按 `x-debug-request` 控制入库裁剪                                  |
+| `runtime/agent.py`   | StorageAwareAgent（覆盖 Agno scrub 钩子）                         |
+| `tenant/service.py`  | 标准流水线编排 + 扩展 Hook 调度                                        |
+| `tenant/context.py`  | 租户上下文解析（含 run-scoped 缓存）                                    |
+| `tenant/store.py`    | PG agno_agent 配置                                            |
+| `tenant/db.py`       | PG 连接池                                                      |
+| `hooks/registry.py`  | PVC 扩展 Hook 加载                                              |
+| `hooks/protocols.py` | Hook 接口与类型定义                                                |
+| `hooks/compose.py`   | 流水线/Spec 合并、dependencies 组装                                 |
+| `hooks/filters.py`   | 请求 pre/post filter                                          |
+| `examples/hooks/`    | PVC Hook 参考实现                                               |
 
 
