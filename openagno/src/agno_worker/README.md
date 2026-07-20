@@ -269,10 +269,36 @@ HTTP role-code / x-role-code（或 query role_code）
 |------|------|
 | `required_actions[].type` | 目前仅支持 `mcp` |
 | `required_actions[].tool` | MCP 工具名 |
-| `required_actions[].when` | `missing_empty`（默认，必填采齐后）或 `before_mark_done`（仅 mark_done 前） |
+| `required_actions[].when` | `missing_empty`（默认：必填采齐 **且 probe 结束后**）或 `before_mark_done`（仅 mark_done 前） |
 | `auto_mark_done` | 必做 MCP 全部成功后是否自动 `completed=true`（默认 true） |
+| `probe` | 可选扩采 loop：必填（或 `gate_fields`）齐后进入 `phase=probing`，见下 |
 
-运行时：post_hook 在 scrub 前扫描同轮 `run_output.tools` / messages，把成功调用记入 `session_state.collection.actions_done`（多副本安全）。状态对外暴露 `required_actions_pending`；未完成时会在回复末尾追加系统提示，并在 `collection_protocol` 中升级为 MUST call。
+**扩采 loop（`probe`，配置驱动，不是图引擎节点）**
+
+```json
+"probe": {
+  "enabled": true,
+  "max_rounds": 3,
+  "allow_skip": true,
+  "gate_fields": ["主诉", "持续时间"],
+  "hints": ["诱因与加重缓解", "伴随症状"]
+}
+```
+
+| 配置 | 含义 |
+|------|------|
+| `enabled` | 是否启用扩采 |
+| `max_rounds` | 最多追问轮数（每轮 1 问） |
+| `allow_skip` | 是否允许 `collection_probe_finish` 提前结束 |
+| `gate_fields` | 可选；这些槽位填齐后即可进入 probing（即使其它必填如「推荐科室」仍缺）。省略则等全部 required 齐 |
+| `hints` | 提示 AI 可追问的临床方向 |
+
+| 工具 | 作用 |
+|------|------|
+| `collection_probe_note` | 记录一轮扩采笔记并 `probe_rounds++` |
+| `collection_probe_finish` | 提前结束扩采（`allow_skip=true`） |
+
+摘要 ≠ 电子病历：对话侧产出医生摘要；`mec_create_emr_case` 仅受理异步结构化 EMR（按 `medical_emr_field.field_key`）。
 
 
 | 工具                         | 作用                                      |
@@ -280,6 +306,8 @@ HTTP role-code / x-role-code（或 query role_code）
 | `collection_load_schema`   | 加载字段清单（`schema.source=inline` 时通常已自动加载） |
 | `collection_update_fields` | 合并采集值（**仅允许 schema 内字段名**）并重算 missing   |
 | `collection_status`        | 只读进度                                    |
+| `collection_probe_note`    | 扩采笔记（phase=probing）                     |
+| `collection_probe_finish`  | 结束扩采 loop                               |
 | `collection_confirm`       | 用户确认（可选，由 `confirm_required` 控制）        |
 | `collection_complete`      | 可选：写入 `draft_payload` 快照                |
 | `collection_mark_done`     | 写库 / 更新成功后记账；必做动作未完成时拒绝                   |

@@ -41,12 +41,20 @@ STATUS_MARKER_SUFFIX = "-->"
 
 PHASE_INIT = "init"
 PHASE_COLLECTING = "collecting"
+PHASE_PROBING = "probing"
 PHASE_READY = "ready"
 PHASE_CONFIRMED = "confirmed"
 PHASE_DONE = "done"
 
 _VALID_PHASES = frozenset(
-    {PHASE_INIT, PHASE_COLLECTING, PHASE_READY, PHASE_CONFIRMED, PHASE_DONE}
+    {
+        PHASE_INIT,
+        PHASE_COLLECTING,
+        PHASE_PROBING,
+        PHASE_READY,
+        PHASE_CONFIRMED,
+        PHASE_DONE,
+    }
 )
 
 
@@ -90,6 +98,104 @@ def ask_batch_size(config: dict[str, Any] | None) -> int:
     except (TypeError, ValueError):
         size = 2
     return max(1, min(size, 5))
+
+
+def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Optional enrichment loop after required slots are filled.
+
+    Published under ``workflow.probe`` (or nested ``collection.probe``)::
+
+        {
+          "enabled": true,
+          "max_rounds": 3,
+          "hints": ["诱因与加重缓解", "伴随症状"],
+          "allow_skip": true,
+          "gate_fields": ["主诉", "持续时间"]
+        }
+
+    ``gate_fields`` (optional): enter probing once these field names are filled,
+    even if other required slots (e.g. 推荐科室) are still missing. After probe
+    finishes, FSM returns to collecting for the remaining required fields.
+
+    This is the config-driven ``loop`` for clinical probing — not a graph engine
+    node. While ``phase=probing``, required MCP write tools stay gated.
+    """
+    if not isinstance(config, dict):
+        return None
+    raw = config.get("probe")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    if not _as_bool(raw.get("enabled"), False):
+        return None
+    try:
+        max_rounds = int(raw.get("max_rounds", 3))
+    except (TypeError, ValueError):
+        max_rounds = 3
+    hints_raw = raw.get("hints")
+    hints: list[str] = []
+    if isinstance(hints_raw, list):
+        hints = [str(x).strip() for x in hints_raw if str(x).strip()]
+    gate_raw = raw.get("gate_fields")
+    gate_fields: list[str] = []
+    if isinstance(gate_raw, list):
+        gate_fields = [str(x).strip() for x in gate_raw if str(x).strip()]
+    return {
+        "enabled": True,
+        "max_rounds": max(0, min(max_rounds, 8)),
+        "hints": hints,
+        "allow_skip": _as_bool(raw.get("allow_skip"), True),
+        "gate_fields": gate_fields,
+    }
+
+
+def probe_max_rounds(config: dict[str, Any] | None) -> int:
+    probe = resolve_probe_config(config)
+    if not probe:
+        return 0
+    return int(probe.get("max_rounds") or 0)
+
+
+def _gate_fields_filled(state: dict[str, Any], gate_fields: list[str]) -> bool:
+    collected = state.get("collected") if isinstance(state.get("collected"), dict) else {}
+    for name in gate_fields:
+        value = collected.get(name)
+        if value is None or (isinstance(value, str) and not str(value).strip()):
+            return False
+    return True
+
+
+def is_probe_ready(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    """Whether the enrichment loop may start (gates filled / all required filled)."""
+    probe = resolve_probe_config(config)
+    if not probe:
+        return False
+    gate_fields = probe.get("gate_fields") or []
+    if gate_fields:
+        return _gate_fields_filled(state, gate_fields)
+    return not bool(state.get("missing"))
+
+
+def is_probe_finished(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    """True when probe is disabled, skipped/finished, or max rounds reached."""
+    probe = resolve_probe_config(config)
+    if not probe:
+        return True
+    if _as_bool(state.get("probe_done"), False):
+        return True
+    try:
+        rounds = int(state.get("probe_rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    return rounds >= int(probe.get("max_rounds") or 0)
+
+
+def is_probe_active(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    """True while enrichment loop should run (ready but not finished)."""
+    if not resolve_probe_config(config):
+        return False
+    if is_probe_finished(state, config):
+        return False
+    return is_probe_ready(state, config)
 
 
 def resolve_required_actions(config: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -168,10 +274,12 @@ def pending_required_action_tools(
             if for_mark_done:
                 pending.append(tool)
             continue
-        # missing_empty (default)
+        # missing_empty (default): also wait until probe loop finishes
         if current.get("missing"):
             continue
         if not current.get("schema"):
+            continue
+        if not is_probe_finished(current, config):
             continue
         pending.append(tool)
     return pending
@@ -349,6 +457,10 @@ def empty_collection_state() -> dict[str, Any]:
         "draft_payload": None,
         "complete_result": None,
         "actions_done": {},
+        # enrichment loop (config ``probe``)
+        "probe_rounds": 0,
+        "probe_notes": [],
+        "probe_done": False,
     }
 
 
@@ -379,6 +491,16 @@ def ensure_collection_state(
         state["phase"] = phase if phase in _VALID_PHASES else PHASE_INIT
         state["user_confirmed"] = _as_bool(existing.get("user_confirmed"), False)
         state["completed"] = _as_bool(existing.get("completed"), False)
+        try:
+            state["probe_rounds"] = max(0, int(existing.get("probe_rounds") or 0))
+        except (TypeError, ValueError):
+            state["probe_rounds"] = 0
+        notes = existing.get("probe_notes")
+        if isinstance(notes, list):
+            state["probe_notes"] = [str(x).strip() for x in notes if str(x).strip()]
+        else:
+            state["probe_notes"] = []
+        state["probe_done"] = _as_bool(existing.get("probe_done"), False)
 
     # Inline schema is always owned by published agno_agent.workflow (SaaS-editable).
     # Reconcile every call so admin field edits take effect without writing agent rows
@@ -438,11 +560,18 @@ def advance_collection_phase(
         return out
 
     out["missing"] = compute_missing(out["schema"], out["collected"])
+
+    # Optional clinical enrichment loop (may start before all required slots,
+    # when probe.gate_fields are filled — e.g. before 推荐科室).
+    if is_probe_active(out, config):
+        out["phase"] = PHASE_PROBING
+        return out
+
     if out["missing"]:
         out["phase"] = PHASE_COLLECTING
         return out
 
-    # schema loaded and required fields filled
+    # schema loaded, required filled, probe finished
     if confirm_required(config) and not out["user_confirmed"]:
         out["phase"] = PHASE_READY
         return out
@@ -453,6 +582,63 @@ def advance_collection_phase(
 
     out["phase"] = PHASE_CONFIRMED
     return out
+
+
+def append_probe_note(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    note: str,
+) -> dict[str, Any]:
+    """Record one enrichment note and increment ``probe_rounds``."""
+    out = ensure_collection_state(state, config)
+    probe = resolve_probe_config(config)
+    if not probe:
+        raise ValueError("probe loop is not enabled in workflow")
+    if not is_probe_ready(out, config):
+        raise ValueError(
+            "cannot probe until gate_fields (or all required fields) are filled"
+        )
+    text = str(note or "").strip()
+    if not text:
+        raise ValueError("probe note must be non-empty")
+    notes = list(out.get("probe_notes") or [])
+    notes.append(text)
+    out["probe_notes"] = notes
+    try:
+        rounds = int(out.get("probe_rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    out["probe_rounds"] = rounds + 1
+    if out["probe_rounds"] >= int(probe.get("max_rounds") or 0):
+        out["probe_done"] = True
+    return advance_collection_phase(out, config)
+
+
+def finish_probe(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """End the enrichment loop early (skip remaining rounds)."""
+    out = ensure_collection_state(state, config)
+    probe = resolve_probe_config(config)
+    if not probe:
+        raise ValueError("probe loop is not enabled in workflow")
+    if not is_probe_ready(out, config):
+        raise ValueError(
+            "cannot finish probe until gate_fields (or all required fields) are filled"
+        )
+    if not _as_bool(probe.get("allow_skip"), True) and not is_probe_finished(out, config):
+        raise ValueError(
+            "probe.allow_skip=false; continue until max_rounds via collection_probe_note"
+        )
+    out["probe_done"] = True
+    if reason and str(reason).strip():
+        notes = list(out.get("probe_notes") or [])
+        notes.append(f"[skip] {str(reason).strip()}")
+        out["probe_notes"] = notes
+    return advance_collection_phase(out, config)
 
 
 def _request_confirm_flag(run_context: Any) -> bool:
@@ -757,6 +943,7 @@ def apply_required_actions_from_run(
         and required_action_auto_mark_done(config)
         and not out.get("missing")
         and out.get("schema")
+        and is_probe_finished(out, config)
         and not out.get("completed")
     ):
         out["completed"] = True
@@ -842,6 +1029,7 @@ def collection_instructions_appendix(
     focus = missing[:batch]
     source = schema_source(config)
     write_tool = suggested_write_tool(config)
+    probe = resolve_probe_config(config)
     lines = [
         "## collection_protocol",
         f"phase: {current.get('phase')}",
@@ -854,9 +1042,19 @@ def collection_instructions_appendix(
         f"required_actions_pending: {json.dumps(pending_required_action_tools(current, config), ensure_ascii=False)}",
         f"missing: {json.dumps(missing, ensure_ascii=False)}",
         f"collected: {json.dumps(current.get('collected') or {}, ensure_ascii=False)}",
-        "",
-        "Rules:",
     ]
+    if probe:
+        lines.extend(
+            [
+                f"probe_enabled: true",
+                f"probe_rounds: {current.get('probe_rounds') or 0}/{probe.get('max_rounds')}",
+                f"probe_done: {bool(current.get('probe_done'))}",
+                f"probe_notes: {json.dumps(current.get('probe_notes') or [], ensure_ascii=False)}",
+                f"probe_hints: {json.dumps(probe.get('hints') or [], ensure_ascii=False)}",
+                f"probe_allow_skip: {bool(probe.get('allow_skip'))}",
+            ]
+        )
+    lines.extend(["", "Rules:"])
     if source == "mcp" or not current.get("schema"):
         lines.append(
             "1. If schema is empty, call collection_load_schema "
@@ -873,32 +1071,59 @@ def collection_instructions_appendix(
             "3. While missing is non-empty, keep asking the patient for those fields. "
             "You may still call write/update MCP if the user asks to save a partial case.",
             "4. Do not invent completion; call collection_status to inspect progress.",
-            "5. When missing is empty, summarize for the user"
+        ]
+    )
+    if probe and current.get("phase") == PHASE_PROBING:
+        lines.extend(
+            [
+                "5. PROBE LOOP (phase=probing): required slots are filled. Ask 1 clinical "
+                "enrichment question per turn based on the patient's description, "
+                "collected slots, and probe_hints (do not repeat answered topics). "
+                "After the patient answers, call collection_probe_note(note=...) with a "
+                "concise clinical note. When enough detail is gathered or the patient "
+                "declines, call collection_probe_finish(reason=...). "
+                "Do NOT call write MCP / doctor summary until probe_done.",
+            ]
+        )
+        rule_base = 6
+    else:
+        lines.append(
+            "5. When missing is empty"
+            + (
+                " and probe is finished,"
+                if probe
+                else ","
+            )
+            + " produce a doctor-facing summary (摘要≠电子病历) for the clinician"
             + (
                 " and ask for confirmation (collection_confirm or wait for confirm)."
                 if confirm_required(config)
                 else "."
-            ),
-            "6. Write/update MCP tools are always available. After a successful write, "
-            "call collection_mark_done(result=...). User may later add symptoms — "
-            "update fields and write again.",
-        ]
+            )
+            + " Then call the write MCP to enqueue structured EMR generation."
+        )
+        rule_base = 6
+    lines.append(
+        f"{rule_base}. Write/update MCP tools enqueue async structured EMR (not the "
+        "doctor summary itself). After a successful call, collection_mark_done(result=...). "
+        "User may later add symptoms — update fields / probe notes and write again."
     )
+    rule_n = rule_base + 1
     pending = pending_required_action_tools(current, config)
     if pending:
         lines.append(
-            "7. REQUIRED before closing / ending this turn: call these tools "
+            f"{rule_n}. REQUIRED before closing / ending this turn: call these tools "
             "successfully first (do not only reply with text): "
             + json.dumps(pending, ensure_ascii=False)
             + ". collection_mark_done is blocked until they succeed."
         )
+        rule_n += 1
     elif focus:
-        lines.append(f"7. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
+        lines.append(f"{rule_n}. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
+        rule_n += 1
     if focus and pending:
-        lines.append(f"8. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
-        rule_n = 9
-    else:
-        rule_n = 8
+        lines.append(f"{rule_n}. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
+        rule_n += 1
     if write_tool:
         label = "MUST call" if pending and write_tool in pending else "Suggested write/update MCP tool"
         lines.append(f"{rule_n}. {label}: {write_tool}")
@@ -939,13 +1164,18 @@ def collection_status_payload(
     payload: dict[str, Any] = {
         "phase": state.get("phase"),
         "missing": list(state.get("missing") or []),
-        "ready": not bool(state.get("missing")) and bool(schema),
+        "ready": not bool(state.get("missing"))
+        and bool(schema)
+        and is_probe_finished(state, config),
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
         "collected_keys": sorted(collected.keys()),
         "collected": dict(collected),
         "actions_done": sorted(actions_done.keys()),
         "required_actions_pending": pending,
+        "probe_rounds": int(state.get("probe_rounds") or 0),
+        "probe_done": bool(state.get("probe_done")),
+        "probe_notes": list(state.get("probe_notes") or []),
     }
     exported = apply_schema_exports(schema, collected, reply_text=reply_text)
     payload.update(exported)
@@ -1117,9 +1347,92 @@ def build_collection_tools() -> list[Any]:
                 "completed": state["completed"],
                 "actions_done": sorted((state.get("actions_done") or {}).keys()),
                 "required_actions_pending": pending,
+                "probe_rounds": state.get("probe_rounds") or 0,
+                "probe_done": bool(state.get("probe_done")),
+                "probe_notes": list(state.get("probe_notes") or []),
             },
             ensure_ascii=False,
         )
+
+    @tool(
+        name="collection_probe_note",
+        description=(
+            "During phase=probing: record one clinical enrichment note from the "
+            "patient's latest answer, then advance probe_rounds. Call once per "
+            "answered probe question. When max_rounds is reached, probe ends."
+        ),
+    )
+    def collection_probe_note(
+        note: str,
+        run_context: Any = None,
+    ) -> str:
+        ctx = run_context
+        if ctx is None:
+            return json.dumps({"ok": False, "error": "run_context missing"}, ensure_ascii=False)
+        config = resolve_collection_config(workflow_from_run_context(ctx))
+        if not config:
+            return json.dumps(
+                {"ok": False, "error": "collection protocol not enabled"},
+                ensure_ascii=False,
+            )
+        try:
+            state = append_probe_note(get_collection_state(ctx), config, note)
+            set_collection_state(ctx, state)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "phase": state["phase"],
+                    "probe_rounds": state.get("probe_rounds"),
+                    "probe_done": bool(state.get("probe_done")),
+                    "probe_notes": state.get("probe_notes") or [],
+                    "required_actions_pending": pending_required_action_tools(state, config),
+                },
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+
+    @tool(
+        name="collection_probe_finish",
+        description=(
+            "End the probing loop early (skip remaining rounds). Use when the "
+            "patient declines further questions or enough clinical detail is gathered. "
+            "Blocked when probe.allow_skip=false and max_rounds not yet reached."
+        ),
+    )
+    def collection_probe_finish(
+        reason: str = "",
+        run_context: Any = None,
+    ) -> str:
+        ctx = run_context
+        if ctx is None:
+            return json.dumps({"ok": False, "error": "run_context missing"}, ensure_ascii=False)
+        config = resolve_collection_config(workflow_from_run_context(ctx))
+        if not config:
+            return json.dumps(
+                {"ok": False, "error": "collection protocol not enabled"},
+                ensure_ascii=False,
+            )
+        try:
+            state = finish_probe(get_collection_state(ctx), config, reason=reason or None)
+            set_collection_state(ctx, state)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "phase": state["phase"],
+                    "probe_done": True,
+                    "probe_rounds": state.get("probe_rounds"),
+                    "required_actions_pending": pending_required_action_tools(state, config),
+                    "hint": (
+                        "Probe finished; produce doctor summary then call write MCP."
+                        if not state.get("missing")
+                        else "Probe finished but required fields still missing."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
     @tool(
         name="collection_confirm",
@@ -1249,6 +1562,8 @@ def build_collection_tools() -> list[Any]:
         collection_load_schema,
         collection_update_fields,
         collection_status,
+        collection_probe_note,
+        collection_probe_finish,
         collection_confirm,
         collection_complete,
         collection_mark_done,
@@ -1264,4 +1579,6 @@ def snapshot_collection_for_log(state: dict[str, Any]) -> dict[str, Any]:
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
         "actions_done": sorted((state.get("actions_done") or {}).keys()),
+        "probe_rounds": state.get("probe_rounds") or 0,
+        "probe_done": bool(state.get("probe_done")),
     }
