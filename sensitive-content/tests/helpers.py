@@ -68,27 +68,27 @@ def agent_role(agent_id: int) -> str:
     return str(row[0])
 
 
-def bind_all_assignable_rules(client, tenant: str, role_code: str) -> list[int]:
+def bind_all_assignable_types(client, tenant: str, role_code: str) -> list[int]:
     options = client.get(
-        f"/api/v1/tenants/{tenant}/agents/{role_code}/sensitive-rules",
+        f"/api/v1/tenants/{tenant}/agents/{role_code}/sensitive-types",
         headers=ADMIN_HEADERS,
         params={"page_size": 500},
     )
     assert options.status_code == 200, options.text
-    rule_ids = [item["id"] for item in options.json()["items"] if item["assignable"]]
+    type_ids = [item["id"] for item in options.json()["items"] if item["assignable"]]
     bound = client.put(
-        f"/api/v1/tenants/{tenant}/agents/{role_code}/sensitive-rules",
+        f"/api/v1/tenants/{tenant}/agents/{role_code}/sensitive-types",
         headers=ADMIN_HEADERS,
-        json={"rule_ids": rule_ids},
+        json={"type_ids": type_ids},
     )
     assert bound.status_code == 200, bound.text
-    return rule_ids
+    return type_ids
 
 
 def get_snapshot(client, tenant: str, **kwargs: Any):
     agent_id = int(kwargs.pop("agent_id", 0) or create_agent(tenant))
     if kwargs.pop("bind_all", True):
-        bind_all_assignable_rules(client, tenant, agent_role(agent_id))
+        bind_all_assignable_types(client, tenant, agent_role(agent_id))
     headers = dict(RUNTIME_HEADERS)
     headers.update(kwargs.pop("headers", {}))
     return client.get(

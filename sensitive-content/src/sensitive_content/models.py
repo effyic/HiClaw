@@ -250,10 +250,10 @@ class RuleUpdate(BaseModel):
     remark: Optional[str] = None
 
 
-class AgentRuleBindingUpdate(BaseModel):
-    """Agent 规则绑定整体替换请求。"""
+class AgentTypeBindingUpdate(BaseModel):
+    """Agent 类型绑定整体替换请求。"""
 
-    rule_ids: list[int] = Field(default_factory=list)
+    type_ids: list[int] = Field(default_factory=list)
 
 
 class HitEventIn(BaseModel):

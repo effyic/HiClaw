@@ -14,7 +14,7 @@ from sensitive_content.api import (
     resolve_tenant,
 )
 from sensitive_content.models import (
-    AgentRuleBindingUpdate,
+    AgentTypeBindingUpdate,
     RuleCreate,
     RuleUpdate,
     TypeCreate,
@@ -169,53 +169,51 @@ def delete_rule(
 
 
 # ---------------------------------------------------------------------------
-# Agent 规则绑定
+# Agent 类型绑定
 # ---------------------------------------------------------------------------
 
-@router.get("/agents/{role_code}/sensitive-rules")
-def get_agent_role_rule_bindings(
+@router.get("/agents/{role_code}/sensitive-types")
+def get_agent_role_type_bindings(
     tenant_id: str,
     role_code: str = Path(min_length=1, max_length=64),
     keyword: Optional[str] = Query(None),
-    type_id: Optional[int] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
 ) -> dict[str, Any]:
-    items, selected_rule_ids, total = store.get_agent_role_rule_bindings(
+    items, selected_type_ids, total = store.get_agent_role_type_bindings(
         resolve_tenant(tenant_id),
         role_code,
         keyword=keyword,
-        type_id=type_id,
         page=page,
         page_size=page_size,
     )
     return {
         "role_code": role_code,
-        "selected_rule_ids": selected_rule_ids,
+        "selected_type_ids": selected_type_ids,
         "items": items,
         **_page_meta(page, page_size, total),
     }
 
 
-@router.put("/agents/{role_code}/sensitive-rules")
-def replace_agent_role_rule_bindings(
+@router.put("/agents/{role_code}/sensitive-types")
+def replace_agent_role_type_bindings(
     tenant_id: str,
-    body: AgentRuleBindingUpdate,
+    body: AgentTypeBindingUpdate,
     role_code: str = Path(min_length=1, max_length=64),
     operator: str = Depends(resolve_operator),
 ) -> dict[str, Any]:
-    return store.replace_agent_role_rule_bindings(
-        resolve_tenant(tenant_id), role_code, body.rule_ids, operator
+    return store.replace_agent_role_type_bindings(
+        resolve_tenant(tenant_id), role_code, body.type_ids, operator
     )
 
 
-@router.delete("/agents/{role_code}/sensitive-rules", status_code=204)
-def clear_agent_role_rule_bindings(
+@router.delete("/agents/{role_code}/sensitive-types", status_code=204)
+def clear_agent_role_type_bindings(
     tenant_id: str,
     role_code: str = Path(min_length=1, max_length=64),
     operator: str = Depends(resolve_operator),
 ) -> None:
-    store.clear_agent_role_rule_bindings(
+    store.clear_agent_role_type_bindings(
         resolve_tenant(tenant_id), role_code, operator
     )
 

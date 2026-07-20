@@ -23,7 +23,7 @@
 - **敏感内容类型（sensitive-type）**：一类敏感内容（如"政治敏感"、"隐私信息"），决定命中后的**响应行为**（`action`）。规则必须挂在某个类型下。
 - **敏感内容规则（sensitive-rule）**：具体的词条或正则模式（即"敏感词"本体），命中即触发所属类型的行为。
 - **Agent 规则绑定**：规则启用后不会自动对租户内所有 Agent 生效；前端使用租户内唯一的 `role_code` 显式绑定，只有绑定规则才会进入该 Agent 的策略快照。
-- **全局 vs 租户**：`tenant_id` 路径参数取 `global` 时表示全局（平台级）资源；取具体租户 ID 时表示该租户的资源。全局类型/规则对所有租户可见，但仍需逐 Agent 绑定；租户可通过"覆盖规则"（`overrides_global_rule_id`）替换或禁用已绑定的全局规则。
+- **全局 vs 租户**：`tenant_id` 路径参数取 `global` 时表示全局（平台级）资源；取具体租户 ID 时表示该租户的资源。全局类型/规则对所有租户可见，但仍需逐 Agent 绑定类型；租户可通过"覆盖规则"（`overrides_global_rule_id`，须与目标全局规则同类型）替换或禁用已绑定类型下的全局规则。
 - **命中事件（hit-event）**：检测端上报的命中记录，**不含用户消息原文**，含明文 `session_id` 供跳转会话详情。
 - **审计日志（audit-log）**：所有写操作的操作记录；`changes` 字段只存字段名 + 值哈希/长度，不含明文。
 
@@ -111,6 +111,7 @@ Helm 部署时，服务端的 `SENSITIVE_CONTENT_ADMIN_TOKEN` 直接取自主 Ch
 | 400 | `invalid_action_config` | `action_config` 含白名单之外的 key | 表单校验提示 |
 | 400 | `invalid_override` | 全局上下文创建规则时设置了 `overrides_global_rule_id` | 隐藏该字段即可避免 |
 | 400 | `invalid_override_target` | 覆盖目标不是"存在且未删除的全局规则" | 提示重新选择覆盖目标 |
+| 400 | `override_type_mismatch` | 覆盖规则与目标全局规则的 `type_id` 不一致 | 选择与目标同类型，或改绑目标规则 |
 | 400 | `invalid_granularity` | trend 接口 `granularity` 非法 | 使用固定枚举下拉即可避免 |
 | 401 | `unauthorized` | Bearer Token 无效 | 跳转登录 / 提示凭据失效 |
 | 403 | `forbidden_global_type` | 租户上下文修改全局类型 | 禁用全局行的编辑入口 |
@@ -252,6 +253,7 @@ Helm 部署时，服务端的 `SENSITIVE_CONTENT_ADMIN_TOKEN` 直接取自主 Ch
 
 - 租户创建 `overrides_global_rule_id = X` 且 `enabled = true` 的规则 → 用本规则**替换**全局规则 X；
 - 同样的覆盖规则但 `enabled = false` → 相当于在本租户**禁用**全局规则 X；
+- 覆盖规则的 `type_id` 必须与全局规则 X 相同，否则 `400 override_type_mismatch`；
 - 全局规则 X 被删除后，覆盖规则变为 `orphaned`，不再生效。
 
 **重复判定**：同租户内，`match_mode` / `case_sensitive` / `normalize` 相同且 pattern **规范化后相等**的规则视为重复，创建/更新会被拒绝（409 `duplicate_rule`）。例如 `normalize=true, case_sensitive=false` 时，`"AbC "` 与 `"abc"` 等价。
@@ -458,7 +460,7 @@ POST /api/v1/tenants/{tenant_id}/sensitive-rules
 
 响应：`201 Created`，完整规则对象（3.2）。
 
-错误：`400 empty_pattern / pattern_too_long / invalid_regex / regex_too_complex / invalid_override / invalid_override_target`、`404 type_not_found`、`409 duplicate_rule`。
+错误：`400 empty_pattern / pattern_too_long / invalid_regex / regex_too_complex / invalid_override / invalid_override_target / override_type_mismatch`、`404 type_not_found`、`409 duplicate_rule`。
 
 #### 4.2.2 规则列表
 
@@ -518,30 +520,28 @@ DELETE /api/v1/tenants/{tenant_id}/sensitive-rules/{rule_id}
 
 > 删除全局规则后，指向它的租户覆盖规则会变为 `orphaned`。
 
-#### 4.2.7 Agent 规则绑定
+#### 4.2.7 Agent 类型绑定
 
-创建 Agent 的表单可继续使用现有规则列表接口加载选项：并行请求
-`GET /api/v1/tenants/global/sensitive-rules` 与
-`GET /api/v1/tenants/{tenant_id}/sensitive-rules` 后合并。Agent 创建成功并获得
-`role_code` 后，由 Agent 管理后端调用以下绑定接口。
+创建/编辑 Agent 时选择要启用的敏感词类型：绑定某类型后，该类型下全部有效规则（含全局/租户覆盖合并）自动进入该 Agent 快照；新增同类型规则无需重新绑定。Agent 创建成功并获得 `role_code` 后，由 Agent 管理后端调用以下绑定接口。
 
 ```
-GET    /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules
-PUT    /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules
-DELETE /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules
+GET    /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-types
+PUT    /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-types
+DELETE /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-types
 ```
 
-`GET` 支持 `keyword`、`type_id`、`page`、`page_size`，一次返回全局与本租户的规则选项：
+`GET` 支持 `keyword`、`page`、`page_size`，一次返回全局与本租户的类型选项；`selected_type_ids` 始终为完整已选集合（不受当前页限制）：
 
 ```json
 {
   "role_code": "medical-triage-18",
-  "selected_rule_ids": [101, 205],
+  "selected_type_ids": [10, 20],
   "items": [
     {
-      "id": 101,
+      "id": 10,
       "tenant_id": "",
-      "pattern": "示例规则",
+      "code": "politics",
+      "name": "政治敏感",
       "selected": true,
       "assignable": true,
       "inactive_reason": null
@@ -553,21 +553,21 @@ DELETE /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules
 }
 ```
 
-`inactive_reason` 可能为 `rule_disabled`、`type_disabled`、
-`tenant_override_disabled` 或 `orphaned`。`assignable=false` 的规则不能新增选择；
-若它已绑定，则仍会出现在 `selected_rule_ids` 中并可在编辑 Agent 时解除。
+`inactive_reason` 目前仅为 `type_disabled`。`assignable=false` 的类型不能新增选择；
+若它已绑定，则仍会出现在 `selected_type_ids` 中并可在编辑 Agent 时解除。
 
 `PUT` 以完整集合整体替换，重复提交幂等，空数组表示清空：
 
 ```json
-{"rule_ids": [101, 205]}
+{"type_ids": [10, 20]}
 ```
 
 Agent 管理后端应在 Agent 创建/编辑保存后调用 `PUT`，仅在两侧都成功后向页面报告成功；
 删除 Agent 时调用幂等 `DELETE`。绑定失败时 Agent 创建记录保持零绑定，编辑记录保持旧绑定，可安全重试。
 
-绑定全局规则后，租户启用覆盖会自动替换它，禁用覆盖会使该 Agent 不执行它；
-禁用规则不会删除绑定，重新启用后自动恢复。删除规则会自动移除相关 Agent 绑定。
+绑定类型后，租户启用覆盖会自动替换同类型全局规则，禁用覆盖会使该 Agent 不执行对应全局规则；
+禁用类型不会删除绑定（快照不含该类型规则），重新启用后自动恢复。删除类型会自动移除相关 Agent 绑定。
+删除单条规则不影响类型绑定。覆盖规则的 `type_id` 必须与目标全局规则相同，否则 `400 override_type_mismatch`。
 
 ### 4.3 命中事件明细
 

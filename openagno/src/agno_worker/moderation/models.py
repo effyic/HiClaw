@@ -126,7 +126,7 @@ class PolicySnapshot:
 
     tenant_id: str
     agent_id: int = 0
-    binding_rule_ids: list[int] = field(default_factory=list)
+    binding_type_ids: list[int] = field(default_factory=list)
     version: str = ""  # 如 "global-12:tenant-37:agent-4"
     etag: str = ""
     rules: list[SensitiveRule] = field(default_factory=list)
@@ -150,7 +150,7 @@ class PolicySnapshot:
         return cls(
             tenant_id=tenant_id,
             agent_id=int(data.get("agent_id") or agent_id),
-            binding_rule_ids=[int(item) for item in data.get("binding_rule_ids") or []],
+            binding_type_ids=[int(item) for item in data.get("binding_type_ids") or []],
             version=str(data.get("version", "")),
             etag=str(data.get("etag", "")),
             rules=rules,
@@ -162,7 +162,7 @@ class PolicySnapshot:
         return {
             "tenant_id": self.tenant_id,
             "agent_id": self.agent_id,
-            "binding_rule_ids": list(self.binding_rule_ids),
+            "binding_type_ids": list(self.binding_type_ids),
             "version": self.version,
             "etag": self.etag,
             "fetched_at": self.fetched_at,

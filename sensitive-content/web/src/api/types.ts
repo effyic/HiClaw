@@ -110,30 +110,26 @@ export interface SensitiveRule {
   effective_status: EffectiveStatus
 }
 
-export type RuleInactiveReason =
-  | 'orphaned'
-  | 'tenant_override_disabled'
-  | 'rule_disabled'
-  | 'type_disabled'
+export type TypeInactiveReason = 'type_disabled'
 
-export interface AgentRuleOption extends SensitiveRule {
+export interface AgentTypeOption extends SensitiveType {
   selected: boolean
   assignable: boolean
-  inactive_reason: RuleInactiveReason | null
+  inactive_reason: TypeInactiveReason | null
 }
 
-export interface AgentRuleBindings {
+export interface AgentTypeBindings {
   role_code: string
-  selected_rule_ids: number[]
-  items: AgentRuleOption[]
+  selected_type_ids: number[]
+  items: AgentTypeOption[]
   page: number
   page_size: number
   total: number
 }
 
-export interface AgentRuleBindingResult {
+export interface AgentTypeBindingResult {
   role_code: string
-  selected_rule_ids: number[]
+  selected_type_ids: number[]
   version: number
 }
 

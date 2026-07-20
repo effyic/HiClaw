@@ -430,6 +430,27 @@ def delete_type(tenant_id: str, type_id: int, operator: str) -> None:
                 f"type is referenced by {ref_count} active rule(s)",
                 extra={"references": ref_count},
             )
+        # 删除类型时解绑所有相关 Agent（全局类型可能跨租户）
+        binding_rows = _fetch_all(
+            conn,
+            """
+            SELECT DISTINCT tenant_id, agent_id
+            FROM sensitive_content.agent_type_binding
+            WHERE type_id = :type_id
+            """,
+            {"type_id": type_id},
+        )
+        conn.execute(
+            text(
+                "DELETE FROM sensitive_content.agent_type_binding "
+                "WHERE type_id = :type_id"
+            ),
+            {"type_id": type_id},
+        )
+        for binding in binding_rows:
+            bump_agent_policy_version(
+                conn, str(binding["tenant_id"]), int(binding["agent_id"])
+            )
         conn.execute(
             text(
                 "UPDATE sensitive_content.sensitive_type "
@@ -443,7 +464,10 @@ def delete_type(tenant_id: str, type_id: int, operator: str) -> None:
             action="delete",
             target_kind="type",
             target_id=type_id,
-            changed_fields={"deleted": True},
+            changed_fields={
+                "deleted": True,
+                "unbound_agent_count": len(binding_rows),
+            },
             operator=operator,
         )
         bump_policy_version(conn, row["tenant_id"])
@@ -501,7 +525,7 @@ def _validate_rule_refs(
     type_id: int,
     overrides_global_rule_id: Optional[int],
 ) -> None:
-    """type_id 归属校验 + 覆盖目标校验。"""
+    """type_id 归属校验 + 覆盖目标校验（须同类型）。"""
     type_row = _get_type_row(conn, type_id)
     # 类型须为全局类型或本租户类型；其他租户的类型视为不可见（404）
     if type_row is None or type_row["tenant_id"] not in (GLOBAL_TENANT, tenant_id):
@@ -514,7 +538,7 @@ def _validate_rule_refs(
             )
         target = _fetch_one(
             conn,
-            "SELECT id, tenant_id, deleted FROM sensitive_content.sensitive_rule "
+            "SELECT id, tenant_id, type_id, deleted FROM sensitive_content.sensitive_rule "
             "WHERE id = :id",
             {"id": overrides_global_rule_id},
         )
@@ -523,6 +547,12 @@ def _validate_rule_refs(
             raise StoreError(
                 400, "invalid_override_target",
                 "overrides_global_rule_id must reference an existing, non-deleted global rule",
+            )
+        # 类型绑定后跨类型 override 会把未绑定类型带入快照，必须禁止
+        if int(target["type_id"]) != int(type_id):
+            raise StoreError(
+                400, "override_type_mismatch",
+                "override rule type_id must match the overridden global rule type_id",
             )
 
 
@@ -763,37 +793,7 @@ def set_rule_enabled(tenant_id: str, rule_id: int, enabled: bool, operator: str)
 def delete_rule(tenant_id: str, rule_id: int, operator: str) -> None:
     with db_connection() as conn:
         row = _assert_rule_scoped(_get_rule_row(conn, rule_id), tenant_id)
-        affected_rule_ids = {rule_id}
-        if tenant_id == GLOBAL_TENANT:
-            overrides = _fetch_all(
-                conn,
-                "SELECT id FROM sensitive_content.sensitive_rule "
-                "WHERE overrides_global_rule_id = :id AND deleted = FALSE",
-                {"id": rule_id},
-            )
-            affected_rule_ids.update(int(item["id"]) for item in overrides)
-
-        binding_rows = _fetch_all(
-            conn,
-            """
-            SELECT DISTINCT tenant_id, agent_id
-            FROM sensitive_content.agent_rule_binding
-            WHERE rule_id = ANY(CAST(:rule_ids AS BIGINT[]))
-            """,
-            {"rule_ids": sorted(affected_rule_ids)},
-        )
-        if affected_rule_ids:
-            conn.execute(
-                text(
-                    "DELETE FROM sensitive_content.agent_rule_binding "
-                    "WHERE rule_id = ANY(CAST(:rule_ids AS BIGINT[]))"
-                ),
-                {"rule_ids": sorted(affected_rule_ids)},
-            )
-        for binding in binding_rows:
-            bump_agent_policy_version(
-                conn, str(binding["tenant_id"]), int(binding["agent_id"])
-            )
+        # 规则删除不影响类型绑定；该规则自然退出绑定此类型的 Agent 快照
         conn.execute(
             text(
                 "UPDATE sensitive_content.sensitive_rule "
@@ -809,8 +809,6 @@ def delete_rule(tenant_id: str, rule_id: int, operator: str) -> None:
             target_id=rule_id,
             changed_fields={
                 "deleted": True,
-                "unbound_agent_count": len(binding_rows),
-                "affected_rule_ids": sorted(affected_rule_ids),
                 "overrides_global_rule_id": row.get("overrides_global_rule_id"),
             },
             operator=operator,
@@ -819,7 +817,7 @@ def delete_rule(tenant_id: str, rule_id: int, operator: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Agent 规则绑定
+# Agent 类型绑定
 # ---------------------------------------------------------------------------
 
 def _resolve_agent_role(conn: Any, tenant_id: str, role_code: str) -> dict[str, Any]:
@@ -836,129 +834,99 @@ def _resolve_agent_role(conn: Any, tenant_id: str, role_code: str) -> dict[str, 
     return row
 
 
-def _selected_rule_ids(conn: Any, tenant_id: str, agent_id: int) -> set[int]:
+def _selected_type_ids(conn: Any, tenant_id: str, agent_id: int) -> set[int]:
     rows = _fetch_all(
         conn,
         """
-        SELECT rule_id FROM sensitive_content.agent_rule_binding
+        SELECT type_id FROM sensitive_content.agent_type_binding
         WHERE tenant_id = :tenant_id AND agent_id = :agent_id
         """,
         {"tenant_id": tenant_id, "agent_id": agent_id},
     )
-    return {int(row["rule_id"]) for row in rows}
+    return {int(row["type_id"]) for row in rows}
 
 
-def _agent_rule_options(
+def _agent_type_options(
     conn: Any, tenant_id: str, selected: set[int]
 ) -> list[dict[str, Any]]:
+    """列出全局与本租户可见类型，标注 selected / assignable / inactive_reason。"""
     rows = _fetch_all(
         conn,
         f"""
-        SELECT {_RULE_COLUMNS},
-               CASE
-                   WHEN r.overrides_global_rule_id IS NOT NULL AND g.id IS NULL
-                       THEN 'orphaned'
-                   ELSE 'active'
-               END AS effective_status,
-               COALESCE(t.enabled, FALSE) AND NOT COALESCE(t.deleted, TRUE)
-                   AS type_enabled
-        FROM sensitive_content.sensitive_rule r
-        LEFT JOIN sensitive_content.sensitive_rule g
-            ON g.id = r.overrides_global_rule_id AND g.deleted = FALSE
-        LEFT JOIN sensitive_content.sensitive_type t ON t.id = r.type_id
-        WHERE r.deleted = FALSE AND r.tenant_id IN ('', :tenant_id)
-        ORDER BY r.priority DESC, r.id
+        SELECT {_TYPE_COLUMNS}
+        FROM sensitive_content.sensitive_type
+        WHERE deleted = FALSE AND tenant_id IN ('', :tenant_id)
+        ORDER BY priority DESC, id
         """,
         {"tenant_id": tenant_id},
     )
-    overrides: dict[int, list[dict[str, Any]]] = {}
-    for row in rows:
-        target = row.get("overrides_global_rule_id")
-        if row["tenant_id"] == tenant_id and target is not None:
-            overrides.setdefault(int(target), []).append(row)
-
     for row in rows:
         reason: str | None = None
         assignable = True
-        if row["effective_status"] == "orphaned":
-            assignable, reason = False, "orphaned"
-        elif row["tenant_id"] == GLOBAL_TENANT and int(row["id"]) in overrides:
-            live_overrides = [
-                item
-                for item in overrides[int(row["id"])]
-                if item["effective_status"] == "active"
-                and bool(item["enabled"])
-                and bool(item["type_enabled"])
-            ]
-            if not live_overrides:
-                assignable, reason = False, "tenant_override_disabled"
-        elif not bool(row["enabled"]):
-            assignable, reason = False, "rule_disabled"
-        elif not bool(row["type_enabled"]):
+        if not bool(row["enabled"]):
             assignable, reason = False, "type_disabled"
         row["selected"] = int(row["id"]) in selected
         row["assignable"] = assignable
         row["inactive_reason"] = reason
-        row.pop("type_enabled", None)
+        row["action_config"] = _parse_json(row.get("action_config"))
     return rows
 
 
-def get_agent_role_rule_bindings(
+def get_agent_role_type_bindings(
     tenant_id: str,
     role_code: str,
     *,
     keyword: str | None = None,
-    type_id: int | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict[str, Any]], list[int], int]:
     with db_connection() as conn:
         agent = _resolve_agent_role(conn, tenant_id, role_code)
         agent_id = int(agent["id"])
-        selected = _selected_rule_ids(conn, tenant_id, agent_id)
-        rows = _agent_rule_options(conn, tenant_id, selected)
+        selected = _selected_type_ids(conn, tenant_id, agent_id)
+        rows = _agent_type_options(conn, tenant_id, selected)
     if keyword:
         needle = keyword.casefold()
         rows = [
             row
             for row in rows
-            if needle in str(row.get("pattern", "")).casefold()
+            if needle in str(row.get("code", "")).casefold()
+            or needle in str(row.get("name", "")).casefold()
             or needle in str(row.get("description", "")).casefold()
-            or needle in str(row.get("remark", "")).casefold()
         ]
-    if type_id is not None:
-        rows = [row for row in rows if int(row["type_id"]) == type_id]
     total = len(rows)
     start = (page - 1) * page_size
+    # selected_type_ids 始终返回完整集合，不受当前页限制
     return rows[start : start + page_size], sorted(selected), total
 
 
-def replace_agent_role_rule_bindings(
-    tenant_id: str, role_code: str, rule_ids: list[int], operator: str
+def replace_agent_role_type_bindings(
+    tenant_id: str, role_code: str, type_ids: list[int], operator: str
 ) -> dict[str, Any]:
-    requested = {int(rule_id) for rule_id in rule_ids}
-    if any(rule_id <= 0 for rule_id in requested):
-        raise StoreError(422, "invalid_rule_id", "rule ids must be positive integers")
+    requested = {int(type_id) for type_id in type_ids}
+    if any(type_id <= 0 for type_id in requested):
+        raise StoreError(422, "invalid_type_id", "type ids must be positive integers")
     with db_connection() as conn:
         agent = _resolve_agent_role(conn, tenant_id, role_code)
         agent_id = int(agent["id"])
-        current = _selected_rule_ids(conn, tenant_id, agent_id)
-        options = {int(row["id"]): row for row in _agent_rule_options(conn, tenant_id, current)}
+        current = _selected_type_ids(conn, tenant_id, agent_id)
+        options = {int(row["id"]): row for row in _agent_type_options(conn, tenant_id, current)}
         missing = sorted(requested - set(options))
         if missing:
             raise StoreError(
-                404, "rule_not_found", "one or more rules are not visible to tenant",
-                {"rule_ids": missing},
+                404, "type_not_found", "one or more types are not visible to tenant",
+                {"type_ids": missing},
             )
+        # 只拦新加入的不可分配类型；已绑定后被禁用的类型允许继续保留
         unavailable = sorted(
-            rule_id
-            for rule_id in requested - current
-            if not bool(options[rule_id]["assignable"])
+            type_id
+            for type_id in requested - current
+            if not bool(options[type_id]["assignable"])
         )
         if unavailable:
             raise StoreError(
-                409, "rule_not_assignable", "one or more rules are not assignable",
-                {"rule_ids": unavailable},
+                409, "type_not_assignable", "one or more types are not assignable",
+                {"type_ids": unavailable},
             )
         if requested == current:
             version_row = _fetch_one(
@@ -969,25 +937,25 @@ def replace_agent_role_rule_bindings(
             )
             return {
                 "role_code": role_code,
-                "selected_rule_ids": sorted(current),
+                "selected_type_ids": sorted(current),
                 "version": int(version_row["version"]) if version_row else 0,
             }
 
         conn.execute(
             text(
-                "DELETE FROM sensitive_content.agent_rule_binding "
+                "DELETE FROM sensitive_content.agent_type_binding "
                 "WHERE tenant_id = :tenant_id AND agent_id = :agent_id"
             ),
             {"tenant_id": tenant_id, "agent_id": agent_id},
         )
-        for rule_id in sorted(requested):
+        for type_id in sorted(requested):
             conn.execute(
                 text(
-                    "INSERT INTO sensitive_content.agent_rule_binding "
-                    "(tenant_id, agent_id, rule_id) "
-                    "VALUES (:tenant_id, :agent_id, :rule_id)"
+                    "INSERT INTO sensitive_content.agent_type_binding "
+                    "(tenant_id, agent_id, type_id) "
+                    "VALUES (:tenant_id, :agent_id, :type_id)"
                 ),
-                {"tenant_id": tenant_id, "agent_id": agent_id, "rule_id": rule_id},
+                {"tenant_id": tenant_id, "agent_id": agent_id, "type_id": type_id},
             )
         version = bump_agent_policy_version(conn, tenant_id, agent_id)
         record_audit(
@@ -997,30 +965,30 @@ def replace_agent_role_rule_bindings(
             target_kind="agent_binding",
             target_id=agent_id,
             changed_fields={
-                "added_rule_ids": sorted(requested - current),
-                "removed_rule_ids": sorted(current - requested),
+                "added_type_ids": sorted(requested - current),
+                "removed_type_ids": sorted(current - requested),
             },
             operator=operator,
         )
         return {
             "role_code": role_code,
-            "selected_rule_ids": sorted(requested),
+            "selected_type_ids": sorted(requested),
             "version": version,
         }
 
 
-def clear_agent_role_rule_bindings(
+def clear_agent_role_type_bindings(
     tenant_id: str, role_code: str, operator: str
 ) -> None:
     with db_connection() as conn:
         agent = _resolve_agent_role(conn, tenant_id, role_code)
         agent_id = int(agent["id"])
-        current = _selected_rule_ids(conn, tenant_id, agent_id)
+        current = _selected_type_ids(conn, tenant_id, agent_id)
         if not current:
             return
         conn.execute(
             text(
-                "DELETE FROM sensitive_content.agent_rule_binding "
+                "DELETE FROM sensitive_content.agent_type_binding "
                 "WHERE tenant_id = :tenant_id AND agent_id = :agent_id"
             ),
             {"tenant_id": tenant_id, "agent_id": agent_id},
@@ -1032,7 +1000,7 @@ def clear_agent_role_rule_bindings(
             action="delete",
             target_kind="agent_binding",
             target_id=agent_id,
-            changed_fields={"removed_rule_ids": sorted(current)},
+            changed_fields={"removed_type_ids": sorted(current)},
             operator=operator,
         )
 
@@ -1109,64 +1077,62 @@ def _snapshot_rule(row: dict[str, Any]) -> dict[str, Any]:
 def load_policy_snapshot(tenant_id: str, agent_id: int) -> dict[str, Any]:
     """装载指定 Agent 的有效策略；零绑定返回合法空快照。"""
     with db_connection() as conn:
-        binding_rule_ids = sorted(_selected_rule_ids(conn, tenant_id, agent_id))
-        selected = set(binding_rule_ids)
+        binding_type_ids = sorted(_selected_type_ids(conn, tenant_id, agent_id))
+        bound_types = set(binding_type_ids)
 
-        # 先装载所有有效全局规则，再按 Agent 的直接绑定过滤。
-        global_rules = _fetch_all(
-            conn,
-            """
-            SELECT r.id, r.tenant_id, r.type_id, r.pattern, r.match_mode,
-                   r.case_sensitive, r.normalize, r.priority, r.enabled,
-                   r.overrides_global_rule_id
-            FROM sensitive_content.sensitive_rule r
-            JOIN sensitive_content.sensitive_type t
-                ON t.id = r.type_id AND t.deleted = FALSE AND t.enabled = TRUE
-            WHERE r.tenant_id = '' AND r.enabled = TRUE AND r.deleted = FALSE
-            """,
-        )
-        global_rules = [r for r in global_rules if int(r["id"]) in selected]
+        global_rules: list[dict[str, Any]] = []
         tenant_rules: list[dict[str, Any]] = []
         deleted_global_ids: set[int] = set()
-        if tenant_id != GLOBAL_TENANT:
-            # 直接绑定的租户规则，以及已绑定全局规则的覆盖记录。
-            tenant_rules = _fetch_all(
+
+        if bound_types:
+            # 按绑定类型装载全局启用规则
+            global_rules = _fetch_all(
                 conn,
                 """
                 SELECT r.id, r.tenant_id, r.type_id, r.pattern, r.match_mode,
                        r.case_sensitive, r.normalize, r.priority, r.enabled,
-                       r.overrides_global_rule_id,
-                       (t.id IS NOT NULL) AS type_live
+                       r.overrides_global_rule_id
                 FROM sensitive_content.sensitive_rule r
-                LEFT JOIN sensitive_content.sensitive_type t
+                JOIN sensitive_content.sensitive_type t
                     ON t.id = r.type_id AND t.deleted = FALSE AND t.enabled = TRUE
-                WHERE r.tenant_id = :tenant_id AND r.deleted = FALSE
+                WHERE r.tenant_id = '' AND r.enabled = TRUE AND r.deleted = FALSE
+                  AND r.type_id = ANY(CAST(:type_ids AS BIGINT[]))
                 """,
-                {"tenant_id": tenant_id},
+                {"type_ids": binding_type_ids},
             )
-            tenant_rules = [
-                rule
-                for rule in tenant_rules
-                if int(rule["id"]) in selected
-                or (
-                    rule.get("overrides_global_rule_id") is not None
-                    and int(rule["overrides_global_rule_id"]) in selected
+            if tenant_id != GLOBAL_TENANT:
+                # 租户规则勿提前过滤 enabled：禁用 override 仍须进 merge 以剔除全局规则
+                tenant_rules = _fetch_all(
+                    conn,
+                    """
+                    SELECT r.id, r.tenant_id, r.type_id, r.pattern, r.match_mode,
+                           r.case_sensitive, r.normalize, r.priority, r.enabled,
+                           r.overrides_global_rule_id,
+                           (t.id IS NOT NULL) AS type_live
+                    FROM sensitive_content.sensitive_rule r
+                    LEFT JOIN sensitive_content.sensitive_type t
+                        ON t.id = r.type_id AND t.deleted = FALSE AND t.enabled = TRUE
+                    WHERE r.tenant_id = :tenant_id AND r.deleted = FALSE
+                      AND r.type_id = ANY(CAST(:type_ids AS BIGINT[]))
+                    """,
+                    {"tenant_id": tenant_id, "type_ids": binding_type_ids},
                 )
-            ]
-            # 覆盖目标中已删除的全局规则 ID（orphaned 判定）
-            rows = _fetch_all(
-                conn,
-                """
-                SELECT DISTINCT g.id
-                FROM sensitive_content.sensitive_rule r
-                JOIN sensitive_content.sensitive_rule g
-                    ON g.id = r.overrides_global_rule_id
-                WHERE r.tenant_id = :tenant_id AND r.deleted = FALSE
-                  AND g.deleted = TRUE
-                """,
-                {"tenant_id": tenant_id},
-            )
-            deleted_global_ids = {int(row["id"]) for row in rows}
+                # 覆盖目标中已删除的全局规则 ID（orphaned 判定）
+                rows = _fetch_all(
+                    conn,
+                    """
+                    SELECT DISTINCT g.id
+                    FROM sensitive_content.sensitive_rule r
+                    JOIN sensitive_content.sensitive_rule g
+                        ON g.id = r.overrides_global_rule_id
+                    WHERE r.tenant_id = :tenant_id AND r.deleted = FALSE
+                      AND r.type_id = ANY(CAST(:type_ids AS BIGINT[]))
+                      AND g.deleted = TRUE
+                    """,
+                    {"tenant_id": tenant_id, "type_ids": binding_type_ids},
+                )
+                deleted_global_ids = {int(row["id"]) for row in rows}
+
         versions = _fetch_all(
             conn,
             "SELECT tenant_id, version FROM sensitive_content.policy_version "
@@ -1180,7 +1146,7 @@ def load_policy_snapshot(tenant_id: str, agent_id: int) -> dict[str, Any]:
             {"tenant_id": tenant_id, "agent_id": agent_id},
         )
 
-        # 类型无效的租户规则仍参与覆盖剔除，但不能作为启用替换。
+        # 类型无效的租户规则仍参与覆盖剔除，但不能作为启用替换
         for rule in tenant_rules:
             if not rule.pop("type_live", True):
                 rule["enabled"] = False
@@ -1204,7 +1170,7 @@ def load_policy_snapshot(tenant_id: str, agent_id: int) -> dict[str, Any]:
     content = {
         "tenant_id": tenant_id,
         "agent_id": agent_id,
-        "binding_rule_ids": binding_rule_ids,
+        "binding_type_ids": binding_type_ids,
         "types": [{**t, "action_config": _parse_json(t.get("action_config"))} for t in types],
         "rules": [_snapshot_rule(r) for r in merged],
     }

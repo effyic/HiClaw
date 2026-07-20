@@ -12,7 +12,8 @@ sensitive-content/
 │   ├── 0001_init.sql           # 7 张表 + 索引 + 种子类型数据
 │   ├── 0002_hit_event_session_id.sql  # hit_event 明文 session_id 列 + 会话查询索引
 │   ├── 0003_adjust_prompt_action.sql  # ADJUST_PROMPT + self_harm 中文基础规则集
-│   └── 0004_agent_rule_binding.sql    # Agent 绑定、Agent 策略版本、命中归属
+│   ├── 0004_agent_rule_binding.sql    # Agent 规则绑定、Agent 策略版本、命中归属（0005 后规则绑定表已删除）
+│   └── 0005_agent_type_binding.sql    # Agent 绑定改为敏感词类型；跨类型 override 预检
 ├── src/sensitive_content/
 │   ├── cli.py                  # sensitive-content serve / migrate
 │   ├── config.py               # 环境变量
@@ -34,7 +35,7 @@ sensitive-content/
 | `sensitive_type` | 敏感内容类型（`tenant_id=''` 为全局），行为 + `action_config`，`UNIQUE(tenant_id, code)`（未删除行）；创建时可省略 `code`，由服务端自动生成（管理端可不填） |
 | `sensitive_rule` | 敏感内容规则，`type_id NOT NULL`，支持 `overrides_global_rule_id` 覆盖全局规则 |
 | `policy_version` | 每租户策略版本，任何写操作同事务递增 |
-| `agent_rule_binding` | Agent 与具体规则的多对多绑定；未绑定规则不会进入该 Agent 快照 |
+| `agent_type_binding` | Agent 与敏感词类型的多对多绑定；未绑定类型下的规则不会进入该 Agent 快照 |
 | `agent_policy_version` | 每 Agent 的绑定版本，仅绑定集合实际变化时递增 |
 | `hit_event` | 命中事件（`event_id` UUID 幂等；内部关联 `agent_id`，管理 API 返回 `role_code`；含明文 `session_id`，不含用户原文与规则明文） |
 | `audit_log` | 审计日志（changes 仅存字段名 + 值哈希/长度元数据） |
@@ -83,14 +84,14 @@ POST           /api/v1/tenants/{tenant_id}/sensitive-types/{id}:enable|:disable
 POST/GET       /api/v1/tenants/{tenant_id}/sensitive-rules      # keyword/type_id/enabled 筛选 + 分页
 GET/PUT/DELETE /api/v1/tenants/{tenant_id}/sensitive-rules/{id}
 POST           /api/v1/tenants/{tenant_id}/sensitive-rules/{id}:enable|:disable
-GET/PUT/DELETE /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-rules # 规则选项、整体替换、清空绑定
+GET/PUT/DELETE /api/v1/tenants/{tenant_id}/agents/{role_code}/sensitive-types # 类型选项、整体替换、清空绑定
 GET            /api/v1/tenants/{tenant_id}/hit-events           # rule_id/type_id/role_code/session_id/from/to 筛选
 GET            /api/v1/tenants/{tenant_id}/audit-logs           # 目标/操作/时间筛选
 ```
 
 命中事件明细中的 `session_id` 可直接用于网关会话接口（`/effyic/v1/sessions/{session_id}`）查看完整会话记录；`tenant_id=global` 表示跨全部租户查询。旧事件（升级前上报）`session_id` 为空字符串。
 
-规则启用只是生效的必要条件：最终还要求类型启用、Agent 已绑定且覆盖关系有效。绑定接口使用租户内唯一的 `agno_agent.role_code`，服务端解析内部主键后写入绑定；存量 Agent 不自动绑定规则。禁用规则保留绑定，删除规则自动清理相关绑定。
+规则启用只是生效的必要条件：最终还要求类型启用、Agent 已绑定该类型且覆盖关系有效。绑定接口使用租户内唯一的 `agno_agent.role_code`，服务端解析内部主键后写入类型绑定；存量 Agent 不自动绑定类型。禁用类型保留绑定（快照不含其规则），删除类型自动清理相关绑定。覆盖规则必须与目标全局规则同类型（否则 `400 override_type_mismatch`）。
 
 约束：租户上下文不能修改全局类型/规则（403）；规则 `type_id` 须为全局类型或本租户类型；正则规则校验语法、长度（≤512）与嵌套量词复杂度；同租户完全重复规则（规范化后相等）拒绝创建。所有写操作同事务写审计并递增相应策略版本。
 
@@ -104,7 +105,7 @@ GET  /internal/v1/tenants/{tenant_id}/policy-snapshot   # 废弃兼容入口；�
 POST /internal/v1/hit-events:batch                      # event_id 幂等（ON CONFLICT DO NOTHING）
 ```
 
-快照组合版本为 `global-{全局版本}:tenant-{租户版本}:agent-{绑定版本}`；响应携带 `agent_id` 与 `binding_rule_ids`。ETag 为规范化序列化后快照内容的 SHA-256，与版本号解耦（内容等价即 304）。未绑定任何规则时返回 200 合法空策略，不视为策略服务故障。
+快照组合版本为 `global-{全局版本}:tenant-{租户版本}:agent-{绑定版本}`；响应携带 `agent_id` 与 `binding_type_ids`。ETag 为规范化序列化后快照内容的 SHA-256，与版本号解耦（内容等价即 304）。未绑定任何类型时返回 200 合法空策略，不视为策略服务故障。
 
 ### 统计 API（Admin Token）
 

@@ -64,14 +64,14 @@ def make_snapshot(
     *,
     tenant_id: str = "tenant-a",
     agent_id: int = 0,
-    binding_rule_ids: list[int] | None = None,
+    binding_type_ids: list[int] | None = None,
     version: str = "global-1:tenant-1",
     fetched_at: float | None = None,
 ) -> PolicySnapshot:
     return PolicySnapshot(
         tenant_id=tenant_id,
         agent_id=agent_id,
-        binding_rule_ids=list(binding_rule_ids or []),
+        binding_type_ids=list(binding_type_ids or []),
         version=version,
         etag='"etag-test"',
         rules=list(rules),
