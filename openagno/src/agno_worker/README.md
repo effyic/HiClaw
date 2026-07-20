@@ -244,12 +244,35 @@ HTTP role-code / x-role-code（或 query role_code）
         {"name": "持续时间", "required": true}
       ]
     },
-    "complete_action": {"type": "mcp", "tool": "mec_create_emr_case"}
+    "required_actions": [
+      {"type": "mcp", "tool": "mec_create_emr_case", "when": "missing_empty"}
+    ],
+    "auto_mark_done": true
   }
 }
 ```
 
 也可顶层 `"kind": "collection_dialogue"`。`schema.source=mcp` 时由模型先调字段列表 MCP，再把结果传给 `collection_load_schema(fields_json=...)`。
+
+**结束后必做动作（统一字段 `required_actions`）**
+
+单动作与多动作共用同一列表；一项即单动作，多项即多动作。不再使用 `complete_action`。
+
+```json
+"required_actions": [
+  {"type": "mcp", "tool": "md_get_dept_list", "when": "missing_empty"},
+  {"type": "mcp", "tool": "mec_create_emr_case", "when": "missing_empty"}
+]
+```
+
+| 配置 | 含义 |
+|------|------|
+| `required_actions[].type` | 目前仅支持 `mcp` |
+| `required_actions[].tool` | MCP 工具名 |
+| `required_actions[].when` | `missing_empty`（默认，必填采齐后）或 `before_mark_done`（仅 mark_done 前） |
+| `auto_mark_done` | 必做 MCP 全部成功后是否自动 `completed=true`（默认 true） |
+
+运行时：post_hook 在 scrub 前扫描同轮 `run_output.tools` / messages，把成功调用记入 `session_state.collection.actions_done`（多副本安全）。状态对外暴露 `required_actions_pending`；未完成时会在回复末尾追加系统提示，并在 `collection_protocol` 中升级为 MUST call。
 
 
 | 工具                         | 作用                                      |
@@ -259,7 +282,7 @@ HTTP role-code / x-role-code（或 query role_code）
 | `collection_status`        | 只读进度                                    |
 | `collection_confirm`       | 用户确认（可选，由 `confirm_required` 控制）        |
 | `collection_complete`      | 可选：写入 `draft_payload` 快照                |
-| `collection_mark_done`     | 写库 / 更新成功后记账；允许早写与多次写                   |
+| `collection_mark_done`     | 写库 / 更新成功后记账；必做动作未完成时拒绝                   |
 
 
 写库 MCP（如 `mec_create_emr_case`）始终对模型可见，可早写、可多次更新。缺必填字段时由 prompt + `missing` 驱动继续追问；`completed` 表示「至少成功写过一次」，不冻结 FSM——用户补充病情后可再 `update_fields` 并再次写库。
