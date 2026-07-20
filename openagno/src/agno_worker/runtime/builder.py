@@ -292,23 +292,48 @@ class AgentBuilder:
             from agno_worker.tenant.collection import (
                 COLLECTION_STATE_KEY,
                 append_status_marker,
+                apply_required_actions_from_run,
                 collection_status_payload,
                 is_collection_enabled,
+                pending_required_action_tools,
+                resolve_collection_config,
             )
 
             workflow = (run_context.session_state or {}).get("workflow") or {}
             if is_collection_enabled(workflow if isinstance(workflow, dict) else {}):
+                coll_cfg = resolve_collection_config(
+                    workflow if isinstance(workflow, dict) else {}
+                )
                 coll = (run_context.session_state or {}).get(COLLECTION_STATE_KEY) or {}
                 if not isinstance(coll, dict):
                     coll = {}
+                # Scrub has not run yet — record required MCP successes from this turn.
+                coll = apply_required_actions_from_run(coll, coll_cfg, run_output)
+                run_context.session_state[COLLECTION_STATE_KEY] = coll
+                if isinstance(coll, dict) and coll.get("phase"):
+                    run_context.session_state["phase"] = coll["phase"]
+
                 reply_text = None
                 if run_output is not None and hasattr(run_output, "content"):
                     reply_text = str(getattr(run_output, "content", None) or "")
-                    run_output.content = append_status_marker(reply_text, coll)
+                    pending = pending_required_action_tools(coll, coll_cfg)
+                    if pending and reply_text.strip():
+                        gate_note = (
+                            "\n\n[系统提示] 必做动作尚未完成，请勿结束："
+                            + "、".join(pending)
+                            + "。请先成功调用上述工具后再收尾。"
+                        )
+                        if "[系统提示] 必做动作尚未完成" not in reply_text:
+                            reply_text = reply_text.rstrip() + gate_note
+                    run_output.content = append_status_marker(
+                        reply_text, coll, config=coll_cfg
+                    )
                     reply_text = str(run_output.content or "")
                 # Prefer metadata for streaming H5 clients (reply chunks omit marker).
                 # Include dept_code parsed from collected slots and/or reply text.
-                status = collection_status_payload(coll, reply_text=reply_text)
+                status = collection_status_payload(
+                    coll, reply_text=reply_text, config=coll_cfg
+                )
                 if run_output is not None:
                     if not isinstance(getattr(run_output, "metadata", None), dict):
                         run_output.metadata = {}

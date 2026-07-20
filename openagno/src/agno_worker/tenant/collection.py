@@ -8,19 +8,29 @@ Write/update MCP tools from agent config stay visible. Missing required fields
 drive follow-up questions via prompt + ``collection_*`` tools; the model may
 still save or update a case early or repeatedly.
 
+``required_actions`` enforces post-collection MCP (or other) tools: successes
+are recorded into ``session_state.collection.actions_done`` from the same-turn
+``run_output.tools`` / messages (cluster-safe). ``collection_mark_done`` is
+rejected while required actions are still pending.
+
 Enable by publishing ``agno_agent.workflow`` as either::
 
-    {"kind": "collection_dialogue", "schema": {...}, "complete_action": {...}}
+    {
+      "kind": "collection_dialogue",
+      "schema": {...},
+      "required_actions": [
+        {"type": "mcp", "tool": "mec_create_emr_case", "when": "missing_empty"}
+      ]
+    }
 
-or nested under an existing medical workflow::
-
-    {"kind": "medical", "phase": "inquiry", "collection": {...}}
+Single and multiple end-actions use the same list field (length 1 or N).
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -50,7 +60,7 @@ def resolve_collection_config(workflow: dict[str, Any] | None) -> dict[str, Any]
     if not isinstance(nested, dict) or not nested:
         return None
     kind = str(nested.get("kind") or "").strip()
-    if kind == "collection_dialogue" or nested.get("schema") or nested.get("complete_action"):
+    if kind == "collection_dialogue" or nested.get("schema") or nested.get("required_actions"):
         return nested
     return None
 
@@ -82,15 +92,89 @@ def ask_batch_size(config: dict[str, Any] | None) -> int:
     return max(1, min(size, 5))
 
 
-def suggested_write_tool(config: dict[str, Any] | None) -> str | None:
-    """Return complete_action MCP tool name for prompt hints."""
+def resolve_required_actions(config: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Normalize ``required_actions`` (unified list for one or many end-actions)."""
     if not config:
+        return []
+    raw = config.get("required_actions")
+    if not isinstance(raw, list):
+        return []
+    actions: list[dict[str, Any]] = []
+    for item in raw:
+        normalized = _normalize_required_action(item)
+        if normalized:
+            actions.append(normalized)
+    return actions
+
+
+def suggested_write_tool(config: dict[str, Any] | None) -> str | None:
+    """Return the last MCP tool in ``required_actions`` for prompt hints."""
+    actions = resolve_required_actions(config)
+    if not actions:
         return None
-    action = config.get("complete_action")
-    if isinstance(action, dict) and str(action.get("type") or "").strip() == "mcp":
+    tool = str(actions[-1].get("tool") or "").strip()
+    return tool or None
+
+
+def _normalize_required_action(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    action_type = str(item.get("type") or "mcp").strip() or "mcp"
+    tool = str(item.get("tool") or "").strip()
+    if action_type != "mcp" or not tool:
+        return None
+    when = str(item.get("when") or "missing_empty").strip() or "missing_empty"
+    if when not in {"missing_empty", "before_mark_done"}:
+        when = "missing_empty"
+    return {"type": action_type, "tool": tool, "when": when}
+
+
+def required_action_auto_mark_done(config: dict[str, Any] | None) -> bool:
+    """Whether satisfying required MCP tools should auto ``completed=true``.
+
+    Default true when any ``required_actions`` is configured; override with
+    top-level ``auto_mark_done``.
+    """
+    if not config or not resolve_required_actions(config):
+        return False
+    if "auto_mark_done" in config:
+        return _as_bool(config.get("auto_mark_done"), True)
+    return True
+
+
+def pending_required_action_tools(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    for_mark_done: bool = False,
+) -> list[str]:
+    """Return required MCP tool names not yet recorded in ``actions_done``.
+
+    ``when=missing_empty`` applies once required fields are filled (and also
+    gates ``collection_mark_done``). ``when=before_mark_done`` only gates mark_done.
+    """
+    current = ensure_collection_state(state, config)
+    actions = resolve_required_actions(config)
+    if not actions:
+        return []
+    done = current.get("actions_done") if isinstance(current.get("actions_done"), dict) else {}
+    pending: list[str] = []
+    for action in actions:
         tool = str(action.get("tool") or "").strip()
-        return tool or None
-    return None
+        if not tool or tool in done:
+            continue
+        when = str(action.get("when") or "missing_empty")
+        if when == "before_mark_done":
+            if for_mark_done:
+                pending.append(tool)
+            continue
+        # missing_empty (default)
+        if current.get("missing"):
+            continue
+        if not current.get("schema"):
+            continue
+        pending.append(tool)
+    return pending
 
 
 def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
@@ -264,6 +348,7 @@ def empty_collection_state() -> dict[str, Any]:
         "completed": False,
         "draft_payload": None,
         "complete_result": None,
+        "actions_done": {},
     }
 
 
@@ -282,6 +367,14 @@ def ensure_collection_state(
             state["schema"] = normalize_schema_fields(existing["schema"])
         if isinstance(existing.get("missing"), list):
             state["missing"] = [str(x) for x in existing["missing"]]
+        if isinstance(existing.get("actions_done"), dict):
+            state["actions_done"] = {
+                str(k): v
+                for k, v in existing["actions_done"].items()
+                if str(k).strip()
+            }
+        else:
+            state["actions_done"] = {}
         phase = str(existing.get("phase") or PHASE_INIT).strip()
         state["phase"] = phase if phase in _VALID_PHASES else PHASE_INIT
         state["user_confirmed"] = _as_bool(existing.get("user_confirmed"), False)
@@ -505,14 +598,170 @@ def mark_collection_done(
     config: dict[str, Any] | None,
     result: Any = None,
 ) -> dict[str, Any]:
-    """Record that a write / update MCP succeeded. Allows early and repeated writes."""
+    """Record that a write / update MCP succeeded. Allows early and repeated writes.
+
+    Rejects when configured ``required_actions`` tools have not been recorded
+    in ``actions_done`` yet.
+    """
     out = ensure_collection_state(state, config)
+    pending = pending_required_action_tools(out, config, for_mark_done=True)
+    if pending:
+        raise ValueError(
+            "required actions not done before collection_mark_done: "
+            + ", ".join(pending)
+            + ". Call these tools successfully first (successes are tracked "
+            "automatically from this turn's tool results)."
+        )
     out["completed"] = True
     if result is not None:
         out["complete_result"] = (
             result if isinstance(result, (str, dict, list)) else str(result)
         )
     return advance_collection_phase(out, config)
+
+
+def record_action_done(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    tool_name: str,
+    *,
+    detail: Any = None,
+) -> dict[str, Any]:
+    """Persist that ``tool_name`` succeeded (cluster-safe under collection state)."""
+    out = ensure_collection_state(state, config)
+    name = str(tool_name or "").strip()
+    if not name:
+        return out
+    done = dict(out.get("actions_done") or {})
+    entry: dict[str, Any] = {"ok": True}
+    if detail is not None:
+        entry["detail"] = (
+            detail if isinstance(detail, (str, dict, list)) else str(detail)
+        )
+    done[name] = entry
+    out["actions_done"] = done
+    return advance_collection_phase(out, config)
+
+
+def _tool_entry_name(entry: Any) -> str | None:
+    if isinstance(entry, dict):
+        name = entry.get("tool_name") or entry.get("name") or entry.get("tool")
+    else:
+        name = (
+            getattr(entry, "tool_name", None)
+            or getattr(entry, "name", None)
+            or getattr(entry, "tool", None)
+        )
+    text = str(name or "").strip()
+    return text or None
+
+
+def _tool_entry_succeeded(entry: Any) -> bool:
+    if isinstance(entry, dict):
+        if entry.get("tool_call_error"):
+            return False
+        result = entry.get("result")
+    else:
+        if getattr(entry, "tool_call_error", None):
+            return False
+        result = getattr(entry, "result", None)
+    if result is None:
+        return True
+    text = str(result).strip()
+    if not text:
+        return True
+    # Agno/MCP often returns transport errors as plain text with tool_call_error=false.
+    lower = text.lower()
+    if lower.startswith("error from mcp tool"):
+        return False
+    if "serviceexception" in lower or "exception(" in lower:
+        return False
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict) and data.get("ok") is False:
+                return False
+        except json.JSONDecodeError:
+            pass
+    return True
+
+
+def extract_successful_tool_names(run_output: Any) -> list[str]:
+    """Collect successful tool names from Agno tools list and/or messages.
+
+    Mid-turn ``collection_mark_done`` often sees prior MCP results on
+    ``run_context.messages`` before they appear on ``run_context.tools``.
+    """
+    if run_output is None:
+        return []
+    tools = getattr(run_output, "tools", None)
+    messages = getattr(run_output, "messages", None)
+    if isinstance(run_output, dict):
+        if tools is None:
+            tools = run_output.get("tools")
+        if messages is None:
+            messages = run_output.get("messages")
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(entry: Any) -> None:
+        if not _tool_entry_succeeded(entry):
+            return
+        name = _tool_entry_name(entry)
+        if not name or name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    for entry in tools or []:
+        _add(entry)
+    for msg in messages or []:
+        if isinstance(msg, dict):
+            role = str(msg.get("role") or "").lower()
+            tool_name = msg.get("tool_name") or msg.get("name")
+            content = msg.get("content")
+        else:
+            role = str(getattr(msg, "role", "") or "").lower()
+            tool_name = getattr(msg, "tool_name", None) or getattr(msg, "name", None)
+            content = getattr(msg, "content", None)
+        if role not in {"tool", "function"} and not tool_name:
+            continue
+        _add({"tool_name": tool_name, "result": content, "tool_call_error": False})
+    return names
+
+
+def apply_required_actions_from_run(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    run_output: Any,
+) -> dict[str, Any]:
+    """Record required MCP successes from this turn; optionally auto mark_done.
+
+    Call from post_hook before session scrub so ``run_output.tools`` is still present.
+    """
+    out = ensure_collection_state(state, config)
+    required = resolve_required_actions(config)
+    if not required:
+        return out
+    required_names = {
+        str(a.get("tool") or "").strip()
+        for a in required
+        if str(a.get("tool") or "").strip()
+    }
+    for name in extract_successful_tool_names(run_output):
+        if name in required_names:
+            out = record_action_done(out, config, name)
+    pending = pending_required_action_tools(out, config)
+    if (
+        not pending
+        and required_action_auto_mark_done(config)
+        and not out.get("missing")
+        and out.get("schema")
+        and not out.get("completed")
+    ):
+        out["completed"] = True
+        out = advance_collection_phase(out, config)
+    return out
 
 
 def workflow_from_run_context(run_context: Any) -> dict[str, Any]:
@@ -601,6 +850,8 @@ def collection_instructions_appendix(
         f"confirm_required: {confirm_required(config)}",
         f"user_confirmed: {current.get('user_confirmed')}",
         f"completed_once: {current.get('completed')}",
+        f"actions_done: {json.dumps(sorted((current.get('actions_done') or {}).keys()), ensure_ascii=False)}",
+        f"required_actions_pending: {json.dumps(pending_required_action_tools(current, config), ensure_ascii=False)}",
         f"missing: {json.dumps(missing, ensure_ascii=False)}",
         f"collected: {json.dumps(current.get('collected') or {}, ensure_ascii=False)}",
         "",
@@ -633,10 +884,25 @@ def collection_instructions_appendix(
             "update fields and write again.",
         ]
     )
-    if focus:
+    pending = pending_required_action_tools(current, config)
+    if pending:
+        lines.append(
+            "7. REQUIRED before closing / ending this turn: call these tools "
+            "successfully first (do not only reply with text): "
+            + json.dumps(pending, ensure_ascii=False)
+            + ". collection_mark_done is blocked until they succeed."
+        )
+    elif focus:
         lines.append(f"7. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
+    if focus and pending:
+        lines.append(f"8. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
+        rule_n = 9
+    else:
+        rule_n = 8
     if write_tool:
-        lines.append(f"8. Suggested write/update MCP tool: {write_tool}")
+        label = "MUST call" if pending and write_tool in pending else "Suggested write/update MCP tool"
+        lines.append(f"{rule_n}. {label}: {write_tool}")
+        rule_n += 1
     patterned = [
         {
             "name": f.get("name"),
@@ -648,7 +914,7 @@ def collection_instructions_appendix(
     ]
     if patterned:
         lines.append(
-            "9. Fields with pattern MUST match when calling collection_update_fields: "
+            f"{rule_n}. Fields with pattern MUST match when calling collection_update_fields: "
             + json.dumps(patterned, ensure_ascii=False)
         )
     return "\n".join(lines)
@@ -657,6 +923,7 @@ def collection_instructions_appendix(
 def collection_status_payload(
     state: dict[str, Any],
     reply_text: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Structured progress for H5 / SSE metadata (prefer over parsing reply text).
 
@@ -665,6 +932,10 @@ def collection_status_payload(
     """
     collected = state.get("collected") if isinstance(state.get("collected"), dict) else {}
     schema = state.get("schema") if isinstance(state.get("schema"), list) else []
+    actions_done = (
+        state.get("actions_done") if isinstance(state.get("actions_done"), dict) else {}
+    )
+    pending = pending_required_action_tools(state, config) if config else []
     payload: dict[str, Any] = {
         "phase": state.get("phase"),
         "missing": list(state.get("missing") or []),
@@ -673,6 +944,8 @@ def collection_status_payload(
         "completed": bool(state.get("completed")),
         "collected_keys": sorted(collected.keys()),
         "collected": dict(collected),
+        "actions_done": sorted(actions_done.keys()),
+        "required_actions_pending": pending,
     }
     exported = apply_schema_exports(schema, collected, reply_text=reply_text)
     payload.update(exported)
@@ -682,18 +955,23 @@ def collection_status_payload(
 def format_status_marker(
     state: dict[str, Any],
     reply_text: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> str:
     body = json.dumps(
-        collection_status_payload(state, reply_text=reply_text),
+        collection_status_payload(state, reply_text=reply_text, config=config),
         ensure_ascii=False,
         separators=(",", ":"),
     )
     return f"{STATUS_MARKER_PREFIX} {body}{STATUS_MARKER_SUFFIX}"
 
 
-def append_status_marker(content: str | None, state: dict[str, Any]) -> str:
+def append_status_marker(
+    content: str | None,
+    state: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> str:
     text = str(content or "")
-    marker = format_status_marker(state, reply_text=text)
+    marker = format_status_marker(state, reply_text=text, config=config)
     if STATUS_MARKER_PREFIX in text:
         # Refresh marker so late-parsed dept_code from the reply is visible to H5.
         prefix, _, _tail = text.partition(STATUS_MARKER_PREFIX)
@@ -826,6 +1104,7 @@ def build_collection_tools() -> list[Any]:
             return json.dumps({"ok": False, "error": "run_context missing"}, ensure_ascii=False)
         config = resolve_collection_config(workflow_from_run_context(ctx))
         state = get_collection_state(ctx)
+        pending = pending_required_action_tools(state, config)
         return json.dumps(
             {
                 "ok": True,
@@ -836,6 +1115,8 @@ def build_collection_tools() -> list[Any]:
                 "schema": state["schema"],
                 "user_confirmed": state["user_confirmed"],
                 "completed": state["completed"],
+                "actions_done": sorted((state.get("actions_done") or {}).keys()),
+                "required_actions_pending": pending,
             },
             ensure_ascii=False,
         )
@@ -915,8 +1196,10 @@ def build_collection_tools() -> list[Any]:
     @tool(
         name="collection_mark_done",
         description=(
-            "Record that a write/update MCP call succeeded. Safe after early or "
-            "partial saves; user may continue adding fields and write again."
+            "Record that a write/update MCP call succeeded. Blocked while "
+            "required_actions tools are still pending. "
+            "Safe after early or partial saves; user may continue adding fields "
+            "and write again."
         ),
     )
     def collection_mark_done(
@@ -933,11 +1216,16 @@ def build_collection_tools() -> list[Any]:
                 ensure_ascii=False,
             )
         try:
-            state = mark_collection_done(
+            # Same-turn MCP successes: prefer run_context.tools, fall back to messages.
+            state = apply_required_actions_from_run(
                 get_collection_state(ctx),
                 config,
-                result or None,
+                SimpleNamespace(
+                    tools=getattr(ctx, "tools", None) or [],
+                    messages=getattr(ctx, "messages", None) or [],
+                ),
             )
+            state = mark_collection_done(state, config, result or None)
             set_collection_state(ctx, state)
             return json.dumps(
                 {
@@ -945,6 +1233,7 @@ def build_collection_tools() -> list[Any]:
                     "phase": state["phase"],
                     "completed": True,
                     "missing": state["missing"],
+                    "actions_done": sorted((state.get("actions_done") or {}).keys()),
                     "hint": (
                         "Keep asking for missing fields."
                         if state.get("missing")
@@ -974,4 +1263,5 @@ def snapshot_collection_for_log(state: dict[str, Any]) -> dict[str, Any]:
         "collected_keys": sorted((state.get("collected") or {}).keys()),
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
+        "actions_done": sorted((state.get("actions_done") or {}).keys()),
     }
