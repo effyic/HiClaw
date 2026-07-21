@@ -15,6 +15,10 @@ from agno_worker.hooks.registry import HookRegistry
 from agno_worker.api.identity import resolve_debug_request, resolve_enable_thinking, resolve_ignore_db
 from agno_worker.runtime.builder import AgentBuilder
 from agno_worker.runtime.ignore_db import reset_ignore_db, set_ignore_db
+from agno_worker.runtime.structured_output import (
+    content_to_reply_text,
+    normalize_output_schema,
+)
 from agno_worker.runtime.thinking import reset_enable_thinking, set_enable_thinking
 from agno_worker.mcp.pool import clear_mcp_tools_pool
 from agno_worker.tenant.service import TenantAgentService
@@ -165,18 +169,21 @@ class AgnoRuntime:
             tenant_id=ctx.tenant_id or tenant_id,
             role_code=ctx.role_code,
             metadata=run_metadata,
+            output_schema=self._resolve_output_schema(ctx),
         )
         thinking_token = set_enable_thinking(enable_thinking)
         ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
+        json_mode_token = self._apply_use_json_mode(target, ctx, kwargs.get("output_schema"))
         try:
             response = await target.arun(message, **kwargs)
         finally:
+            self._restore_use_json_mode(target, json_mode_token)
             reset_enable_thinking(thinking_token)
             reset_ignore_db(ignore_token)
         if hasattr(response, "content"):
-            reply = str(response.content)
+            reply = content_to_reply_text(response.content)
         else:
-            reply = str(response)
+            reply = content_to_reply_text(response)
         resolved_session_id = (
             str(getattr(response, "session_id", "") or "")
             or ctx.session_id
@@ -225,11 +232,13 @@ class AgnoRuntime:
             metadata=run_metadata,
             stream=True,
             stream_events=agno_stream_events,
+            output_schema=self._resolve_output_schema(ctx),
         )
         final_reply_parts: list[str] = []
 
         thinking_token = set_enable_thinking(enable_thinking)
         ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
+        json_mode_token = self._apply_use_json_mode(target, ctx, kwargs.get("output_schema"))
         try:
             async for event in target.arun(message, **kwargs):
                 if sid := getattr(event, "session_id", None):
@@ -279,12 +288,15 @@ class AgnoRuntime:
                         final_reply_parts.append(content_str)
                     if not content_str and not reasoning_str:
                         continue
-                    yield {
+                    payload: dict[str, Any] = {
                         "event": "RunContent",
-                        "content": content_str,
-                        "reasoning_content": reasoning_str,
                         "session_id": resolved_session_id or None,
                     }
+                    if content_str is not None:
+                        payload["content"] = content_str
+                    if reasoning_str is not None:
+                        payload["reasoning_content"] = reasoning_str
+                    yield payload
                     continue
 
                 if event_name == RunEvent.run_error.value:
@@ -311,6 +323,7 @@ class AgnoRuntime:
                         session_id=resolved_session_id,
                     )
         finally:
+            self._restore_use_json_mode(target, json_mode_token)
             reset_enable_thinking(thinking_token)
             reset_ignore_db(ignore_token)
 
@@ -334,6 +347,7 @@ class AgnoRuntime:
         metadata: dict[str, Any] | None = None,
         stream: bool = False,
         stream_events: bool = False,
+        output_schema: Any = None,
     ) -> dict[str, Any]:
         run_metadata: dict[str, Any] = dict(metadata or {})
         kwargs: dict[str, Any] = {"metadata": run_metadata}
@@ -351,7 +365,46 @@ class AgnoRuntime:
             run_metadata["tenant_id"] = tenant_id
         if role_code:
             run_metadata["role_code"] = role_code
+        if output_schema is not None:
+            kwargs["output_schema"] = output_schema
         return kwargs
+
+    @staticmethod
+    def _resolve_output_schema(ctx: UserContext) -> Any:
+        extra = ctx.extra or {}
+        return normalize_output_schema(extra.get("output_schema"))
+
+    @staticmethod
+    def _resolve_use_json_mode(ctx: UserContext, output_schema: Any) -> bool | None:
+        """Prefer explicit body flag; default True when schema is present."""
+        if output_schema is None:
+            return None
+        extra = ctx.extra or {}
+        if "use_json_mode" in extra:
+            return bool(extra["use_json_mode"])
+        return True
+
+    @classmethod
+    def _apply_use_json_mode(
+        cls,
+        target: Any,
+        ctx: UserContext,
+        output_schema: Any,
+    ) -> tuple[bool, bool] | None:
+        """Temporarily set Agent.use_json_mode for this run; return restore token."""
+        desired = cls._resolve_use_json_mode(ctx, output_schema)
+        if desired is None or not hasattr(target, "use_json_mode"):
+            return None
+        previous = bool(getattr(target, "use_json_mode", False))
+        target.use_json_mode = desired
+        return previous, True
+
+    @staticmethod
+    def _restore_use_json_mode(target: Any, token: tuple[bool, bool] | None) -> None:
+        if token is None or not hasattr(target, "use_json_mode"):
+            return
+        previous, _applied = token
+        target.use_json_mode = previous
 
     @staticmethod
     def _attach_request_headers(

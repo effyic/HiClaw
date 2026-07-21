@@ -316,9 +316,9 @@ class AgentBuilder:
                         ):
                             probe_note = (
                                 "\n\n[系统提示] 当前为扩采阶段（probing）："
-                                "请根据患者本轮回答调用 collection_probe_note，"
-                                "或在患者拒绝继续时调用 collection_probe_finish；"
-                                "禁止推荐科室写库或结束对话。"
+                                "请根据用户本轮回答调用 collection_probe_note，"
+                                "或在符合 early_finish 条件时调用 collection_probe_finish；"
+                                "禁止调用写库类 required_actions 或结束对话。"
                             )
                             if "[系统提示] 当前为扩采阶段" not in reply_text:
                                 reply_text = reply_text.rstrip() + probe_note

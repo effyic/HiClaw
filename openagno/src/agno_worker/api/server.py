@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.types import Receive, Scope, Send
 import uvicorn
 
 from agno_worker.api.identity import (
@@ -26,6 +27,31 @@ from agno_worker.hooks.protocols import UserContext
 logger = logging.getLogger(__name__)
 
 CHAT_API_PREFIX = "/effyic"
+
+
+class SseStreamingResponse(StreamingResponse):
+    """SSE response that avoids Starlette's collapsing task-group path.
+
+    Uvicorn HTTP still advertises ASGI http ``spec_version`` ``2.3``, so
+    ``StreamingResponse`` runs the body stream and disconnect listener inside
+    ``create_collapsing_task_group``. With anyio >= 4.14 (per-task CancelScope
+    on TaskHandle), client abort then raises::
+
+        RuntimeError: Attempted to exit a cancel scope that isn't the current
+        tasks's current cancel scope
+
+    Forcing ``spec_version`` ``2.4`` selects Starlette's single-task stream
+    path (no parallel cancel scopes). Pair with ``anyio<4.14`` in deps.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "websocket":
+            patched = dict(scope)
+            asgi = dict(patched.get("asgi") or {})
+            asgi["spec_version"] = "2.4"
+            patched["asgi"] = asgi
+            scope = patched
+        await super().__call__(scope, receive, send)
 
 
 def _cors_allow_origins() -> list[str]:
@@ -54,10 +80,30 @@ class ChatRequest(BaseModel):
             "x-debug-request, else off."
         ),
     )
+    output_schema: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional per-run structured output schema. Pass a plain JSON Schema "
+            "object ({type:object, properties:...}) or a provider json_schema "
+            "envelope. Converted to Pydantic when possible and passed to "
+            "Agent.arun(output_schema=...)."
+        ),
+    )
+    use_json_mode: Optional[bool] = Field(
+        default=None,
+        description=(
+            "When output_schema is set: force JSON mode (schema via prompt + "
+            "json_object). Default true if omitted — required for providers "
+            "(e.g. DashScope Qwen Responses) that claim native structured "
+            "output but do not enforce it. Set false to try native only."
+        ),
+    )
 
 
 class ChatResponse(BaseModel):
-    reply: str
+    """Sync chat payload — field names align with stream ``RunContent`` data."""
+
+    content: str = Field(description="Assistant text (same meaning as stream RunContent.content)")
     session_id: str
 
 
@@ -65,11 +111,12 @@ ChatStreamHandler = Callable[..., AsyncIterator[dict[str, Any]]]
 
 
 def _format_sse(payload: dict[str, Any]) -> str:
-    """Agno AgentOS SSE: event line + dual-field JSON body."""
+    """Agno AgentOS SSE: event line + dual-field JSON body (omit nulls)."""
     event_type = str(payload.get("event") or "message")
+    body = {k: v for k, v in payload.items() if v is not None}
     return (
         f"event: {event_type}\n"
-        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
     )
 
 
@@ -148,14 +195,21 @@ class AgnoAPIServer:
         session_id: str,
         role_code: str = "",
         enable_thinking: bool = False,
+        output_schema: Optional[dict[str, Any]] = None,
+        use_json_mode: Optional[bool] = None,
     ) -> UserContext:
+        extra: dict[str, Any] = {"enable_thinking": enable_thinking}
+        if output_schema is not None:
+            extra["output_schema"] = output_schema
+        if use_json_mode is not None:
+            extra["use_json_mode"] = use_json_mode
         return UserContext(
             user_id=user_id,
             tenant_id=tenant_id,
             session_id=session_id,
             role_code=role_code,
             headers={str(k): str(v) for k, v in request.headers.items()},
-            extra={"enable_thinking": enable_thinking},
+            extra=extra,
         )
 
     def _handle_api_error(self, exc: Exception) -> HTTPException:
@@ -249,6 +303,8 @@ class AgnoAPIServer:
                 session_id=session_id,
                 role_code=role_code,
                 enable_thinking=enable_thinking,
+                output_schema=req.output_schema,
+                use_json_mode=req.use_json_mode,
             )
             try:
                 reply, resolved_session_id = await self._chat_handler_async(
@@ -260,14 +316,14 @@ class AgnoAPIServer:
                 )
             except Exception as exc:
                 raise self._handle_api_error(exc) from exc
-            return ChatResponse(reply=reply, session_id=resolved_session_id)
+            return ChatResponse(content=reply, session_id=resolved_session_id)
 
         @app.post(f"{CHAT_API_PREFIX}/v1/chat/stream")
         async def chat_stream(
             req: ChatRequest,
             request: Request,
             _: None = Depends(_auth),
-        ) -> StreamingResponse:
+        ) -> SseStreamingResponse:
             if self._chat_stream_handler_async is None:
                 raise HTTPException(status_code=501, detail="streaming not configured")
 
@@ -300,6 +356,8 @@ class AgnoAPIServer:
                 session_id=session_id,
                 role_code=role_code,
                 enable_thinking=enable_thinking,
+                output_schema=req.output_schema,
+                use_json_mode=req.use_json_mode,
             )
             stream_events = _truthy_query(
                 request.query_params.get("stream_events", "")
@@ -323,7 +381,7 @@ class AgnoAPIServer:
                     )
                     return
 
-            return StreamingResponse(
+            return SseStreamingResponse(
                 event_generator(),
                 media_type="text/event-stream",
                 headers={

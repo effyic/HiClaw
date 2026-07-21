@@ -19,9 +19,12 @@ Enable by publishing ``agno_agent.workflow`` as either::
       "kind": "collection_dialogue",
       "schema": {...},
       "required_actions": [
-        {"type": "mcp", "tool": "mec_create_emr_case", "when": "missing_empty"}
+        {"type": "mcp", "tool": "your_write_tool", "when": "missing_empty"}
       ]
     }
+
+Domain policy (tone, triage rules, EMR, etc.) belongs in the published agent
+``system_prompt`` / ``instructions_append`` / ``probe.goal`` — not in this module.
 
 Single and multiple end-actions use the same list field (length 1 or N).
 """
@@ -100,6 +103,18 @@ def ask_batch_size(config: dict[str, Any] | None) -> int:
     return max(1, min(size, 5))
 
 
+# Generic early-finish allowlist (SaaS-safe). Domain keywords (e.g. 急症/120)
+# belong in ``workflow.probe.early_finish_keywords``.
+_DEFAULT_PROBE_EARLY_FINISH_KEYWORDS = (
+    "拒绝",
+    "不想",
+    "不答",
+    "refuse",
+    "skip",
+    "emergency",
+)
+
+
 def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
     """Optional enrichment loop after gate / required slots are filled.
 
@@ -108,16 +123,28 @@ def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None
         {
           "enabled": true,
           "max_rounds": 3,
+          "min_rounds": 2,
+          "goal": "optional domain purpose string from the tenant agent",
           "hints": [],
           "allow_skip": true,
-          "gate_fields": ["主诉", "持续时间", "既往病史", "过敏史", "用药情况"]
+          "gate_fields": ["slot_a", "slot_b"],
+          "early_finish_keywords": ["拒绝", "refuse", "emergency"]
         }
 
-    - ``hints`` defaults to ``[]`` (AI asks freely from dialogue + collected).
+    Platform owns only the FSM (rounds / notes / gates). What to ask and why
+    comes from ``goal`` / ``hints`` / agent instructions — never hardcoded here.
+
+    - ``goal``: free-text enrichment purpose injected into the protocol.
+    - ``hints``: optional dimension checklist. Empty → model follows ``goal`` +
+      dialogue + collected (recommended for adaptive questioning).
+      Non-empty → prefer unanswered dimensions; not a fixed script.
+    - ``min_rounds``: early ``collection_probe_finish`` blocked until this many
+      ``collection_probe_note`` calls (unless reason matches early_finish_keywords).
     - ``gate_fields`` (optional): enter probing once these names are filled, even if
-      other required slots (e.g. 推荐科室) are still missing. After probe finishes,
-      FSM returns to collecting for the remaining required fields.
+      other required slots are still missing. After probe finishes, FSM returns to
+      collecting for the remaining required fields.
       If omitted/empty: probing starts only when **all** required fields are filled.
+    - ``early_finish_keywords``: substrings in finish reason that bypass min_rounds.
     - While ``phase=probing``, required MCP write tools stay gated.
     """
     if not isinstance(config, dict):
@@ -131,6 +158,12 @@ def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None
         max_rounds = int(raw.get("max_rounds", 3))
     except (TypeError, ValueError):
         max_rounds = 3
+    max_rounds = max(0, min(max_rounds, 8))
+    try:
+        min_rounds = int(raw.get("min_rounds", 0))
+    except (TypeError, ValueError):
+        min_rounds = 0
+    min_rounds = max(0, min(min_rounds, max_rounds if max_rounds > 0 else 0))
     hints_raw = raw.get("hints")
     hints: list[str] = []
     if isinstance(hints_raw, list):
@@ -139,12 +172,21 @@ def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None
     gate_fields: list[str] = []
     if isinstance(gate_raw, list):
         gate_fields = [str(x).strip() for x in gate_raw if str(x).strip()]
+    goal = str(raw.get("goal") or "").strip()
+    kw_raw = raw.get("early_finish_keywords")
+    if isinstance(kw_raw, list) and kw_raw:
+        early_finish_keywords = [str(x).strip() for x in kw_raw if str(x).strip()]
+    else:
+        early_finish_keywords = list(_DEFAULT_PROBE_EARLY_FINISH_KEYWORDS)
     return {
         "enabled": True,
-        "max_rounds": max(0, min(max_rounds, 8)),
+        "max_rounds": max_rounds,
+        "min_rounds": min_rounds,
+        "goal": goal,
         "hints": hints,
         "allow_skip": _as_bool(raw.get("allow_skip"), True),
         "gate_fields": gate_fields,
+        "early_finish_keywords": early_finish_keywords,
     }
 
 
@@ -562,7 +604,7 @@ def advance_collection_phase(
     out["missing"] = compute_missing(out["schema"], out["collected"])
 
     # Probe may start before all required are filled when gate_fields is set
-    # (e.g. triage: probe before 推荐科室). Check probe before missing→collecting.
+    # (e.g. remaining required slots after gate_fields). Check probe before missing→collecting.
     if is_probe_active(out, config):
         out["phase"] = PHASE_PROBING
         return out
@@ -614,6 +656,18 @@ def append_probe_note(
     return advance_collection_phase(out, config)
 
 
+def _probe_early_finish_allowed(
+    reason: str | None,
+    keywords: list[str] | tuple[str, ...] | None = None,
+) -> bool:
+    """True when finish reason matches configured early_finish_keywords."""
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    keys = keywords if keywords is not None else _DEFAULT_PROBE_EARLY_FINISH_KEYWORDS
+    return any(str(k).strip().lower() in text for k in keys if str(k).strip())
+
+
 def finish_probe(
     state: dict[str, Any],
     config: dict[str, Any] | None,
@@ -632,6 +686,18 @@ def finish_probe(
     if not _as_bool(probe.get("allow_skip"), True) and not is_probe_finished(out, config):
         raise ValueError(
             "probe.allow_skip=false; continue until max_rounds via collection_probe_note"
+        )
+    try:
+        rounds = int(out.get("probe_rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    min_rounds = int(probe.get("min_rounds") or 0)
+    if rounds < min_rounds and not _probe_early_finish_allowed(
+        reason, probe.get("early_finish_keywords")
+    ):
+        raise ValueError(
+            f"probe.min_rounds={min_rounds}; need more collection_probe_note "
+            "or a reason matching probe.early_finish_keywords"
         )
     out["probe_done"] = True
     if reason and str(reason).strip():
@@ -1048,8 +1114,10 @@ def collection_instructions_appendix(
             [
                 f"probe_enabled: true",
                 f"probe_rounds: {current.get('probe_rounds') or 0}/{probe.get('max_rounds')}",
+                f"probe_min_rounds: {probe.get('min_rounds') or 0}",
                 f"probe_done: {bool(current.get('probe_done'))}",
                 f"probe_notes: {json.dumps(current.get('probe_notes') or [], ensure_ascii=False)}",
+                f"probe_goal: {json.dumps(probe.get('goal') or '', ensure_ascii=False)}",
                 f"probe_hints: {json.dumps(probe.get('hints') or [], ensure_ascii=False)}",
                 f"probe_allow_skip: {bool(probe.get('allow_skip'))}",
             ]
@@ -1074,24 +1142,34 @@ def collection_instructions_appendix(
         ]
     )
     if probe and current.get("phase") == PHASE_PROBING:
+        goal = str(probe.get("goal") or "").strip()
+        goal_clause = (
+            f"Follow probe_goal: {goal}. "
+            if goal
+            else "Follow agent instructions for enrichment purpose. "
+        )
         lines.extend(
             [
                 "5. PROBE LOOP (phase=probing): gate/required slots for probing are filled. "
-                "Spontaneously ask clinical follow-ups based on the CURRENT dialogue "
-                "+ collected values (not a fixed script). Prefer the biggest remaining "
-                "clinical gaps. If probe_hints is non-empty it is OPTIONAL inspiration "
-                "only (default empty — ask freely). "
+                + goal_clause
+                + "Choose the next question from dialogue + collected to close the "
+                "largest remaining information gap for that goal — adaptive, not a "
+                "fixed questionnaire. "
+                "If probe_hints is non-empty, treat it as an optional dimension checklist: "
+                "prefer unanswered dimensions; skip what is already clear; "
+                "do not recite hints verbatim. "
+                "If probe_hints is empty, rely on probe_goal + dialogue + collected. "
                 "Ask exactly 1 question per turn. "
-                "CRITICAL: after the patient answers, you MUST call "
-                "collection_probe_note(note=concise clinical note) in the SAME turn "
-                "before ending — otherwise probe_rounds will not advance and you will "
-                "be stuck. "
+                "CRITICAL: after the user answers, you MUST call "
+                "collection_probe_note(note=concise enrichment note) in the SAME turn "
+                "before ending — otherwise probe_rounds will not advance. "
                 "Default: continue until probe_rounds reaches max_rounds. "
-                "Only call collection_probe_finish when the patient clearly refuses "
-                "further questions or an emergency redirect is required. "
-                "FORBIDDEN during probing: write MCP (e.g. mec_create_emr_case), "
-                "final department recommendation update, doctor summary closing, "
-                "collection_mark_done.",
+                "collection_probe_finish is blocked until probe_min_rounds notes "
+                "unless reason matches probe.early_finish_keywords. "
+                "Do not end early just because information 'seems enough'. "
+                "FORBIDDEN during probing: required write MCP tools, filling remaining "
+                "decision/result slots that should wait until after probe, "
+                "closing summary, collection_mark_done.",
             ]
         )
         rule_base = 6
@@ -1105,20 +1183,24 @@ def collection_instructions_appendix(
                 if probe
                 else ","
             )
-            + " produce a doctor-facing summary (摘要≠电子病历) for the clinician"
+            + " produce a brief structured summary for the operator"
             + (
                 " and ask for confirmation (collection_confirm or wait for confirm)."
                 if confirm_required(config)
                 else "."
             )
-            + " Then call the write MCP to enqueue structured EMR generation."
+            + (
+                f" Then call write MCP ({write_tool}) if configured."
+                if write_tool
+                else " Then call any pending required_actions write tools."
+            )
         )
         rule_base = 6
     if write_tool or pending_required_action_tools(current, config):
         lines.append(
-            f"{rule_base}. Write/update MCP tools enqueue async structured EMR (not the "
-            "doctor summary itself). After a successful call, collection_mark_done(result=...). "
-            "User may later add symptoms — update fields / probe notes and write again."
+            f"{rule_base}. After a successful write/update MCP call, "
+            "collection_mark_done(result=...). User may later add details — "
+            "update fields / probe notes and write again."
         )
         rule_n = rule_base + 1
     else:
@@ -1368,9 +1450,9 @@ def build_collection_tools() -> list[Any]:
     @tool(
         name="collection_probe_note",
         description=(
-            "During phase=probing: record one clinical enrichment note from the "
-            "patient's latest answer, then advance probe_rounds. Call once per "
-            "answered probe question. When max_rounds is reached, probe ends."
+            "During phase=probing: record one enrichment note from the user's "
+            "latest answer, then advance probe_rounds. Call once per answered "
+            "probe question. When max_rounds is reached, probe ends."
         ),
     )
     def collection_probe_note(
@@ -1406,9 +1488,11 @@ def build_collection_tools() -> list[Any]:
     @tool(
         name="collection_probe_finish",
         description=(
-            "End the probing loop early (skip remaining rounds). Use when the "
-            "patient declines further questions or enough clinical detail is gathered. "
-            "Blocked when probe.allow_skip=false and max_rounds not yet reached."
+            "End the probing loop early (skip remaining rounds). Use only when "
+            "reason matches workflow.probe.early_finish_keywords (e.g. user refuses). "
+            "Blocked until probe_min_rounds notes unless reason matches those keywords. "
+            "Also blocked when probe.allow_skip=false and max_rounds not yet reached. "
+            "Do NOT use merely because information 'seems enough'."
         ),
     )
     def collection_probe_finish(
@@ -1435,7 +1519,8 @@ def build_collection_tools() -> list[Any]:
                     "probe_rounds": state.get("probe_rounds"),
                     "required_actions_pending": pending_required_action_tools(state, config),
                     "hint": (
-                        "Probe finished; produce doctor summary then call write MCP."
+                        "Probe finished; produce operator summary then call write MCP "
+                        "if required_actions pending."
                         if not state.get("missing")
                         else "Probe finished but required fields still missing."
                     ),
