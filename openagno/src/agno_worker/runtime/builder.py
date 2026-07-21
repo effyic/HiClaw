@@ -27,6 +27,7 @@ from agno_worker.runtime.agent import StorageAwareAgent
 from agno_worker.runtime.ignore_db import get_ignore_db
 from agno_worker.runtime.storage import slim_session_state, sync_debug_request_to_session_state
 from agno_worker.runtime.thinking import attach_thinking_request_params
+from agno_worker.tenant.collection import filter_collection_gated_tools
 from agno_worker.tenant.service import TenantAgentService
 
 logger = logging.getLogger(__name__)
@@ -201,7 +202,10 @@ class AgentBuilder:
 
             tools.extend(skills_manager.build_tools(run_context, catalog))
             tools.extend(tenant.data.get_tools(run_context))
-            return tenant.filter_mcp_tools(run_context, tools)
+            tools = tenant.filter_mcp_tools(run_context, tools)
+            # Collection FSM hard-gate: hide required_actions write tools until
+            # when-condition (missing empty + probe done) is met.
+            return filter_collection_gated_tools(run_context, tools)
 
         return _tools
 

@@ -315,6 +315,7 @@ HTTP role-code / x-role-code（或 query role_code）
 | `required_actions[].type` | 目前仅支持 `mcp` |
 | `required_actions[].tool` | MCP 工具名 |
 | `required_actions[].when` | `missing_empty`（默认：必填采齐 **且 probe 结束后**）或 `before_mark_done`（仅 mark_done 前） |
+| `required_actions[].hard_gate` | 条件未满足时是否从工具列表**硬隐藏**该 MCP（默认：`missing_empty` 为 true）。防模型跳过 probe 直接写库 |
 | `auto_mark_done` | 必做 MCP 全部成功后是否自动 `completed=true`（默认 true） |
 | `probe` | 可选扩采 loop：`gate_fields` 或全部 required 齐后进入 `phase=probing`（先扩采再填剩余槽位/写库） |
 
@@ -364,7 +365,7 @@ HTTP role-code / x-role-code（或 query role_code）
 | `collection_mark_done`     | 写库 / 更新成功后记账；必做动作未完成时拒绝                   |
 
 
-写库 MCP（如 `mec_create_emr_case`）始终对模型可见，可早写、可多次更新。缺必填字段时由 prompt + `missing` 驱动继续追问；`completed` 表示「至少成功写过一次」，不冻结 FSM——用户补充病情后可再 `update_fields` 并再次写库。
+写库 MCP（`required_actions` + `when=missing_empty`）在条件未满足前默认 **hard_gate**：从本轮可用工具列表移除，模型无法调用；条件满足（必填采齐且 probe 结束）后才出现。需要允许早写时设 `"hard_gate": false`。缺必填字段时由 prompt + `missing` 驱动继续追问；`completed` 表示「至少成功写过一次」，不冻结 FSM——用户补充后可再 `update_fields` 并再次写库。
 
 客户端可用请求头 `x-collection-confirm: true` 在本轮标记确认。同步回复末尾附加 `<!--COLLECTION_STATUS {...}-->`；流式场景请读 `session_state.collection` 或 run `metadata.collection_status`（不要只依赖 SSE 文本标记）。
 
