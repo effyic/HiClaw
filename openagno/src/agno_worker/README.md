@@ -116,6 +116,50 @@ curl -X POST http://localhost:8090/effyic/v1/chat \
 
 
 
+### 3.2.1 结构化输出（`output_schema`）
+
+
+同步 / 流式 chat 请求体可带可选字段 `output_schema`（plain JSON Schema object，或 provider `json_schema` 信封）。Worker 按次传给 `Agent.arun(output_schema=...)`，**不**改共享 Agent 实例；结构化结果序列化为 JSON 字符串写入响应的 `content`（与 stream `RunContent.content` 同名字段）。
+
+适用于后台一次性抽取（如电子病历字段），不建议对话采集 Agent 常开。
+
+```bash
+curl -X POST http://localhost:8090/effyic/v1/chat \
+  -H "tenant-id: 1" \
+  -H "user-id: system" \
+  -H "role-code: system_emr_generate_agent" \
+  -H "x-ignore-db: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "根据材料填写病历字段…",
+    "enable_thinking": false,
+    "output_schema": {
+      "title": "MedicalEmrFields",
+      "type": "object",
+      "properties": {
+        "chief_complaint": {"type": "string", "description": "主诉"},
+        "allergy_history": {"type": "string", "description": "过敏史"}
+      },
+      "required": ["chief_complaint", "allergy_history"],
+      "additionalProperties": false
+    }
+  }'
+```
+
+同步响应字段与 stream 对齐：
+
+```json
+{ "content": "...", "session_id": "..." }
+```
+
+stream `RunContent`（无 thinking 时不含 `reasoning_content`）：
+
+```json
+{ "event": "RunContent", "content": "...", "session_id": "..." }
+```
+
+
+
 ### 3.3 会话入库裁剪（`x-debug-request`）
 
 
@@ -270,10 +314,42 @@ HTTP role-code / x-role-code（或 query role_code）
 |------|------|
 | `required_actions[].type` | 目前仅支持 `mcp` |
 | `required_actions[].tool` | MCP 工具名 |
-| `required_actions[].when` | `missing_empty`（默认，必填采齐后）或 `before_mark_done`（仅 mark_done 前） |
+| `required_actions[].when` | `missing_empty`（默认：必填采齐 **且 probe 结束后**）或 `before_mark_done`（仅 mark_done 前） |
 | `auto_mark_done` | 必做 MCP 全部成功后是否自动 `completed=true`（默认 true） |
+| `probe` | 可选扩采 loop：`gate_fields` 或全部 required 齐后进入 `phase=probing`（先扩采再填剩余槽位/写库） |
 
-运行时：post_hook 在 scrub 前扫描同轮 `run_output.tools` / messages，把成功调用记入 `session_state.collection.actions_done`（多副本安全）。状态对外暴露 `required_actions_pending`；未完成时会在回复末尾追加系统提示，并在 `collection_protocol` 中升级为 MUST call。
+**扩采 loop（`probe`）— 平台只提供 FSM；问什么由租户 Agent 的 `goal` / `instructions` 决定**
+
+```json
+"probe": {
+  "enabled": true,
+  "min_rounds": 2,
+  "max_rounds": 5,
+  "allow_skip": true,
+  "goal": "optional domain purpose (from the published agent)",
+  "hints": [],
+  "gate_fields": ["slot_a", "slot_b"],
+  "early_finish_keywords": ["拒绝", "refuse", "emergency"]
+}
+```
+
+| 配置 | 含义 |
+|------|------|
+| `enabled` | 是否启用扩采 |
+| `min_rounds` | 未达轮数时禁止提前 `finish`（除非 reason 命中 `early_finish_keywords`） |
+| `max_rounds` | 最多追问轮数（每轮 1 问） |
+| `allow_skip` | 是否允许 `collection_probe_finish` 提前结束 |
+| `goal` | 扩采目的说明（注入协议）；医疗话术/分诊逻辑写在 Agent 指令，不写在平台 |
+| `hints` | 可选维度清单，**推荐 `[]`**，由模型按 `goal` + 对话自适应追问 |
+| `gate_fields` | 可选；这些槽位齐后即可 probing（其余 required 扩采后再采）。省略则等全部 required 齐 |
+| `early_finish_keywords` | 提前结束 reason 白名单；默认仅通用「拒绝/refuse…」，领域词由租户配置 |
+
+| 工具 | 作用 |
+|------|------|
+| `collection_probe_note` | 记录一轮扩采笔记并 `probe_rounds++`（答完须同轮调用） |
+| `collection_probe_finish` | 结束扩采（`allow_skip=true`） |
+
+写库工具名、摘要语义、领域规则均由租户 Agent / `required_actions` 配置，平台不做场景硬编码。
 
 
 | 工具                         | 作用                                      |
@@ -281,6 +357,8 @@ HTTP role-code / x-role-code（或 query role_code）
 | `collection_load_schema`   | 加载字段清单（`schema.source=inline` 时通常已自动加载） |
 | `collection_update_fields` | 合并采集值（**仅允许 schema 内字段名**）并重算 missing   |
 | `collection_status`        | 只读进度                                    |
+| `collection_probe_note`    | 扩采笔记（phase=probing）                     |
+| `collection_probe_finish`  | 结束扩采 loop                               |
 | `collection_confirm`       | 用户确认（可选，由 `confirm_required` 控制）        |
 | `collection_complete`      | 可选：写入 `draft_payload` 快照                |
 | `collection_mark_done`     | 写库 / 更新成功后记账；必做动作未完成时拒绝                   |
