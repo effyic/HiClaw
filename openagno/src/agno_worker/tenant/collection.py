@@ -274,7 +274,110 @@ def _normalize_required_action(item: Any) -> dict[str, Any] | None:
     when = str(item.get("when") or "missing_empty").strip() or "missing_empty"
     if when not in {"missing_empty", "before_mark_done"}:
         when = "missing_empty"
-    return {"type": action_type, "tool": tool, "when": when}
+    # Hard-hide tool from the model until when-condition is met (prevents
+    # prompt-only bypass). Default on for missing_empty; off for before_mark_done.
+    if "hard_gate" in item:
+        hard_gate = _as_bool(item.get("hard_gate"), True)
+    else:
+        hard_gate = when == "missing_empty"
+    return {
+        "type": action_type,
+        "tool": tool,
+        "when": when,
+        "hard_gate": hard_gate,
+    }
+
+
+def required_action_when_met(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    action: dict[str, Any],
+    *,
+    for_mark_done: bool = False,
+) -> bool:
+    """Whether a required_action's ``when`` condition is currently satisfied."""
+    current = ensure_collection_state(state, config)
+    when = str(action.get("when") or "missing_empty")
+    if when == "before_mark_done":
+        return bool(for_mark_done)
+    # missing_empty: required slots filled and probe finished (if enabled)
+    if current.get("missing"):
+        return False
+    if not current.get("schema"):
+        return False
+    if not is_probe_finished(current, config):
+        return False
+    return True
+
+
+def hard_gated_tool_names(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> set[str]:
+    """MCP tool names that must be hidden until their when-condition is met.
+
+    Soft prompt rules are not enough — models occasionally call write tools
+    as soon as gate/required slots look complete. Hiding the tool is the hard gate.
+    """
+    if not config:
+        return set()
+    blocked: set[str] = set()
+    for action in resolve_required_actions(config):
+        if not action.get("hard_gate"):
+            continue
+        tool = str(action.get("tool") or "").strip()
+        if not tool:
+            continue
+        # before_mark_done tools stay visible; only mark_done is gated.
+        if str(action.get("when") or "") == "before_mark_done":
+            continue
+        if not required_action_when_met(state, config, action):
+            blocked.add(tool)
+    return blocked
+
+
+def _tool_callable_name(tool: Any) -> str:
+    for attr in ("name", "tool_name"):
+        value = getattr(tool, attr, None)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    fn = getattr(tool, "entrypoint", None) or getattr(tool, "function", None)
+    if fn is not None:
+        nested = getattr(fn, "__name__", None) or getattr(fn, "name", None)
+        if nested is not None and str(nested).strip():
+            return str(nested).strip()
+    return ""
+
+
+def filter_collection_gated_tools(
+    run_context: Any,
+    tools: list[Any],
+) -> list[Any]:
+    """Drop hard-gated required_actions tools from the live tool list."""
+    if not tools:
+        return tools
+    config = resolve_collection_config(workflow_from_run_context(run_context))
+    if not config:
+        return tools
+    state = get_collection_state(run_context)
+    blocked = hard_gated_tool_names(state, config)
+    if not blocked:
+        return tools
+    kept: list[Any] = []
+    for tool in tools:
+        name = _tool_callable_name(tool)
+        if name and name in blocked:
+            logger.info(
+                "collection hard-gate: hiding tool %s (phase=%s probe_done=%s missing=%s)",
+                name,
+                state.get("phase"),
+                state.get("probe_done"),
+                state.get("missing"),
+            )
+            continue
+        kept.append(tool)
+    return kept
+
 
 
 def required_action_auto_mark_done(config: dict[str, Any] | None) -> bool:
@@ -298,8 +401,8 @@ def pending_required_action_tools(
 ) -> list[str]:
     """Return required MCP tool names not yet recorded in ``actions_done``.
 
-    ``when=missing_empty`` applies once required fields are filled (and also
-    gates ``collection_mark_done``). ``when=before_mark_done`` only gates mark_done.
+    ``when=missing_empty`` applies once required fields are filled and probe
+    finished. ``when=before_mark_done`` only gates mark_done.
     """
     current = ensure_collection_state(state, config)
     actions = resolve_required_actions(config)
@@ -311,17 +414,9 @@ def pending_required_action_tools(
         tool = str(action.get("tool") or "").strip()
         if not tool or tool in done:
             continue
-        when = str(action.get("when") or "missing_empty")
-        if when == "before_mark_done":
-            if for_mark_done:
-                pending.append(tool)
-            continue
-        # missing_empty (default): also wait until probe loop finishes
-        if current.get("missing"):
-            continue
-        if not current.get("schema"):
-            continue
-        if not is_probe_finished(current, config):
+        if not required_action_when_met(
+            current, config, action, for_mark_done=for_mark_done
+        ):
             continue
         pending.append(tool)
     return pending
@@ -1096,6 +1191,10 @@ def collection_instructions_appendix(
     source = schema_source(config)
     write_tool = suggested_write_tool(config)
     probe = resolve_probe_config(config)
+    gated = sorted(hard_gated_tool_names(current, config))
+    if write_tool and write_tool in gated:
+        # Do not prompt the model to call a tool that is hard-hidden.
+        write_tool = None
     lines = [
         "## collection_protocol",
         f"phase: {current.get('phase')}",
@@ -1106,6 +1205,7 @@ def collection_instructions_appendix(
         f"completed_once: {current.get('completed')}",
         f"actions_done: {json.dumps(sorted((current.get('actions_done') or {}).keys()), ensure_ascii=False)}",
         f"required_actions_pending: {json.dumps(pending_required_action_tools(current, config), ensure_ascii=False)}",
+        f"write_tools_hard_gated: {json.dumps(gated, ensure_ascii=False)}",
         f"missing: {json.dumps(missing, ensure_ascii=False)}",
         f"collected: {json.dumps(current.get('collected') or {}, ensure_ascii=False)}",
     ]
@@ -1136,8 +1236,9 @@ def collection_instructions_appendix(
         [
             f"2. Each turn ask at most {batch} items from missing; then call "
             "collection_update_fields with ONLY schema field names.",
-            "3. While missing is non-empty, keep asking the patient for those fields. "
-            "You may still call write/update MCP if the user asks to save a partial case.",
+            "3. While missing is non-empty OR write_tools_hard_gated is non-empty, "
+            "do not attempt write/required_actions MCP — those tools are removed "
+            "from the available tool list until conditions are met.",
             "4. Do not invent completion; call collection_status to inspect progress.",
         ]
     )
@@ -1167,9 +1268,10 @@ def collection_instructions_appendix(
                 "collection_probe_finish is blocked until probe_min_rounds notes "
                 "unless reason matches probe.early_finish_keywords. "
                 "Do not end early just because information 'seems enough'. "
-                "FORBIDDEN during probing: required write MCP tools, filling remaining "
-                "decision/result slots that should wait until after probe, "
-                "closing summary, collection_mark_done.",
+                "Write/required_actions MCP tools are HARD-REMOVED while probing "
+                "(see write_tools_hard_gated); do not invent a write call. "
+                "Also forbidden: filling remaining decision/result slots that should "
+                "wait until after probe, closing summary, collection_mark_done.",
             ]
         )
         rule_base = 6
