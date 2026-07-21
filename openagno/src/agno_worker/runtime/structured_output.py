@@ -82,18 +82,19 @@ def json_object_schema_to_model(schema: dict[str, Any]) -> type[BaseModel]:
             py_type = dict
         else:
             py_type = str
-
-        if name in required:
-            field_definitions[name] = (
-                py_type,
-                Field(..., description=description or None),
-            )
-        else:
-            default: Any = "" if py_type is str else None
-            field_definitions[name] = (
-                py_type,
-                Field(default=default, description=description or None),
-            )
+        default: Any = ... if name in required else ""
+        if py_type is list:
+            default = ... if name in required else []
+        elif py_type is dict:
+            default = ... if name in required else {}
+        elif py_type is bool:
+            default = ... if name in required else False
+        elif py_type in {int, float}:
+            default = ... if name in required else 0
+        field_definitions[name] = (
+            py_type,
+            Field(default=default, description=description or None),
+        )
 
     if not field_definitions:
         return create_model(model_name)  # type: ignore[call-overload]
@@ -111,3 +112,66 @@ def content_to_reply_text(content: Any) -> str:
     if isinstance(content, (int, float, bool)):
         return json.dumps(content, ensure_ascii=False)
     return str(content)
+
+
+def join_content_segments(
+    segments: list[str],
+    *,
+    tools_intervened: bool = False,
+) -> str:
+    """Join assistant content segments for one agent run (domain-agnostic).
+
+    Agno may emit text both before and after tool calls. When tools intervened
+    and there is more than one non-empty segment, keep the **last** segment —
+    that is the post-tool user-facing reply. No domain keywords are consulted.
+
+    Token/delta chunks within one segment must already be joined by the caller
+    before being passed as a segment.
+    """
+    cleaned = [str(s).strip() for s in segments if s is not None and str(s).strip()]
+    if not cleaned:
+        return ""
+    if tools_intervened:
+        return cleaned[-1]
+    return "".join(cleaned)
+
+
+def prefer_last_assistant_after_tools(run_output: Any) -> str | None:
+    """If this run called tools, return the last assistant text message (if any).
+
+    Used on sync paths where ``content`` may already concatenate pre/post tool
+    speech. Structural only — no domain string matching.
+    """
+    if run_output is None:
+        return None
+    tools = getattr(run_output, "tools", None)
+    has_tools = False
+    if isinstance(tools, list) and tools:
+        has_tools = True
+    messages = getattr(run_output, "messages", None)
+    if not isinstance(messages, list) or not messages:
+        return None
+    if not has_tools:
+        # Still detect tool-role messages in the transcript.
+        for msg in messages:
+            role = str(getattr(msg, "role", None) or "").lower()
+            if role == "tool":
+                has_tools = True
+                break
+            if getattr(msg, "tool_calls", None) or getattr(msg, "tool_args", None):
+                has_tools = True
+                break
+    if not has_tools:
+        return None
+    last_text = None
+    for msg in messages:
+        role = str(getattr(msg, "role", None) or "").lower()
+        if role not in {"assistant", "model"}:
+            continue
+        content = getattr(msg, "content", None)
+        if content is None:
+            continue
+        text = content_to_reply_text(content).strip()
+        if text:
+            last_text = text
+    return last_text
