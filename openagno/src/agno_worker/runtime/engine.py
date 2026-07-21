@@ -17,7 +17,9 @@ from agno_worker.runtime.builder import AgentBuilder
 from agno_worker.runtime.ignore_db import reset_ignore_db, set_ignore_db
 from agno_worker.runtime.structured_output import (
     content_to_reply_text,
+    join_content_segments,
     normalize_output_schema,
+    prefer_last_assistant_after_tools,
 )
 from agno_worker.runtime.thinking import reset_enable_thinking, set_enable_thinking
 from agno_worker.mcp.pool import clear_mcp_tools_pool
@@ -180,15 +182,18 @@ class AgnoRuntime:
             self._restore_use_json_mode(target, json_mode_token)
             reset_enable_thinking(thinking_token)
             reset_ignore_db(ignore_token)
-        if hasattr(response, "content"):
-            reply = content_to_reply_text(response.content)
-        else:
-            reply = content_to_reply_text(response)
         resolved_session_id = (
             str(getattr(response, "session_id", "") or "")
             or ctx.session_id
             or session_id
         )
+        preferred = prefer_last_assistant_after_tools(response)
+        if preferred is not None:
+            reply = preferred
+        elif hasattr(response, "content"):
+            reply = content_to_reply_text(response.content)
+        else:
+            reply = content_to_reply_text(response)
         output = self._request_filters.apply_post_filter(
             ctx,
             {"reply": reply, "session_id": resolved_session_id},
@@ -234,7 +239,10 @@ class AgnoRuntime:
             stream_events=agno_stream_events,
             output_schema=self._resolve_output_schema(ctx),
         )
-        final_reply_parts: list[str] = []
+        content_segments: list[list[str]] = [[]]
+        saw_assistant_content = False
+        tools_after_content = False
+        replace_emitted = False
 
         thinking_token = set_enable_thinking(enable_thinking)
         ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
@@ -272,6 +280,24 @@ class AgnoRuntime:
                         )
                     continue
 
+                if event_name in {
+                    RunEvent.tool_call_started.value,
+                    RunEvent.tool_call_completed.value,
+                    RunEvent.tool_call_error.value,
+                }:
+                    if saw_assistant_content:
+                        tools_after_content = True
+                        # Start a new content segment after tools intervene.
+                        if content_segments[-1]:
+                            content_segments.append([])
+                    if stream_events:
+                        yield self._agno_event_passthrough(
+                            event,
+                            event_name,
+                            session_id=resolved_session_id,
+                        )
+                    continue
+
                 if event_name == RunEvent.run_content.value:
                     # Agno dual-field standard: content + reasoning_content
                     # on the same RunContent event (Qwen puts thinking here).
@@ -285,13 +311,19 @@ class AgnoRuntime:
                         if reasoning is not None and str(reasoning):
                             reasoning_str = str(reasoning)
                     if content_str:
-                        final_reply_parts.append(content_str)
+                        content_segments[-1].append(content_str)
+                        saw_assistant_content = True
                     if not content_str and not reasoning_str:
                         continue
                     payload: dict[str, Any] = {
                         "event": "RunContent",
                         "session_id": resolved_session_id or None,
                     }
+                    # After tools, subsequent user-facing text replaces the bubble
+                    # (generic tool-turn UX; no domain keywords).
+                    if content_str and tools_after_content and not replace_emitted:
+                        payload["replace"] = True
+                        replace_emitted = True
                     if content_str is not None:
                         payload["content"] = content_str
                     if reasoning_str is not None:
@@ -327,7 +359,10 @@ class AgnoRuntime:
             reset_enable_thinking(thinking_token)
             reset_ignore_db(ignore_token)
 
-        reply = "".join(final_reply_parts)
+        segments = ["".join(parts) for parts in content_segments]
+        reply = join_content_segments(
+            segments, tools_intervened=tools_after_content
+        )
         output = self._request_filters.apply_post_filter(
             ctx,
             {"reply": reply, "session_id": resolved_session_id},

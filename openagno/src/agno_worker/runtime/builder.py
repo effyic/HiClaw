@@ -297,7 +297,18 @@ class AgentBuilder:
 
                 reply_text = None
                 if run_output is not None and hasattr(run_output, "content"):
-                    reply_text = str(getattr(run_output, "content", None) or "")
+                    from agno_worker.runtime.structured_output import (
+                        content_to_reply_text,
+                        prefer_last_assistant_after_tools,
+                    )
+
+                    preferred = prefer_last_assistant_after_tools(run_output)
+                    if preferred is not None:
+                        reply_text = preferred
+                    else:
+                        reply_text = content_to_reply_text(
+                            getattr(run_output, "content", None)
+                        )
                     pending = pending_required_action_tools(coll, coll_cfg)
                     if pending and reply_text.strip():
                         gate_note = (
