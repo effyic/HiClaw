@@ -271,6 +271,7 @@ class AgentBuilder:
                 append_status_marker,
                 apply_required_actions_from_run,
                 collection_status_payload,
+                extract_successful_tool_names,
                 is_collection_enabled,
                 pending_required_action_tools,
                 resolve_collection_config,
@@ -302,6 +303,25 @@ class AgentBuilder:
                         )
                         if "[系统提示] 必做动作尚未完成" not in reply_text:
                             reply_text = reply_text.rstrip() + gate_note
+                    # Probe progress depends on tools; nudge if still probing without note.
+                    if (
+                        isinstance(coll, dict)
+                        and str(coll.get("phase") or "") == "probing"
+                        and reply_text.strip()
+                    ):
+                        tools_ok = set(extract_successful_tool_names(run_output))
+                        if not (
+                            tools_ok
+                            & {"collection_probe_note", "collection_probe_finish"}
+                        ):
+                            probe_note = (
+                                "\n\n[系统提示] 当前为扩采阶段（probing）："
+                                "请根据患者本轮回答调用 collection_probe_note，"
+                                "或在患者拒绝继续时调用 collection_probe_finish；"
+                                "禁止推荐科室写库或结束对话。"
+                            )
+                            if "[系统提示] 当前为扩采阶段" not in reply_text:
+                                reply_text = reply_text.rstrip() + probe_note
                     run_output.content = append_status_marker(
                         reply_text, coll, config=coll_cfg
                     )

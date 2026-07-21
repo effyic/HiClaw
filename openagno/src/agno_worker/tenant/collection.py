@@ -101,24 +101,24 @@ def ask_batch_size(config: dict[str, Any] | None) -> int:
 
 
 def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Optional enrichment loop after required slots are filled.
+    """Optional enrichment loop after gate / required slots are filled.
 
-    Published under ``workflow.probe`` (or nested ``collection.probe``)::
+    Published under ``workflow.probe``::
 
         {
           "enabled": true,
           "max_rounds": 3,
-          "hints": ["诱因与加重缓解", "伴随症状"],
+          "hints": [],
           "allow_skip": true,
-          "gate_fields": ["主诉", "持续时间"]
+          "gate_fields": ["主诉", "持续时间", "既往病史", "过敏史", "用药情况"]
         }
 
-    ``gate_fields`` (optional): enter probing once these field names are filled,
-    even if other required slots (e.g. 推荐科室) are still missing. After probe
-    finishes, FSM returns to collecting for the remaining required fields.
-
-    This is the config-driven ``loop`` for clinical probing — not a graph engine
-    node. While ``phase=probing``, required MCP write tools stay gated.
+    - ``hints`` defaults to ``[]`` (AI asks freely from dialogue + collected).
+    - ``gate_fields`` (optional): enter probing once these names are filled, even if
+      other required slots (e.g. 推荐科室) are still missing. After probe finishes,
+      FSM returns to collecting for the remaining required fields.
+      If omitted/empty: probing starts only when **all** required fields are filled.
+    - While ``phase=probing``, required MCP write tools stay gated.
     """
     if not isinstance(config, dict):
         return None
@@ -165,7 +165,7 @@ def _gate_fields_filled(state: dict[str, Any], gate_fields: list[str]) -> bool:
 
 
 def is_probe_ready(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
-    """Whether the enrichment loop may start (gates filled / all required filled)."""
+    """Whether enrichment may start (gate_fields filled, or all required filled)."""
     probe = resolve_probe_config(config)
     if not probe:
         return False
@@ -190,7 +190,7 @@ def is_probe_finished(state: dict[str, Any], config: dict[str, Any] | None) -> b
 
 
 def is_probe_active(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
-    """True while enrichment loop should run (ready but not finished)."""
+    """True while enrichment loop should run (ready and not finished)."""
     if not resolve_probe_config(config):
         return False
     if is_probe_finished(state, config):
@@ -561,8 +561,8 @@ def advance_collection_phase(
 
     out["missing"] = compute_missing(out["schema"], out["collected"])
 
-    # Optional clinical enrichment loop (may start before all required slots,
-    # when probe.gate_fields are filled — e.g. before 推荐科室).
+    # Probe may start before all required are filled when gate_fields is set
+    # (e.g. triage: probe before 推荐科室). Check probe before missing→collecting.
     if is_probe_active(out, config):
         out["phase"] = PHASE_PROBING
         return out
@@ -571,7 +571,7 @@ def advance_collection_phase(
         out["phase"] = PHASE_COLLECTING
         return out
 
-    # schema loaded, required filled, probe finished
+    # required filled, probe finished
     if confirm_required(config) and not out["user_confirmed"]:
         out["phase"] = PHASE_READY
         return out
@@ -1076,16 +1076,27 @@ def collection_instructions_appendix(
     if probe and current.get("phase") == PHASE_PROBING:
         lines.extend(
             [
-                "5. PROBE LOOP (phase=probing): required slots are filled. Ask 1 clinical "
-                "enrichment question per turn based on the patient's description, "
-                "collected slots, and probe_hints (do not repeat answered topics). "
-                "After the patient answers, call collection_probe_note(note=...) with a "
-                "concise clinical note. When enough detail is gathered or the patient "
-                "declines, call collection_probe_finish(reason=...). "
-                "Do NOT call write MCP / doctor summary until probe_done.",
+                "5. PROBE LOOP (phase=probing): gate/required slots for probing are filled. "
+                "Spontaneously ask clinical follow-ups based on the CURRENT dialogue "
+                "+ collected values (not a fixed script). Prefer the biggest remaining "
+                "clinical gaps. If probe_hints is non-empty it is OPTIONAL inspiration "
+                "only (default empty — ask freely). "
+                "Ask exactly 1 question per turn. "
+                "CRITICAL: after the patient answers, you MUST call "
+                "collection_probe_note(note=concise clinical note) in the SAME turn "
+                "before ending — otherwise probe_rounds will not advance and you will "
+                "be stuck. "
+                "Default: continue until probe_rounds reaches max_rounds. "
+                "Only call collection_probe_finish when the patient clearly refuses "
+                "further questions or an emergency redirect is required. "
+                "FORBIDDEN during probing: write MCP (e.g. mec_create_emr_case), "
+                "final department recommendation update, doctor summary closing, "
+                "collection_mark_done.",
             ]
         )
         rule_base = 6
+        # Do not nudge write tools while still probing.
+        write_tool = None
     else:
         lines.append(
             "5. When missing is empty"
@@ -1103,12 +1114,15 @@ def collection_instructions_appendix(
             + " Then call the write MCP to enqueue structured EMR generation."
         )
         rule_base = 6
-    lines.append(
-        f"{rule_base}. Write/update MCP tools enqueue async structured EMR (not the "
-        "doctor summary itself). After a successful call, collection_mark_done(result=...). "
-        "User may later add symptoms — update fields / probe notes and write again."
-    )
-    rule_n = rule_base + 1
+    if write_tool or pending_required_action_tools(current, config):
+        lines.append(
+            f"{rule_base}. Write/update MCP tools enqueue async structured EMR (not the "
+            "doctor summary itself). After a successful call, collection_mark_done(result=...). "
+            "User may later add symptoms — update fields / probe notes and write again."
+        )
+        rule_n = rule_base + 1
+    else:
+        rule_n = rule_base
     pending = pending_required_action_tools(current, config)
     if pending:
         lines.append(
@@ -1119,9 +1133,6 @@ def collection_instructions_appendix(
         )
         rule_n += 1
     elif focus:
-        lines.append(f"{rule_n}. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
-        rule_n += 1
-    if focus and pending:
         lines.append(f"{rule_n}. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
         rule_n += 1
     if write_tool:
