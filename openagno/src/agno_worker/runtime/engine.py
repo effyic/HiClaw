@@ -226,13 +226,18 @@ class AgnoRuntime:
         if decision_reply is not None:
             reply = decision_reply
         else:
-            preferred = prefer_last_assistant_after_tools(response)
-            if preferred is not None:
-                reply = preferred
-            elif hasattr(response, "content"):
+            # Prefer post-hook ``content`` (already tool-deduped + COLLECTION_STATUS).
+            # Re-running prefer_last_assistant_after_tools here would strip the marker
+            # and any post_hook gate notes by reading raw assistant messages.
+            if hasattr(response, "content") and getattr(response, "content", None) is not None:
                 reply = content_to_reply_text(response.content)
             else:
-                reply = content_to_reply_text(response)
+                preferred = prefer_last_assistant_after_tools(response)
+                reply = (
+                    preferred
+                    if preferred is not None
+                    else content_to_reply_text(response)
+                )
         output = self._request_filters.apply_post_filter(
             ctx,
             {"reply": reply, "session_id": resolved_session_id},

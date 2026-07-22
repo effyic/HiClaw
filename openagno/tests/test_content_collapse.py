@@ -48,3 +48,57 @@ def test_prefer_last_skips_when_no_tools():
         messages=[SimpleNamespace(role="assistant", content="普通回复")],
     )
     assert prefer_last_assistant_after_tools(run) is None
+
+
+def test_content_to_reply_preserves_status_marker():
+    """Sync chat must return post-hook content (marker), not raw last message."""
+    from agno_worker.runtime.structured_output import content_to_reply_text
+
+    marked = (
+        "建议您挂：神经内科[sjnk]\n\n"
+        "<!--COLLECTION_STATUS {\"phase\":\"confirmed\"}-->"
+    )
+    run = SimpleNamespace(
+        tools=[{"tool_name": "mec_create_emr_case"}],
+        messages=[
+            SimpleNamespace(role="assistant", content="建议您挂：神经内科[sjnk]"),
+        ],
+        content=marked,
+    )
+    # Engine should prefer run.content over prefer_last(...).
+    preferred = prefer_last_assistant_after_tools(run)
+    assert preferred == "建议您挂：神经内科[sjnk]"
+    assert "COLLECTION_STATUS" in content_to_reply_text(run.content)
+
+
+def test_collapse_exact_duplicate_tip_paragraphs():
+    from agno_worker.runtime.structured_output import collapse_duplicate_paragraphs
+
+    tip = "温馨提示：\n- 请携带您的身份证和医保卡"
+    text = f"建议您挂：骨科[gk]\n\n{tip}\n\n建议您挂：骨科[gk]\n\n{tip}"
+    out = collapse_duplicate_paragraphs(text)
+    assert out.count("温馨提示") == 1
+    assert out.count("建议您挂：骨科[gk]") == 1
+
+
+def test_collapse_tool_turn_echo_dedupes_when_tools_intervened():
+    from agno_worker.runtime.structured_output import collapse_tool_turn_echo
+
+    # Historical pattern: pre-tool closing + post-tool restatement in one blob.
+    text = (
+        "根据您描述的症状，头晕与低头动作密切相关。\n\n"
+        "建议您挂：**骨科[gk]**\n\n"
+        "温馨提示：\n- 请携带您的身份证和医保卡\n- 如有之前的检查报告请一并携带\n\n"
+        "根据您描述的症状，为您推荐的就诊科室如下。\n\n"
+        "**推荐理由：**\n您的头晕与颈部姿势密切相关。\n\n"
+        "**建议您挂：骨科[gk]**\n\n"
+        "温馨提示：\n- 请携带您的身份证和医保卡\n- 如有之前的检查报告请一并携带"
+    )
+    out = collapse_tool_turn_echo(text, tools_intervened=True)
+    assert out.count("温馨提示") == 1
+    assert out.count("建议您挂") == 1
+    assert "推荐理由" in out or "建议您挂" in out
+    # Without tools, leave text untouched (no silent rewrite).
+    soft = collapse_tool_turn_echo(text, tools_intervened=False)
+    assert soft == text
+

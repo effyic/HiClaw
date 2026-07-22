@@ -1240,6 +1240,14 @@ def collection_instructions_appendix(
             "do not attempt write/required_actions MCP — those tools are removed "
             "from the available tool list until conditions are met.",
             "4. Do not invent completion; call collection_status to inspect progress.",
+            "4b. HIGH-QUALITY QUESTIONING (collecting + probing): "
+            "patient-visible reply may contain at most ONE question (one '?' / '？'). "
+            "Do not bundle two topics into one turn. "
+            "Pick the single next ask with maximal information gain for the goal; "
+            "ground it in the user's last answer + collected (do not ignore what they "
+            "just said). Never re-ask facts already stated. Prefer short colloquial "
+            "phrasing over checklist / form language. "
+            "Optional brief empathy (<=1 short clause) then the question — no preamble lists.",
         ]
     )
     if probe and current.get("phase") == PHASE_PROBING:
@@ -1260,9 +1268,12 @@ def collection_instructions_appendix(
                 "prefer unanswered dimensions; skip what is already clear; "
                 "do not recite hints verbatim. "
                 "If probe_hints is empty, rely on probe_goal + dialogue + collected. "
-                "Ask exactly 1 question per turn. "
+                "Ask exactly 1 atomic question per turn (see rule 4b). "
+                "Prefer questions that best discriminate among remaining plausible "
+                "paths for the goal, rather than generic completeness fishing. "
                 "CRITICAL: after the user answers, you MUST call "
-                "collection_probe_note(note=concise enrichment note) in the SAME turn "
+                "collection_probe_note(note=concise enrichment note: why this ask + "
+                "key positives / pertinent negatives) in the SAME turn "
                 "before ending — otherwise probe_rounds will not advance. "
                 "Default: continue until probe_rounds reaches max_rounds. "
                 "collection_probe_finish is blocked until probe_min_rounds notes "
@@ -1314,6 +1325,30 @@ def collection_instructions_appendix(
             "successfully first (do not only reply with text): "
             + json.dumps(pending, ensure_ascii=False)
             + ". collection_mark_done is blocked until they succeed."
+        )
+        rule_n += 1
+        # Cross-turn anti-repeat: once decision/result slots are filled, do not
+        # re-emit the same patient-facing closing / recommendation block.
+        collected = current.get("collected") or {}
+        if isinstance(collected, dict) and collected and not (current.get("missing") or []):
+            lines.append(
+                f"{rule_n}. Anti-repeat: missing is empty and write tools are still "
+                "pending. Call the pending tools first. Patient-visible reply must be "
+                "ONE short status line only — do NOT restate the previous recommendation, "
+                "closing tips, or summary verbatim."
+            )
+            rule_n += 1
+    elif (
+        str(current.get("phase") or "") in {PHASE_CONFIRMED, PHASE_DONE}
+        and (current.get("completed") or not (current.get("missing") or []))
+    ):
+        lines.append(
+            f"{rule_n}. Collection finished (completed or all slots filled): "
+            "patient-visible reply MUST be brief (<=2 short sentences). "
+            "FORBIDDEN: restate recommendation / decision reasons, closing tips, "
+            "or the previous summary — even if the user asks again for the result. "
+            "If they re-ask, answer with only the already collected decision value "
+            "in one line, nothing else."
         )
         rule_n += 1
     elif focus:

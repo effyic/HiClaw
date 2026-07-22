@@ -132,8 +132,50 @@ def join_content_segments(
     if not cleaned:
         return ""
     if tools_intervened:
-        return cleaned[-1]
+        return collapse_tool_turn_echo(cleaned[-1], tools_intervened=True)
     return "".join(cleaned)
+
+
+def collapse_duplicate_paragraphs(text: str) -> str:
+    """Keep the last occurrence of each paragraph (exact or near-duplicate).
+
+    Near-duplicates (SequenceMatcher ratio >= 0.85) are treated as the same
+    paragraph so pre/post-tool closings with slight rephrasing collapse.
+    """
+    from difflib import SequenceMatcher
+
+    paras = [p.strip() for p in re.split(r"\n\s*\n", str(text or "")) if p and str(p).strip()]
+    if not paras:
+        return str(text or "").strip()
+
+    def is_same(a: str, b: str) -> bool:
+        if a == b:
+            return True
+        threshold = 0.85 if min(len(a), len(b)) < 40 else 0.82
+        return SequenceMatcher(None, a, b).ratio() >= threshold
+
+    kept: list[str] = []
+    for para in reversed(paras):
+        if any(is_same(para, prev) for prev in kept):
+            continue
+        kept.append(para)
+    kept.reverse()
+    return "\n\n".join(kept)
+
+
+def collapse_tool_turn_echo(text: str, *, tools_intervened: bool = False) -> str:
+    """Collapse near-duplicate paragraphs when a tool turn echoed its closing.
+
+    Agno may concatenate pre-tool and post-tool speech into one assistant
+    ``content`` blob. When tools intervened, drop earlier near-duplicate
+    paragraphs and keep the later ones. Structural only — no domain keywords.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    if not tools_intervened:
+        return raw
+    return collapse_duplicate_paragraphs(raw)
 
 
 def prefer_last_assistant_after_tools(run_output: Any) -> str | None:
@@ -174,4 +216,6 @@ def prefer_last_assistant_after_tools(run_output: Any) -> str | None:
         text = content_to_reply_text(content).strip()
         if text:
             last_text = text
-    return last_text
+    if last_text is None:
+        return None
+    return collapse_tool_turn_echo(last_text, tools_intervened=True)
