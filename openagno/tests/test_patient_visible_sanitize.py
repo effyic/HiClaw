@@ -30,6 +30,39 @@ def test_sanitize_strips_system_tip_and_textual_tool_call():
     assert "患者描述模糊" in salvaged[0]["note"]
 
 
+def test_ask_quality_flags_or_choice_and_repeat():
+    from agno_worker.tenant.collection import (
+        apply_ask_quality_tracking,
+        patient_ask_quality_issues,
+    )
+
+    assert "or_choice" in patient_ask_quality_issues(
+        "这种头晕是天旋地转，还是头重脚轻？"
+    )
+    assert "multi_qmark" in patient_ask_quality_issues(
+        "这次是怎么开始的？有没有诱因？"
+    )
+    state = empty_collection_state()
+    state["phase"] = PHASE_PROBING
+    state["collected"] = {"主诉": "头晕"}
+    state["schema"] = [{"name": "主诉", "required": True}]
+    cfg = _probe_config()
+    state = apply_ask_quality_tracking(
+        state, cfg, "头晕发作时有没有恶心？"
+    )
+    assert state["ask_quality_nudge_due"] is False
+    state = apply_ask_quality_tracking(
+        state, cfg, "头晕发作时有没有恶心？"
+    )
+    assert "repeat_ask" in (["repeat_ask"] if state["ask_quality_nudge_due"] else [])
+    assert state["ask_quality_nudge_due"] is True
+    state2 = empty_collection_state()
+    state2 = apply_ask_quality_tracking(
+        state2, cfg, "这种头晕是天旋地转，还是头重脚轻？"
+    )
+    assert state2["ask_quality_nudge_due"] is True
+
+
 def _probe_config():
     return {
         "kind": "collection_dialogue",
@@ -73,6 +106,7 @@ def test_apply_probe_salvage_clears_nudge_when_salvaged():
 
 if __name__ == "__main__":
     test_sanitize_strips_system_tip_and_textual_tool_call()
+    test_ask_quality_flags_or_choice_and_repeat()
     test_apply_probe_salvage_sets_nudge_when_missed()
     test_apply_probe_salvage_clears_nudge_when_salvaged()
     print("ok")
