@@ -273,13 +273,14 @@ class AgentBuilder:
             from agno_worker.tenant.collection import (
                 COLLECTION_STATE_KEY,
                 append_status_marker,
+                apply_probe_salvage_and_nudge,
                 apply_required_actions_from_run,
                 apply_scripts_progress_from_run,
                 collection_status_payload,
                 extract_successful_tool_names,
                 is_collection_enabled,
-                pending_required_action_tools,
                 resolve_collection_config,
+                sanitize_patient_visible_reply,
             )
 
             workflow = (run_context.session_state or {}).get("workflow") or {}
@@ -310,39 +311,27 @@ class AgentBuilder:
                 coll = apply_scripts_progress_from_run(
                     coll, coll_cfg, had_patient_reply=had_reply
                 )
+
+                salvaged: list = []
+                if reply_text is not None:
+                    # Never leak operator nudges / fake tool-call text to patients.
+                    reply_text, salvaged = sanitize_patient_visible_reply(reply_text)
+                tools_ok = set(extract_successful_tool_names(run_output))
+                coll = apply_probe_salvage_and_nudge(
+                    coll,
+                    coll_cfg,
+                    tools_ok=tools_ok,
+                    salvaged=salvaged,
+                )
                 run_context.session_state[COLLECTION_STATE_KEY] = coll
                 if isinstance(coll, dict) and coll.get("phase"):
                     run_context.session_state["phase"] = coll["phase"]
 
                 if reply_text is not None:
-                    pending = pending_required_action_tools(coll, coll_cfg)
-                    if pending and reply_text.strip():
-                        gate_note = (
-                            "\n\n[系统提示] 必做动作尚未完成，请勿结束："
-                            + "、".join(pending)
-                            + "。请先成功调用上述工具后再收尾。"
-                        )
-                        if "[系统提示] 必做动作尚未完成" not in reply_text:
-                            reply_text = reply_text.rstrip() + gate_note
-                    # Probe progress depends on tools; nudge if still probing without note.
-                    if (
-                        isinstance(coll, dict)
-                        and str(coll.get("phase") or "") == "probing"
-                        and reply_text.strip()
-                    ):
-                        tools_ok = set(extract_successful_tool_names(run_output))
-                        if not (
-                            tools_ok
-                            & {"collection_probe_note", "collection_probe_finish"}
-                        ):
-                            probe_note = (
-                                "\n\n[系统提示] 当前为扩采阶段（probing）："
-                                "请根据用户本轮回答调用 collection_probe_note，"
-                                "或在符合 early_finish 条件时调用 collection_probe_finish；"
-                                "禁止调用写库类 required_actions 或结束对话。"
-                            )
-                            if "[系统提示] 当前为扩采阶段" not in reply_text:
-                                reply_text = reply_text.rstrip() + probe_note
+                    # Pending-action / probe reminders stay INTERNAL (next-turn
+                    # instructions via probe_nudge_due). Do not append [系统提示]
+                    # into patient-visible content — that caused models to print
+                    # collection_probe_note(...) as chat text.
                     run_output.content = append_status_marker(
                         reply_text, coll, config=coll_cfg
                     )
