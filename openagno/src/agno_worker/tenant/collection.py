@@ -640,6 +640,8 @@ def empty_collection_state() -> dict[str, Any]:
         # workflow.scripts delivery flags (cluster-safe in session_state)
         "opening_delivered": False,
         "closing_delivered": False,
+        # Internal-only: remind model next turn to call collection_probe_note
+        "probe_nudge_due": False,
     }
 
 
@@ -682,6 +684,7 @@ def ensure_collection_state(
         state["probe_done"] = _as_bool(existing.get("probe_done"), False)
         state["opening_delivered"] = _as_bool(existing.get("opening_delivered"), False)
         state["closing_delivered"] = _as_bool(existing.get("closing_delivered"), False)
+        state["probe_nudge_due"] = _as_bool(existing.get("probe_nudge_due"), False)
 
     # Inline schema is always owned by published agno_agent.workflow (SaaS-editable).
     # Reconcile every call so admin field edits take effect without writing agent rows
@@ -1291,7 +1294,9 @@ def collection_instructions_appendix(
             "ground it in the user's last answer + collected (do not ignore what they "
             "just said). Never re-ask facts already stated. Prefer short colloquial "
             "phrasing over checklist / form language. "
-            "Optional brief empathy (<=1 short clause) then the question — no preamble lists.",
+            "Optional brief empathy (<=1 short clause) then the question — no preamble lists. "
+            "Patient-visible text must NEVER include tool names, function-call syntax, "
+            "or bracket tags like [系统提示].",
         ]
     )
     if probe and current.get("phase") == PHASE_PROBING:
@@ -1316,9 +1321,12 @@ def collection_instructions_appendix(
                 "Prefer questions that best discriminate among remaining plausible "
                 "paths for the goal, rather than generic completeness fishing. "
                 "CRITICAL: after the user answers, you MUST call "
-                "collection_probe_note(note=concise enrichment note: why this ask + "
-                "key positives / pertinent negatives) in the SAME turn "
+                "collection_probe_note via the TOOL INTERFACE in the SAME turn "
+                "(note=concise enrichment note: why this ask + "
+                "key positives / pertinent negatives) "
                 "before ending — otherwise probe_rounds will not advance. "
+                "FORBIDDEN: writing tool names or call syntax such as "
+                "collection_probe_note(...) into the patient-visible reply. "
                 "Default: continue until probe_rounds reaches max_rounds. "
                 "collection_probe_finish is blocked until probe_min_rounds notes "
                 "unless reason matches probe.early_finish_keywords. "
@@ -1326,9 +1334,18 @@ def collection_instructions_appendix(
                 "Write/required_actions MCP tools are HARD-REMOVED while probing "
                 "(see write_tools_hard_gated); do not invent a write call. "
                 "Also forbidden: filling remaining decision/result slots that should "
-                "wait until after probe, closing summary, collection_mark_done.",
+                "wait until after probe, closing summary, collection_mark_done. "
+                "Prefer probe.goal / probe.hints and schema field guidance; "
+                "do not invent off-config topics beyond those.",
             ]
         )
+        if current.get("probe_nudge_due"):
+            lines.append(
+                "5b. PREVIOUS TURN missed collection_probe_note. This turn: "
+                "first call collection_probe_note for the latest patient answer "
+                "(tool interface only), then ask the next atomic clinical question. "
+                "Do not print tool syntax to the patient."
+            )
         rule_base = 6
         # Do not nudge write tools while still probing.
         write_tool = None
@@ -1533,6 +1550,78 @@ def apply_scripts_progress_from_run(
             and phase in {PHASE_READY, PHASE_CONFIRMED}
         ):
             out["closing_delivered"] = True
+    return out
+
+
+_SYSTEM_TIP_RE = re.compile(r"\n*\[系统提示\][^\n]*", re.MULTILINE)
+# Model sometimes prints tool calls as chat text instead of invoking tools.
+_TEXTUAL_TOOL_CALL_RE = re.compile(
+    r"(?:^|\n)\s*(collection_[a-z_]+)\s*\(\s*(?:note\s*=\s*)?"
+    r"(?P<q>['\"])(?P<body>.*?)(?P=q)\s*\)\s*(?=\n|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+_TEXTUAL_TOOL_CALL_LOOSE_RE = re.compile(
+    r"(?:^|\n)\s*collection_[a-z_]+\s*\([^()\n]*\)\s*(?=\n|$)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_patient_visible_reply(text: str | None) -> tuple[str, list[dict[str, str]]]:
+    """Strip operator/system leaks from patient-visible text; salvage fake tool calls.
+
+    Returns ``(clean_text, salvaged)`` where salvaged items look like
+    ``{"tool": "collection_probe_note", "note": "..."}``.
+    """
+    if not text:
+        return "", []
+    salvaged: list[dict[str, str]] = []
+    cleaned = str(text)
+
+    def _consume(match: re.Match[str]) -> str:
+        tool = str(match.group(1) or "").strip()
+        body = str(match.group("body") or "").strip()
+        if tool and body:
+            salvaged.append({"tool": tool, "note": body})
+        return "\n"
+
+    cleaned = _TEXTUAL_TOOL_CALL_RE.sub(_consume, cleaned)
+    cleaned = _TEXTUAL_TOOL_CALL_LOOSE_RE.sub("\n", cleaned)
+    cleaned = _SYSTEM_TIP_RE.sub("", cleaned)
+    # Collapse excessive blank lines left by stripping.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, salvaged
+
+
+def apply_probe_salvage_and_nudge(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    tools_ok: set[str],
+    salvaged: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Apply text-salvaged probe notes; set/clear next-turn internal nudge."""
+    out = ensure_collection_state(state, config)
+    if str(out.get("phase") or "") != PHASE_PROBING:
+        out["probe_nudge_due"] = False
+        return out
+
+    salvaged_ok = False
+    for item in salvaged:
+        if item.get("tool") == "collection_probe_note" and item.get("note"):
+            try:
+                out = append_probe_note(out, config, item["note"])
+                salvaged_ok = True
+            except ValueError:
+                # FSM not ready (e.g. gate not filled) — keep textual salvage out of
+                # patient reply, but do not crash post_hook.
+                pass
+
+    called = bool(tools_ok & {"collection_probe_note", "collection_probe_finish"})
+    if called or salvaged_ok:
+        out["probe_nudge_due"] = False
+    else:
+        # Missed note this probing turn → remind via instructions next turn (not patient text).
+        out["probe_nudge_due"] = True
     return out
 
 
