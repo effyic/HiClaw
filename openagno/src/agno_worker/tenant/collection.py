@@ -642,6 +642,9 @@ def empty_collection_state() -> dict[str, Any]:
         "closing_delivered": False,
         # Internal-only: remind model next turn to call collection_probe_note
         "probe_nudge_due": False,
+        # Internal-only: remind next turn after multi-ask / A-or-B / repeat-ask
+        "ask_quality_nudge_due": False,
+        "last_ask_text": "",
     }
 
 
@@ -685,6 +688,10 @@ def ensure_collection_state(
         state["opening_delivered"] = _as_bool(existing.get("opening_delivered"), False)
         state["closing_delivered"] = _as_bool(existing.get("closing_delivered"), False)
         state["probe_nudge_due"] = _as_bool(existing.get("probe_nudge_due"), False)
+        state["ask_quality_nudge_due"] = _as_bool(
+            existing.get("ask_quality_nudge_due"), False
+        )
+        state["last_ask_text"] = str(existing.get("last_ask_text") or "").strip()
 
     # Inline schema is always owned by published agno_agent.workflow (SaaS-editable).
     # Reconcile every call so admin field edits take effect without writing agent rows
@@ -1290,15 +1297,24 @@ def collection_instructions_appendix(
             "4b. HIGH-QUALITY QUESTIONING (collecting + probing): "
             "patient-visible reply may contain at most ONE question (one '?' / '？'). "
             "Do not bundle two topics into one turn. "
+            "FORBIDDEN even with a single '?': A-or-B choice forms "
+            "(Chinese '还是' / '或者' between two symptom options) — ask one yes/no side only. "
             "Pick the single next ask with maximal information gain for the goal; "
             "ground it in the user's last answer + collected (do not ignore what they "
-            "just said). Never re-ask facts already stated. Prefer short colloquial "
-            "phrasing over checklist / form language. "
+            "just said). Never re-ask facts already stated; never repeat the same "
+            "(or near-identical) question after the user already answered — advance. "
+            "Prefer short colloquial phrasing over checklist / form language. "
             "Optional brief empathy (<=1 short clause) then the question — no preamble lists. "
             "Patient-visible text must NEVER include tool names, function-call syntax, "
             "or bracket tags like [系统提示].",
         ]
     )
+    if current.get("ask_quality_nudge_due"):
+        lines.append(
+            "4c. PREVIOUS TURN ask-quality miss (multi-question, A-or-B, or repeated ask). "
+            "This turn: exactly ONE atomic question; no '还是/或者' choice; "
+            "explicitly build on the patient's latest answer; do not repeat the prior question."
+        )
     if probe and current.get("phase") == PHASE_PROBING:
         goal = str(probe.get("goal") or "").strip()
         goal_clause = (
@@ -1318,6 +1334,10 @@ def collection_instructions_appendix(
                 "do not recite hints verbatim. "
                 "If probe_hints is empty, rely on probe_goal + dialogue + collected. "
                 "Ask exactly 1 atomic question per turn (see rule 4b). "
+                "FORBIDDEN: A-or-B ('还是/或者') compound asks. "
+                "After each user answer, the next ask MUST advance using that answer "
+                "(e.g. if they said overtime worsens dizziness, ask about posture/screen "
+                "time or neck strain — do not ignore and repeat an unrelated prior ask). "
                 "Prefer questions that best discriminate among remaining plausible "
                 "paths for the goal, rather than generic completeness fishing. "
                 "CRITICAL: after the user answers, you MUST call "
@@ -1590,6 +1610,58 @@ def sanitize_patient_visible_reply(text: str | None) -> tuple[str, list[dict[str
     # Collapse excessive blank lines left by stripping.
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, salvaged
+
+
+_OR_CHOICE_RE = re.compile(r"还是")
+_ASK_NORMALIZE_RE = re.compile(r"[\s？?\s，,。.!！、；;：:（）()【】\[\]\"'“”‘’]+")
+
+
+def _normalize_ask_text(text: str) -> str:
+    return _ASK_NORMALIZE_RE.sub("", str(text or "")).strip().lower()
+
+
+def patient_ask_quality_issues(text: str | None) -> list[str]:
+    """Detect multi-question / A-or-B patterns in patient-visible reply."""
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    issues: list[str] = []
+    qmarks = raw.count("？") + raw.count("?")
+    if qmarks > 1:
+        issues.append("multi_qmark")
+    # 「A还是B？」is compound even with one qmark. Plain 「恶心、呕吐或者耳鸣」lists OK.
+    if qmarks >= 1 and _OR_CHOICE_RE.search(raw):
+        issues.append("or_choice")
+    return issues
+
+
+def apply_ask_quality_tracking(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    reply_text: str | None,
+) -> dict[str, Any]:
+    """Record last ask; set next-turn nudge on quality misses / near-repeat."""
+    out = ensure_collection_state(state, config)
+    cleaned = str(reply_text or "").strip()
+    issues = patient_ask_quality_issues(cleaned)
+    prev = str(out.get("last_ask_text") or "").strip()
+    prev_norm = _normalize_ask_text(prev)
+    cur_norm = _normalize_ask_text(cleaned)
+    if (
+        prev_norm
+        and cur_norm
+        and len(cur_norm) >= 8
+        and (
+            cur_norm == prev_norm
+            or cur_norm in prev_norm
+            or prev_norm in cur_norm
+        )
+    ):
+        issues.append("repeat_ask")
+    out["ask_quality_nudge_due"] = bool(issues)
+    if cleaned:
+        out["last_ask_text"] = cleaned
+    return out
 
 
 def apply_probe_salvage_and_nudge(

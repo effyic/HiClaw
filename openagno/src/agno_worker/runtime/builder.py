@@ -299,6 +299,7 @@ class AgentBuilder:
                 apply_probe_salvage_and_nudge,
                 apply_required_actions_from_run,
                 apply_scripts_progress_from_run,
+                apply_ask_quality_tracking,
                 collection_status_payload,
                 extract_successful_tool_names,
                 is_collection_enabled,
@@ -346,6 +347,8 @@ class AgentBuilder:
                     tools_ok=tools_ok,
                     salvaged=salvaged,
                 )
+                if reply_text is not None:
+                    coll = apply_ask_quality_tracking(coll, coll_cfg, reply_text)
                 run_context.session_state[COLLECTION_STATE_KEY] = coll
                 if isinstance(coll, dict) and coll.get("phase"):
                     run_context.session_state["phase"] = coll["phase"]
