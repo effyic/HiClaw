@@ -26,12 +26,13 @@ Enable by publishing ``agno_agent.workflow`` as either::
 Domain policy (tone, triage rules, EMR, etc.) belongs in the published agent
 ``system_prompt`` / ``instructions_append`` / ``probe.goal`` — not in this module.
 
-Optional patient-facing scripts (opening / closing) may be published under
+Optional patient-facing scripts (opening / guide / closing) may be published under
 ``workflow.scripts`` and are injected into the protocol appendix by phase::
 
     {
       "scripts": {
         "opening": "...",
+        "guide": "...",
         "closing": "...",
         "opening_policy": "first_turn_required"
       }
@@ -109,7 +110,7 @@ def confirm_required(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_scripts_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Optional ``workflow.scripts`` for opening / closing phase hooks.
+    """Optional ``workflow.scripts`` for opening / guide / closing phase hooks.
 
     Domain-agnostic: worker only injects text + delivery flags; it does not
     hardcode medical phrasing.
@@ -120,14 +121,16 @@ def resolve_scripts_config(config: dict[str, Any] | None) -> dict[str, Any] | No
     if not isinstance(raw, dict) or not raw:
         return None
     opening = str(raw.get("opening") or "").strip()
+    guide = str(raw.get("guide") or "").strip()
     closing = str(raw.get("closing") or "").strip()
-    if not opening and not closing:
+    if not opening and not guide and not closing:
         return None
     policy = str(raw.get("opening_policy") or OPENING_POLICY_FIRST_TURN).strip().lower()
     if policy not in {OPENING_POLICY_FIRST_TURN, OPENING_POLICY_OPTIONAL}:
         policy = OPENING_POLICY_FIRST_TURN
     return {
         "opening": opening,
+        "guide": guide,
         "closing": closing,
         "opening_policy": policy,
     }
@@ -1476,11 +1479,21 @@ def _append_dialogue_scripts_rules(
     lines.extend(["", "## dialogue_scripts"])
     if opening:
         lines.append(f"scripts.opening: {json.dumps(opening, ensure_ascii=False)}")
+    guide = scripts.get("guide") or ""
+    if guide:
+        lines.append(f"scripts.guide: {json.dumps(guide, ensure_ascii=False)}")
     if closing:
         lines.append(f"scripts.closing: {json.dumps(closing, ensure_ascii=False)}")
     lines.append(f"opening_delivered: {bool(current.get('opening_delivered'))}")
     lines.append(f"closing_delivered: {bool(current.get('closing_delivered'))}")
     lines.append(f"opening_policy: {policy}")
+
+    if guide:
+        lines.append(
+            f"{rule_n}. GUIDE (workflow.scripts): when asking patients, follow "
+            "scripts.guide (tone/pace); still at most one atomic question per turn."
+        )
+        rule_n += 1
 
     if (
         opening
