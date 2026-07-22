@@ -274,6 +274,7 @@ class AgentBuilder:
                 COLLECTION_STATE_KEY,
                 append_status_marker,
                 apply_required_actions_from_run,
+                apply_scripts_progress_from_run,
                 collection_status_payload,
                 extract_successful_tool_names,
                 is_collection_enabled,
@@ -291,10 +292,6 @@ class AgentBuilder:
                     coll = {}
                 # Scrub has not run yet — record required MCP successes from this turn.
                 coll = apply_required_actions_from_run(coll, coll_cfg, run_output)
-                run_context.session_state[COLLECTION_STATE_KEY] = coll
-                if isinstance(coll, dict) and coll.get("phase"):
-                    run_context.session_state["phase"] = coll["phase"]
-
                 reply_text = None
                 if run_output is not None and hasattr(run_output, "content"):
                     from agno_worker.runtime.structured_output import (
@@ -309,6 +306,15 @@ class AgentBuilder:
                         reply_text = content_to_reply_text(
                             getattr(run_output, "content", None)
                         )
+                had_reply = bool((reply_text or "").strip())
+                coll = apply_scripts_progress_from_run(
+                    coll, coll_cfg, had_patient_reply=had_reply
+                )
+                run_context.session_state[COLLECTION_STATE_KEY] = coll
+                if isinstance(coll, dict) and coll.get("phase"):
+                    run_context.session_state["phase"] = coll["phase"]
+
+                if reply_text is not None:
                     pending = pending_required_action_tools(coll, coll_cfg)
                     if pending and reply_text.strip():
                         gate_note = (

@@ -26,6 +26,17 @@ Enable by publishing ``agno_agent.workflow`` as either::
 Domain policy (tone, triage rules, EMR, etc.) belongs in the published agent
 ``system_prompt`` / ``instructions_append`` / ``probe.goal`` — not in this module.
 
+Optional patient-facing scripts (opening / closing) may be published under
+``workflow.scripts`` and are injected into the protocol appendix by phase::
+
+    {
+      "scripts": {
+        "opening": "...",
+        "closing": "...",
+        "opening_policy": "first_turn_required"
+      }
+    }
+
 Single and multiple end-actions use the same list field (length 1 or N).
 """
 from __future__ import annotations
@@ -48,6 +59,9 @@ PHASE_PROBING = "probing"
 PHASE_READY = "ready"
 PHASE_CONFIRMED = "confirmed"
 PHASE_DONE = "done"
+
+OPENING_POLICY_FIRST_TURN = "first_turn_required"
+OPENING_POLICY_OPTIONAL = "optional"
 
 _VALID_PHASES = frozenset(
     {
@@ -92,6 +106,31 @@ def confirm_required(config: dict[str, Any] | None) -> bool:
     if not config:
         return True
     return _as_bool(config.get("confirm_required"), True)
+
+
+def resolve_scripts_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Optional ``workflow.scripts`` for opening / closing phase hooks.
+
+    Domain-agnostic: worker only injects text + delivery flags; it does not
+    hardcode medical phrasing.
+    """
+    if not config:
+        return None
+    raw = config.get("scripts")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    opening = str(raw.get("opening") or "").strip()
+    closing = str(raw.get("closing") or "").strip()
+    if not opening and not closing:
+        return None
+    policy = str(raw.get("opening_policy") or OPENING_POLICY_FIRST_TURN).strip().lower()
+    if policy not in {OPENING_POLICY_FIRST_TURN, OPENING_POLICY_OPTIONAL}:
+        policy = OPENING_POLICY_FIRST_TURN
+    return {
+        "opening": opening,
+        "closing": closing,
+        "opening_policy": policy,
+    }
 
 
 def ask_batch_size(config: dict[str, Any] | None) -> int:
@@ -598,6 +637,9 @@ def empty_collection_state() -> dict[str, Any]:
         "probe_rounds": 0,
         "probe_notes": [],
         "probe_done": False,
+        # workflow.scripts delivery flags (cluster-safe in session_state)
+        "opening_delivered": False,
+        "closing_delivered": False,
     }
 
 
@@ -638,6 +680,8 @@ def ensure_collection_state(
         else:
             state["probe_notes"] = []
         state["probe_done"] = _as_bool(existing.get("probe_done"), False)
+        state["opening_delivered"] = _as_bool(existing.get("opening_delivered"), False)
+        state["closing_delivered"] = _as_bool(existing.get("closing_delivered"), False)
 
     # Inline schema is always owned by published agno_agent.workflow (SaaS-editable).
     # Reconcile every call so admin field edits take effect without writing agent rows
@@ -1372,7 +1416,124 @@ def collection_instructions_appendix(
             f"{rule_n}. Fields with pattern MUST match when calling collection_update_fields: "
             + json.dumps(patterned, ensure_ascii=False)
         )
+        rule_n += 1
+    _append_dialogue_scripts_rules(lines, current, config, rule_n)
     return "\n".join(lines)
+
+
+def _append_dialogue_scripts_rules(
+    lines: list[str],
+    current: dict[str, Any],
+    config: dict[str, Any] | None,
+    rule_n: int,
+) -> None:
+    """Inject workflow.scripts opening/closing constraints into the protocol appendix."""
+    scripts = resolve_scripts_config(config)
+    if not scripts:
+        return
+    phase = str(current.get("phase") or "")
+    opening = scripts.get("opening") or ""
+    closing = scripts.get("closing") or ""
+    policy = scripts.get("opening_policy") or OPENING_POLICY_FIRST_TURN
+
+    lines.extend(["", "## dialogue_scripts"])
+    if opening:
+        lines.append(f"scripts.opening: {json.dumps(opening, ensure_ascii=False)}")
+    if closing:
+        lines.append(f"scripts.closing: {json.dumps(closing, ensure_ascii=False)}")
+    lines.append(f"opening_delivered: {bool(current.get('opening_delivered'))}")
+    lines.append(f"closing_delivered: {bool(current.get('closing_delivered'))}")
+    lines.append(f"opening_policy: {policy}")
+
+    if (
+        opening
+        and policy == OPENING_POLICY_FIRST_TURN
+        and not current.get("opening_delivered")
+        and phase in {PHASE_INIT, PHASE_COLLECTING}
+    ):
+        lines.append(
+            f"{rule_n}. OPENING REQUIRED (workflow.scripts): patient-visible reply MUST "
+            "begin with scripts.opening (light paraphrase OK; keep identity/welcome). "
+            "Even if the user already stated a chief complaint, do not skip the opening. "
+            "After the opening, ask at most ONE next missing question "
+            "(do not re-ask facts already given). "
+            "FORBIDDEN: first reply that is only a follow-up question with no opening."
+        )
+        rule_n += 1
+    elif (
+        opening
+        and policy == OPENING_POLICY_OPTIONAL
+        and not current.get("opening_delivered")
+        and phase in {PHASE_INIT, PHASE_COLLECTING}
+    ):
+        lines.append(
+            f"{rule_n}. OPENING OPTIONAL: prefer scripts.opening on the first patient-visible "
+            "reply when natural; still at most one question after it."
+        )
+        rule_n += 1
+
+    ready_to_close = (
+        bool(closing)
+        and not current.get("closing_delivered")
+        and not (current.get("missing") or [])
+        and is_probe_finished(current, config)
+        and phase in {PHASE_READY, PHASE_CONFIRMED}
+    )
+    if ready_to_close:
+        lines.append(
+            f"{rule_n}. CLOSING REQUIRED (workflow.scripts): for this patient-visible "
+            "closing turn, base the reply on scripts.closing (light paraphrase OK). "
+            "Emit the full closing at most ONCE in the session; then call pending "
+            "write/required_actions tools. Do not invent a second closing block after tools. "
+            "Do NOT name specific disease diagnoses in the patient-visible closing; "
+            "use cautious direction/mechanism wording only."
+        )
+    elif (
+        closing
+        and not current.get("closing_delivered")
+        and not (current.get("missing") or [])
+        and is_probe_finished(current, config)
+        and pending_required_action_tools(current, config)
+        and phase != PHASE_DONE
+    ):
+        lines.append(
+            f"{rule_n}. CLOSING REQUIRED (workflow.scripts): missing is empty and write "
+            "tools are pending — patient-visible closing MUST follow scripts.closing "
+            "once (with recommendation/summary as configured), then call pending tools. "
+            "Do NOT name specific disease diagnoses in the patient-visible closing."
+        )
+
+
+def apply_scripts_progress_from_run(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    had_patient_reply: bool,
+) -> dict[str, Any]:
+    """Advance opening/closing delivery flags after a turn (cluster-safe)."""
+    out = ensure_collection_state(state, config)
+    scripts = resolve_scripts_config(config)
+    if not scripts:
+        return out
+    if (
+        scripts.get("opening")
+        and had_patient_reply
+        and not out.get("opening_delivered")
+        and str(out.get("phase") or "") in {PHASE_INIT, PHASE_COLLECTING, PHASE_PROBING}
+    ):
+        out["opening_delivered"] = True
+    if scripts.get("closing") and not out.get("closing_delivered"):
+        phase = str(out.get("phase") or "")
+        if out.get("completed") or phase in {PHASE_CONFIRMED, PHASE_DONE}:
+            out["closing_delivered"] = True
+        elif (
+            had_patient_reply
+            and not (out.get("missing") or [])
+            and is_probe_finished(out, config)
+            and phase in {PHASE_READY, PHASE_CONFIRMED}
+        ):
+            out["closing_delivered"] = True
+    return out
 
 
 def collection_status_payload(
