@@ -110,7 +110,7 @@ def build_server_snapshot(
     tenant_id: str,
     *,
     agent_id: int,
-    binding_rule_ids: list[int],
+    binding_type_ids: list[int],
     global_rules: list[dict[str, Any]],
     tenant_rules: list[dict[str, Any]],
     types: list[dict[str, Any]],
@@ -122,7 +122,7 @@ def build_server_snapshot(
     content = {
         "tenant_id": tenant_id,
         "agent_id": agent_id,
-        "binding_rule_ids": binding_rule_ids,
+        "binding_type_ids": binding_type_ids,
         "types": types,
         "rules": [sc_store._snapshot_rule(r) for r in merged],
     }
@@ -136,7 +136,7 @@ def build_server_snapshot(
 SAMPLE_SNAPSHOT = build_server_snapshot(
     TENANT,
     agent_id=AGENT_ID,
-    binding_rule_ids=[1, 2, 30],
+    binding_type_ids=[10, 20],
     global_rules=[
         _rule_row(1, "", 10, "全局敏感词", priority=5),
         _rule_row(
@@ -182,7 +182,7 @@ def snapshot_calls(monkeypatch):
         return {
             **SAMPLE_SNAPSHOT,
             "agent_id": agent_id,
-            "binding_rule_ids": [1, 2, 30],
+            "binding_type_ids": [10, 20],
         }
 
     monkeypatch.setattr(sc_store, "load_policy_snapshot", fake_load)

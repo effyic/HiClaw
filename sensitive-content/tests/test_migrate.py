@@ -21,8 +21,8 @@ def _applied_versions() -> list[int]:
 
 
 def test_initial_migration_recorded(migrated_db: str):
-    # 0001 初始 + 0002 session_id + 0003 ADJUST_PROMPT + 0004 Agent 绑定均已应用
-    assert {1, 2, 3, 4}.issubset(set(_applied_versions()))
+    # 0001 初始 + 0002 session_id + 0003 ADJUST_PROMPT + 0004 Agent 绑定 + 0005 类型绑定
+    assert {1, 2, 3, 4, 5}.issubset(set(_applied_versions()))
 
 
 def test_rerun_is_idempotent(migrated_db: str):

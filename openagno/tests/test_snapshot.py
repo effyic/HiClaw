@@ -57,14 +57,14 @@ class TestMemoryAndDisk:
         client._install_snapshot(
             make_snapshot(
                 [make_type(1)], [make_rule(1, 1, "one")],
-                tenant_id=TENANT, agent_id=1, binding_rule_ids=[1],
+                tenant_id=TENANT, agent_id=1, binding_type_ids=[1],
             ),
             persist=False,
         )
         client._install_snapshot(
             make_snapshot(
                 [make_type(1)], [make_rule(2, 1, "two")],
-                tenant_id=TENANT, agent_id=2, binding_rule_ids=[2],
+                tenant_id=TENANT, agent_id=2, binding_type_ids=[2],
             ),
             persist=False,
         )

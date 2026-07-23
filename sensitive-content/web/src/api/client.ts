@@ -1,7 +1,7 @@
 // API 请求封装：Bearer Token 注入、三种错误体统一解析（文档 2.2 / 2.6）
 import type {
-  AgentRuleBindingResult,
-  AgentRuleBindings,
+  AgentTypeBindingResult,
+  AgentTypeBindings,
   AuditLog,
   ByActionResponse,
   ByRuleItem,
@@ -201,18 +201,18 @@ export const api = {
   deleteRule: (tenantId: string, ruleId: number) =>
     request<void>('DELETE', `${tenantBase(tenantId)}/sensitive-rules/${ruleId}`),
 
-  // ---- Agent 规则绑定（供 Agent 管理端复用） ----
-  getAgentRuleBindings: (
+  // ---- Agent 类型绑定（供 Agent 管理端复用） ----
+  getAgentTypeBindings: (
     tenantId: string,
     roleCode: string,
-    params?: ListParams & { keyword?: string; type_id?: number },
-  ) => request<AgentRuleBindings>('GET', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-rules`, { params }),
-  replaceAgentRuleBindings: (tenantId: string, roleCode: string, ruleIds: number[]) =>
-    request<AgentRuleBindingResult>('PUT', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-rules`, {
-      body: { rule_ids: ruleIds },
+    params?: ListParams & { keyword?: string },
+  ) => request<AgentTypeBindings>('GET', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-types`, { params }),
+  replaceAgentTypeBindings: (tenantId: string, roleCode: string, typeIds: number[]) =>
+    request<AgentTypeBindingResult>('PUT', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-types`, {
+      body: { type_ids: typeIds },
     }),
-  clearAgentRuleBindings: (tenantId: string, roleCode: string) =>
-    request<void>('DELETE', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-rules`),
+  clearAgentTypeBindings: (tenantId: string, roleCode: string) =>
+    request<void>('DELETE', `${tenantBase(tenantId)}/agents/${encodeURIComponent(roleCode)}/sensitive-types`),
 
   // ---- 命中事件（文档 4.3） ----
   listHitEvents: (

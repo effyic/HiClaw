@@ -134,7 +134,7 @@ def db(migrated_db: str) -> Iterator[str]:
                          sensitive_content.hit_event,
                          sensitive_content.audit_log,
                          sensitive_content.policy_version,
-                         sensitive_content.agent_rule_binding,
+                         sensitive_content.agent_type_binding,
                          sensitive_content.agent_policy_version
                 RESTART IDENTITY CASCADE
                 """

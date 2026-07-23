@@ -93,6 +93,9 @@ curl -X DELETE "http://localhost/effyic/v1/sessions/<agno-session-id>" \
 仅部署 `sensitive-content` **API 后端**（不部署 `sensitive-content/web` 前端）。  
 PostgreSQL 与 openagno Worker 共用上方 `postgres.*`（独立 schema `sensitive_content`）。
 
+K3s 离线更新 `sensitive-content` + `agno-worker`（`latest` / IfNotPresent）见
+[agno-k3s-deploy.md](./agno-k3s-deploy.md)。
+
 前置：目标库已存在（ChatAI 已装过且 `dbInit` 跑完，或已手工建库）；镜像已构建并装入集群。
 
 ```bash
