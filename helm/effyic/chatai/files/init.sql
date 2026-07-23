@@ -14,8 +14,6 @@ CREATE TABLE IF NOT EXISTS agno_agent (
   mcp_config    JSONB,
   workflow      JSONB,
   enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
-  -- 与 aip-hub AgnoAgentDO(LocalDateTime) / sql/postgresql/agno-agent.sql 对齐：用 timestamp 无时区
-  -- 勿用 TIMESTAMPTZ，否则 JDBC 映射 LocalDateTime 会报 Cannot convert TIMESTAMPTZ
   created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (tenant_id, role_code)
