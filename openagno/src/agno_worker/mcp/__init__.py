@@ -2,6 +2,7 @@
 
 from agno_worker.mcp.headers import (
     apply_forwarded_mcp_headers,
+    bind_mcp_tool_headers,
     collect_forwarded_mcp_headers,
     collect_per_run_mcp_headers,
     make_mcp_header_provider,
@@ -12,6 +13,7 @@ from agno_worker.mcp.pool import clear_mcp_tools_pool, pool_enabled
 
 __all__ = [
     "apply_forwarded_mcp_headers",
+    "bind_mcp_tool_headers",
     "build_mcp_tools",
     "clear_mcp_tools_pool",
     "collect_forwarded_mcp_headers",

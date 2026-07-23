@@ -27,6 +27,7 @@ from agno_worker.runtime.agent import StorageAwareAgent
 from agno_worker.runtime.ignore_db import get_ignore_db
 from agno_worker.runtime.storage import slim_session_state, sync_debug_request_to_session_state
 from agno_worker.runtime.thinking import attach_thinking_request_params
+from agno_worker.tenant.collection import filter_collection_gated_tools
 from agno_worker.tenant.service import TenantAgentService
 
 logger = logging.getLogger(__name__)
@@ -201,7 +202,10 @@ class AgentBuilder:
 
             tools.extend(skills_manager.build_tools(run_context, catalog))
             tools.extend(tenant.data.get_tools(run_context))
-            return tenant.filter_mcp_tools(run_context, tools)
+            tools = tenant.filter_mcp_tools(run_context, tools)
+            # Collection FSM hard-gate: hide required_actions write tools until
+            # when-condition (missing empty + probe done) is met.
+            return filter_collection_gated_tools(run_context, tools)
 
         return _tools
 
@@ -292,23 +296,77 @@ class AgentBuilder:
             from agno_worker.tenant.collection import (
                 COLLECTION_STATE_KEY,
                 append_status_marker,
+                apply_probe_salvage_and_nudge,
+                apply_required_actions_from_run,
+                apply_scripts_progress_from_run,
+                apply_ask_quality_tracking,
                 collection_status_payload,
+                extract_successful_tool_names,
                 is_collection_enabled,
+                resolve_collection_config,
+                sanitize_patient_visible_reply,
             )
 
             workflow = (run_context.session_state or {}).get("workflow") or {}
             if is_collection_enabled(workflow if isinstance(workflow, dict) else {}):
+                coll_cfg = resolve_collection_config(
+                    workflow if isinstance(workflow, dict) else {}
+                )
                 coll = (run_context.session_state or {}).get(COLLECTION_STATE_KEY) or {}
                 if not isinstance(coll, dict):
                     coll = {}
+                # Scrub has not run yet — record required MCP successes from this turn.
+                coll = apply_required_actions_from_run(coll, coll_cfg, run_output)
                 reply_text = None
                 if run_output is not None and hasattr(run_output, "content"):
-                    reply_text = str(getattr(run_output, "content", None) or "")
-                    run_output.content = append_status_marker(reply_text, coll)
+                    from agno_worker.runtime.structured_output import (
+                        content_to_reply_text,
+                        prefer_last_assistant_after_tools,
+                    )
+
+                    preferred = prefer_last_assistant_after_tools(run_output)
+                    if preferred is not None:
+                        reply_text = preferred
+                    else:
+                        reply_text = content_to_reply_text(
+                            getattr(run_output, "content", None)
+                        )
+                had_reply = bool((reply_text or "").strip())
+                coll = apply_scripts_progress_from_run(
+                    coll, coll_cfg, had_patient_reply=had_reply
+                )
+
+                salvaged: list = []
+                if reply_text is not None:
+                    # Never leak operator nudges / fake tool-call text to patients.
+                    reply_text, salvaged = sanitize_patient_visible_reply(reply_text)
+                tools_ok = set(extract_successful_tool_names(run_output))
+                coll = apply_probe_salvage_and_nudge(
+                    coll,
+                    coll_cfg,
+                    tools_ok=tools_ok,
+                    salvaged=salvaged,
+                )
+                if reply_text is not None:
+                    coll = apply_ask_quality_tracking(coll, coll_cfg, reply_text)
+                run_context.session_state[COLLECTION_STATE_KEY] = coll
+                if isinstance(coll, dict) and coll.get("phase"):
+                    run_context.session_state["phase"] = coll["phase"]
+
+                if reply_text is not None:
+                    # Pending-action / probe reminders stay INTERNAL (next-turn
+                    # instructions via probe_nudge_due). Do not append [系统提示]
+                    # into patient-visible content — that caused models to print
+                    # collection_probe_note(...) as chat text.
+                    run_output.content = append_status_marker(
+                        reply_text, coll, config=coll_cfg
+                    )
                     reply_text = str(run_output.content or "")
                 # Prefer metadata for streaming H5 clients (reply chunks omit marker).
                 # Include dept_code parsed from collected slots and/or reply text.
-                status = collection_status_payload(coll, reply_text=reply_text)
+                status = collection_status_payload(
+                    coll, reply_text=reply_text, config=coll_cfg
+                )
                 if run_output is not None:
                     if not isinstance(getattr(run_output, "metadata", None), dict):
                         run_output.metadata = {}

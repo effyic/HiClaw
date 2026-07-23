@@ -23,6 +23,12 @@ from agno_worker.moderation.errors import SensitivePolicyUnavailableError
 from agno_worker.moderation.models import DecisionKind
 from agno_worker.runtime.builder import AgentBuilder
 from agno_worker.runtime.ignore_db import reset_ignore_db, set_ignore_db
+from agno_worker.runtime.structured_output import (
+    content_to_reply_text,
+    join_content_segments,
+    normalize_output_schema,
+    prefer_last_assistant_after_tools,
+)
 from agno_worker.runtime.thinking import reset_enable_thinking, set_enable_thinking
 from agno_worker.mcp.pool import clear_mcp_tools_pool
 from agno_worker.tenant.service import TenantAgentService
@@ -182,6 +188,7 @@ class AgnoRuntime:
             tenant_id=ctx.tenant_id or tenant_id,
             role_code=ctx.role_code,
             metadata=run_metadata,
+            output_schema=self._resolve_output_schema(ctx),
         )
         thinking_token = set_enable_thinking(enable_thinking)
         # 每个请求生成独立 request_id（uuid4）注入 contextvars 供敏感内容
@@ -200,9 +207,11 @@ class AgnoRuntime:
             request_id=new_request_id(),
         )
         ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
+        json_mode_token = self._apply_use_json_mode(target, ctx, kwargs.get("output_schema"))
         try:
             response = await target.arun(message, **kwargs)
         finally:
+            self._restore_use_json_mode(target, json_mode_token)
             reset_enable_thinking(thinking_token)
             reset_request_context(mod_token)
             reset_ignore_db(ignore_token)
@@ -216,10 +225,19 @@ class AgnoRuntime:
         decision_reply = self._resolve_moderation_outcome(mod_ctx)
         if decision_reply is not None:
             reply = decision_reply
-        elif hasattr(response, "content"):
-            reply = str(response.content)
         else:
-            reply = str(response)
+            # Prefer post-hook ``content`` (already tool-deduped + COLLECTION_STATUS).
+            # Re-running prefer_last_assistant_after_tools here would strip the marker
+            # and any post_hook gate notes by reading raw assistant messages.
+            if hasattr(response, "content") and getattr(response, "content", None) is not None:
+                reply = content_to_reply_text(response.content)
+            else:
+                preferred = prefer_last_assistant_after_tools(response)
+                reply = (
+                    preferred
+                    if preferred is not None
+                    else content_to_reply_text(response)
+                )
         output = self._request_filters.apply_post_filter(
             ctx,
             {"reply": reply, "session_id": resolved_session_id},
@@ -289,8 +307,12 @@ class AgnoRuntime:
             metadata=run_metadata,
             stream=True,
             stream_events=agno_stream_events,
+            output_schema=self._resolve_output_schema(ctx),
         )
-        final_reply_parts: list[str] = []
+        content_segments: list[list[str]] = [[]]
+        saw_assistant_content = False
+        tools_after_content = False
+        replace_emitted = False
 
         thinking_token = set_enable_thinking(enable_thinking)
         # 与 arun 一致：请求级 request_id 注入 contextvars 供 Guardrail 读取
@@ -308,6 +330,7 @@ class AgnoRuntime:
             request_id=new_request_id(),
         )
         ignore_token = set_ignore_db(ignore_db, session_id=resolved_session_id)
+        json_mode_token = self._apply_use_json_mode(target, ctx, kwargs.get("output_schema"))
         try:
             async for event in target.arun(message, **kwargs):
                 if sid := getattr(event, "session_id", None):
@@ -341,6 +364,24 @@ class AgnoRuntime:
                         )
                     continue
 
+                if event_name in {
+                    RunEvent.tool_call_started.value,
+                    RunEvent.tool_call_completed.value,
+                    RunEvent.tool_call_error.value,
+                }:
+                    if saw_assistant_content:
+                        tools_after_content = True
+                        # Start a new content segment after tools intervene.
+                        if content_segments[-1]:
+                            content_segments.append([])
+                    if stream_events:
+                        yield self._agno_event_passthrough(
+                            event,
+                            event_name,
+                            session_id=resolved_session_id,
+                        )
+                    continue
+
                 if event_name == RunEvent.run_content.value:
                     # Agno dual-field standard: content + reasoning_content
                     # on the same RunContent event (Qwen puts thinking here).
@@ -354,15 +395,24 @@ class AgnoRuntime:
                         if reasoning is not None and str(reasoning):
                             reasoning_str = str(reasoning)
                     if content_str:
-                        final_reply_parts.append(content_str)
+                        content_segments[-1].append(content_str)
+                        saw_assistant_content = True
                     if not content_str and not reasoning_str:
                         continue
-                    yield {
+                    payload: dict[str, Any] = {
                         "event": "RunContent",
-                        "content": content_str,
-                        "reasoning_content": reasoning_str,
                         "session_id": resolved_session_id or None,
                     }
+                    # After tools, subsequent user-facing text replaces the bubble
+                    # (generic tool-turn UX; no domain keywords).
+                    if content_str and tools_after_content and not replace_emitted:
+                        payload["replace"] = True
+                        replace_emitted = True
+                    if content_str is not None:
+                        payload["content"] = content_str
+                    if reasoning_str is not None:
+                        payload["reasoning_content"] = reasoning_str
+                    yield payload
                     continue
 
                 if event_name == RunEvent.run_error.value:
@@ -398,6 +448,7 @@ class AgnoRuntime:
                         session_id=resolved_session_id,
                     )
         finally:
+            self._restore_use_json_mode(target, json_mode_token)
             reset_enable_thinking(thinking_token)
             reset_request_context(mod_token)
             reset_ignore_db(ignore_token)
@@ -409,7 +460,10 @@ class AgnoRuntime:
                 yield payload
             return
 
-        reply = "".join(final_reply_parts)
+        segments = ["".join(parts) for parts in content_segments]
+        reply = join_content_segments(
+            segments, tools_intervened=tools_after_content
+        )
         output = self._request_filters.apply_post_filter(
             ctx,
             {"reply": reply, "session_id": resolved_session_id},
@@ -472,6 +526,7 @@ class AgnoRuntime:
         metadata: dict[str, Any] | None = None,
         stream: bool = False,
         stream_events: bool = False,
+        output_schema: Any = None,
     ) -> dict[str, Any]:
         run_metadata: dict[str, Any] = dict(metadata or {})
         kwargs: dict[str, Any] = {"metadata": run_metadata}
@@ -489,7 +544,46 @@ class AgnoRuntime:
             run_metadata["tenant_id"] = tenant_id
         if role_code:
             run_metadata["role_code"] = role_code
+        if output_schema is not None:
+            kwargs["output_schema"] = output_schema
         return kwargs
+
+    @staticmethod
+    def _resolve_output_schema(ctx: UserContext) -> Any:
+        extra = ctx.extra or {}
+        return normalize_output_schema(extra.get("output_schema"))
+
+    @staticmethod
+    def _resolve_use_json_mode(ctx: UserContext, output_schema: Any) -> bool | None:
+        """Prefer explicit body flag; default True when schema is present."""
+        if output_schema is None:
+            return None
+        extra = ctx.extra or {}
+        if "use_json_mode" in extra:
+            return bool(extra["use_json_mode"])
+        return True
+
+    @classmethod
+    def _apply_use_json_mode(
+        cls,
+        target: Any,
+        ctx: UserContext,
+        output_schema: Any,
+    ) -> tuple[bool, bool] | None:
+        """Temporarily set Agent.use_json_mode for this run; return restore token."""
+        desired = cls._resolve_use_json_mode(ctx, output_schema)
+        if desired is None or not hasattr(target, "use_json_mode"):
+            return None
+        previous = bool(getattr(target, "use_json_mode", False))
+        target.use_json_mode = desired
+        return previous, True
+
+    @staticmethod
+    def _restore_use_json_mode(target: Any, token: tuple[bool, bool] | None) -> None:
+        if token is None or not hasattr(target, "use_json_mode"):
+            return
+        previous, _applied = token
+        target.use_json_mode = previous
 
     @staticmethod
     def _attach_request_headers(

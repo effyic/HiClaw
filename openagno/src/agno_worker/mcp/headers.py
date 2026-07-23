@@ -1,4 +1,15 @@
-"""Forward conversation identity / ``x-*`` headers onto HTTP MCP connections."""
+"""Forward conversation identity / ``x-*`` headers onto HTTP MCP connections.
+
+Outbound headers for a pooled MCPTools instance are always:
+
+* **base** — current agent ``mcp_config`` headers (and any pre-merge from
+  ``apply_forwarded_mcp_headers`` / ``mcp_headers_hook``)
+* **request** — identity (``tenant-id`` / ``user-id`` / ``session-id`` /
+  ``role-code``) plus inbound ``x-*``
+
+Pool key stays ``(name, url)``; base headers are rebound on every borrow so
+agent-scoped values such as ``campus-id`` are not frozen from the first creator.
+"""
 from __future__ import annotations
 
 from typing import Any, Callable
@@ -13,9 +24,7 @@ IDENTITY_HEADER_KEYS: tuple[tuple[str, str], ...] = (
     ("role_code", "role-code"),
 )
 
-# Must be refreshed per agent run when MCPTools is pooled (long-lived connection).
-# Pool key is name+url only, so tenant / session / user / role must not be frozen
-# on the shared connection — they are injected via header_provider each run.
+# Request-side identity names (also stripped from frozen server_params).
 PER_RUN_IDENTITY_HEADER_NAMES: frozenset[str] = frozenset(
     {"tenant-id", "user-id", "session-id", "role-code"}
 )
@@ -29,6 +38,16 @@ def _non_empty(value: Any) -> str:
         return ""
     text = str(value).strip()
     return text
+
+
+def normalize_header_map(headers: dict[str, Any] | None) -> dict[str, str]:
+    """Copy non-empty header entries as ``str → str``."""
+    out: dict[str, str] = {}
+    for key, raw in (headers or {}).items():
+        value = _non_empty(raw)
+        if value:
+            out[str(key)] = value
+    return out
 
 
 def collect_identity_mcp_headers(run_context: Any) -> dict[str, str]:
@@ -75,25 +94,17 @@ def collect_forwarded_mcp_headers(run_context: Any) -> dict[str, str]:
 
 
 def collect_per_run_mcp_headers(run_context: Any) -> dict[str, str]:
-    """Headers that must not be frozen on a pooled MCP connection."""
-    forwarded = collect_forwarded_mcp_headers(run_context)
-    out: dict[str, str] = {}
-    for key, value in forwarded.items():
-        lower = key.lower()
-        if lower in PER_RUN_IDENTITY_HEADER_NAMES or lower.startswith(
-            MCP_FORWARD_HEADER_PREFIX
-        ):
-            out[key] = value
-    return out
+    """Headers taken from the current request (identity + ``x-*``)."""
+    return collect_forwarded_mcp_headers(run_context)
 
 
 def split_static_and_per_run_headers(
     headers: dict[str, str] | None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Split MCP server headers into connection-static vs per-run identity.
+    """Split headers into non-identity vs identity names.
 
-    Only conversation identity headers are per-run. Auth headers such as
-    ``X-API-Key`` stay static even though they start with ``X-`` / ``x-``.
+    Kept for callers/tests. Loader no longer freezes the static half on the
+    pooled connection — all outbound headers go through ``header_provider``.
     """
     static: dict[str, str] = {}
     per_run: dict[str, str] = {}
@@ -110,15 +121,16 @@ def split_static_and_per_run_headers(
 
 
 def make_mcp_header_provider(
-    fallback: dict[str, str] | None = None,
+    base: dict[str, str] | None = None,
 ) -> Callable[..., dict[str, str]]:
-    """Agno ``header_provider``: prefer run_context identity, else build-time fallback.
+    """Agno ``header_provider``: DB/base headers + request overlay (request wins).
 
-    Pooled MCPTools keep one TCP/session for tool discovery, but Agno creates a
-    per-run MCP session when ``header_provider`` is set so ``session-id`` /
-    ``user-id`` stay correct for tools like ``mec_create_emr_case``.
+    ``base`` should be the current agent's MCP headers (typically already
+    including any finalize-time forward merge). On each call with
+    ``run_context``, identity / ``x-*`` from the request override same-named
+    base keys. Without ``run_context`` (tool discovery), returns ``base`` only.
     """
-    fallback_headers = dict(fallback or {})
+    base_headers = normalize_header_map(base)
 
     def header_provider(
         run_context: Any = None,
@@ -126,13 +138,30 @@ def make_mcp_header_provider(
         team: Any = None,
     ) -> dict[str, str]:
         del agent, team
+        merged = dict(base_headers)
         if run_context is not None:
-            dynamic = collect_per_run_mcp_headers(run_context)
-            if dynamic:
-                return dynamic
-        return dict(fallback_headers)
+            merged.update(collect_forwarded_mcp_headers(run_context))
+        return merged
 
     return header_provider
+
+
+def bind_mcp_tool_headers(tool: Any, server: MCPServerConfig) -> None:
+    """Rebind pooled MCPTools to the current server's headers.
+
+    Clears ``server_params.headers`` so agent-scoped values (e.g. ``campus-id``)
+    cannot leak from the first pool creator. All outbound headers are supplied
+    by ``header_provider`` = current ``server.headers`` ∪ request forward set.
+    """
+    if not server.url:
+        return
+
+    base = normalize_header_map(server.headers)
+    params = getattr(tool, "server_params", None)
+    if params is not None and hasattr(params, "headers"):
+        # Dataclass instance — replace map so prior campus-id / API keys drop.
+        params.headers = {}
+    tool.header_provider = make_mcp_header_provider(base)
 
 
 def apply_forwarded_mcp_headers(

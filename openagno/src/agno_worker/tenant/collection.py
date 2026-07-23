@@ -8,19 +8,44 @@ Write/update MCP tools from agent config stay visible. Missing required fields
 drive follow-up questions via prompt + ``collection_*`` tools; the model may
 still save or update a case early or repeatedly.
 
+``required_actions`` enforces post-collection MCP (or other) tools: successes
+are recorded into ``session_state.collection.actions_done`` from the same-turn
+``run_output.tools`` / messages (cluster-safe). ``collection_mark_done`` is
+rejected while required actions are still pending.
+
 Enable by publishing ``agno_agent.workflow`` as either::
 
-    {"kind": "collection_dialogue", "schema": {...}, "complete_action": {...}}
+    {
+      "kind": "collection_dialogue",
+      "schema": {...},
+      "required_actions": [
+        {"type": "mcp", "tool": "your_write_tool", "when": "missing_empty"}
+      ]
+    }
 
-or nested under an existing medical workflow::
+Domain policy (tone, triage rules, EMR, etc.) belongs in the published agent
+``system_prompt`` / ``instructions_append`` / ``probe.goal`` — not in this module.
 
-    {"kind": "medical", "phase": "inquiry", "collection": {...}}
+Optional patient-facing scripts (opening / guide / closing) may be published under
+``workflow.scripts`` and are injected into the protocol appendix by phase::
+
+    {
+      "scripts": {
+        "opening": "...",
+        "guide": "...",
+        "closing": "...",
+        "opening_policy": "first_turn_required"
+      }
+    }
+
+Single and multiple end-actions use the same list field (length 1 or N).
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -31,12 +56,23 @@ STATUS_MARKER_SUFFIX = "-->"
 
 PHASE_INIT = "init"
 PHASE_COLLECTING = "collecting"
+PHASE_PROBING = "probing"
 PHASE_READY = "ready"
 PHASE_CONFIRMED = "confirmed"
 PHASE_DONE = "done"
 
+OPENING_POLICY_FIRST_TURN = "first_turn_required"
+OPENING_POLICY_OPTIONAL = "optional"
+
 _VALID_PHASES = frozenset(
-    {PHASE_INIT, PHASE_COLLECTING, PHASE_READY, PHASE_CONFIRMED, PHASE_DONE}
+    {
+        PHASE_INIT,
+        PHASE_COLLECTING,
+        PHASE_PROBING,
+        PHASE_READY,
+        PHASE_CONFIRMED,
+        PHASE_DONE,
+    }
 )
 
 
@@ -50,7 +86,7 @@ def resolve_collection_config(workflow: dict[str, Any] | None) -> dict[str, Any]
     if not isinstance(nested, dict) or not nested:
         return None
     kind = str(nested.get("kind") or "").strip()
-    if kind == "collection_dialogue" or nested.get("schema") or nested.get("complete_action"):
+    if kind == "collection_dialogue" or nested.get("schema") or nested.get("required_actions"):
         return nested
     return None
 
@@ -73,6 +109,33 @@ def confirm_required(config: dict[str, Any] | None) -> bool:
     return _as_bool(config.get("confirm_required"), True)
 
 
+def resolve_scripts_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Optional ``workflow.scripts`` for opening / guide / closing phase hooks.
+
+    Domain-agnostic: worker only injects text + delivery flags; it does not
+    hardcode medical phrasing.
+    """
+    if not config:
+        return None
+    raw = config.get("scripts")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    opening = str(raw.get("opening") or "").strip()
+    guide = str(raw.get("guide") or "").strip()
+    closing = str(raw.get("closing") or "").strip()
+    if not opening and not guide and not closing:
+        return None
+    policy = str(raw.get("opening_policy") or OPENING_POLICY_FIRST_TURN).strip().lower()
+    if policy not in {OPENING_POLICY_FIRST_TURN, OPENING_POLICY_OPTIONAL}:
+        policy = OPENING_POLICY_FIRST_TURN
+    return {
+        "opening": opening,
+        "guide": guide,
+        "closing": closing,
+        "opening_policy": policy,
+    }
+
+
 def ask_batch_size(config: dict[str, Any] | None) -> int:
     raw = (config or {}).get("ask_batch_size", 2)
     try:
@@ -82,15 +145,323 @@ def ask_batch_size(config: dict[str, Any] | None) -> int:
     return max(1, min(size, 5))
 
 
-def suggested_write_tool(config: dict[str, Any] | None) -> str | None:
-    """Return complete_action MCP tool name for prompt hints."""
-    if not config:
+# Generic early-finish allowlist (SaaS-safe). Domain keywords (e.g. 急症/120)
+# belong in ``workflow.probe.early_finish_keywords``.
+_DEFAULT_PROBE_EARLY_FINISH_KEYWORDS = (
+    "拒绝",
+    "不想",
+    "不答",
+    "refuse",
+    "skip",
+    "emergency",
+)
+
+
+def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Optional enrichment loop after gate / required slots are filled.
+
+    Published under ``workflow.probe``::
+
+        {
+          "enabled": true,
+          "max_rounds": 3,
+          "min_rounds": 2,
+          "goal": "optional domain purpose string from the tenant agent",
+          "hints": [],
+          "allow_skip": true,
+          "gate_fields": ["slot_a", "slot_b"],
+          "early_finish_keywords": ["拒绝", "refuse", "emergency"]
+        }
+
+    Platform owns only the FSM (rounds / notes / gates). What to ask and why
+    comes from ``goal`` / ``hints`` / agent instructions — never hardcoded here.
+
+    - ``goal``: free-text enrichment purpose injected into the protocol.
+    - ``hints``: optional dimension checklist. Empty → model follows ``goal`` +
+      dialogue + collected (recommended for adaptive questioning).
+      Non-empty → prefer unanswered dimensions; not a fixed script.
+    - ``min_rounds``: early ``collection_probe_finish`` blocked until this many
+      ``collection_probe_note`` calls (unless reason matches early_finish_keywords).
+    - ``gate_fields`` (optional): enter probing once these names are filled, even if
+      other required slots are still missing. After probe finishes, FSM returns to
+      collecting for the remaining required fields.
+      If omitted/empty: probing starts only when **all** required fields are filled.
+    - ``early_finish_keywords``: substrings in finish reason that bypass min_rounds.
+    - While ``phase=probing``, required MCP write tools stay gated.
+    """
+    if not isinstance(config, dict):
         return None
-    action = config.get("complete_action")
-    if isinstance(action, dict) and str(action.get("type") or "").strip() == "mcp":
+    raw = config.get("probe")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    if not _as_bool(raw.get("enabled"), False):
+        return None
+    try:
+        max_rounds = int(raw.get("max_rounds", 3))
+    except (TypeError, ValueError):
+        max_rounds = 3
+    max_rounds = max(0, min(max_rounds, 8))
+    try:
+        min_rounds = int(raw.get("min_rounds", 0))
+    except (TypeError, ValueError):
+        min_rounds = 0
+    min_rounds = max(0, min(min_rounds, max_rounds if max_rounds > 0 else 0))
+    hints_raw = raw.get("hints")
+    hints: list[str] = []
+    if isinstance(hints_raw, list):
+        hints = [str(x).strip() for x in hints_raw if str(x).strip()]
+    gate_raw = raw.get("gate_fields")
+    gate_fields: list[str] = []
+    if isinstance(gate_raw, list):
+        gate_fields = [str(x).strip() for x in gate_raw if str(x).strip()]
+    goal = str(raw.get("goal") or "").strip()
+    kw_raw = raw.get("early_finish_keywords")
+    if isinstance(kw_raw, list) and kw_raw:
+        early_finish_keywords = [str(x).strip() for x in kw_raw if str(x).strip()]
+    else:
+        early_finish_keywords = list(_DEFAULT_PROBE_EARLY_FINISH_KEYWORDS)
+    return {
+        "enabled": True,
+        "max_rounds": max_rounds,
+        "min_rounds": min_rounds,
+        "goal": goal,
+        "hints": hints,
+        "allow_skip": _as_bool(raw.get("allow_skip"), True),
+        "gate_fields": gate_fields,
+        "early_finish_keywords": early_finish_keywords,
+    }
+
+
+def probe_max_rounds(config: dict[str, Any] | None) -> int:
+    probe = resolve_probe_config(config)
+    if not probe:
+        return 0
+    return int(probe.get("max_rounds") or 0)
+
+
+def _gate_fields_filled(state: dict[str, Any], gate_fields: list[str]) -> bool:
+    collected = state.get("collected") if isinstance(state.get("collected"), dict) else {}
+    for name in gate_fields:
+        value = collected.get(name)
+        if value is None or (isinstance(value, str) and not str(value).strip()):
+            return False
+    return True
+
+
+def is_probe_ready(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    """Whether enrichment may start (gate_fields filled, or all required filled)."""
+    probe = resolve_probe_config(config)
+    if not probe:
+        return False
+    gate_fields = probe.get("gate_fields") or []
+    if gate_fields:
+        return _gate_fields_filled(state, gate_fields)
+    return not bool(state.get("missing"))
+
+
+def is_probe_finished(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    """True when probe is disabled, skipped/finished, or max rounds reached."""
+    probe = resolve_probe_config(config)
+    if not probe:
+        return True
+    if _as_bool(state.get("probe_done"), False):
+        return True
+    try:
+        rounds = int(state.get("probe_rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    return rounds >= int(probe.get("max_rounds") or 0)
+
+
+def is_probe_active(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    """True while enrichment loop should run (ready and not finished)."""
+    if not resolve_probe_config(config):
+        return False
+    if is_probe_finished(state, config):
+        return False
+    return is_probe_ready(state, config)
+
+
+def resolve_required_actions(config: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Normalize ``required_actions`` (unified list for one or many end-actions)."""
+    if not config:
+        return []
+    raw = config.get("required_actions")
+    if not isinstance(raw, list):
+        return []
+    actions: list[dict[str, Any]] = []
+    for item in raw:
+        normalized = _normalize_required_action(item)
+        if normalized:
+            actions.append(normalized)
+    return actions
+
+
+def suggested_write_tool(config: dict[str, Any] | None) -> str | None:
+    """Return the last MCP tool in ``required_actions`` for prompt hints."""
+    actions = resolve_required_actions(config)
+    if not actions:
+        return None
+    tool = str(actions[-1].get("tool") or "").strip()
+    return tool or None
+
+
+def _normalize_required_action(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    action_type = str(item.get("type") or "mcp").strip() or "mcp"
+    tool = str(item.get("tool") or "").strip()
+    if action_type != "mcp" or not tool:
+        return None
+    when = str(item.get("when") or "missing_empty").strip() or "missing_empty"
+    if when not in {"missing_empty", "before_mark_done"}:
+        when = "missing_empty"
+    # Hard-hide tool from the model until when-condition is met (prevents
+    # prompt-only bypass). Default on for missing_empty; off for before_mark_done.
+    if "hard_gate" in item:
+        hard_gate = _as_bool(item.get("hard_gate"), True)
+    else:
+        hard_gate = when == "missing_empty"
+    return {
+        "type": action_type,
+        "tool": tool,
+        "when": when,
+        "hard_gate": hard_gate,
+    }
+
+
+def required_action_when_met(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    action: dict[str, Any],
+    *,
+    for_mark_done: bool = False,
+) -> bool:
+    """Whether a required_action's ``when`` condition is currently satisfied."""
+    current = ensure_collection_state(state, config)
+    when = str(action.get("when") or "missing_empty")
+    if when == "before_mark_done":
+        return bool(for_mark_done)
+    # missing_empty: required slots filled and probe finished (if enabled)
+    if current.get("missing"):
+        return False
+    if not current.get("schema"):
+        return False
+    if not is_probe_finished(current, config):
+        return False
+    return True
+
+
+def hard_gated_tool_names(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> set[str]:
+    """MCP tool names that must be hidden until their when-condition is met.
+
+    Soft prompt rules are not enough — models occasionally call write tools
+    as soon as gate/required slots look complete. Hiding the tool is the hard gate.
+    """
+    if not config:
+        return set()
+    blocked: set[str] = set()
+    for action in resolve_required_actions(config):
+        if not action.get("hard_gate"):
+            continue
         tool = str(action.get("tool") or "").strip()
-        return tool or None
-    return None
+        if not tool:
+            continue
+        # before_mark_done tools stay visible; only mark_done is gated.
+        if str(action.get("when") or "") == "before_mark_done":
+            continue
+        if not required_action_when_met(state, config, action):
+            blocked.add(tool)
+    return blocked
+
+
+def _tool_callable_name(tool: Any) -> str:
+    for attr in ("name", "tool_name"):
+        value = getattr(tool, attr, None)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    fn = getattr(tool, "entrypoint", None) or getattr(tool, "function", None)
+    if fn is not None:
+        nested = getattr(fn, "__name__", None) or getattr(fn, "name", None)
+        if nested is not None and str(nested).strip():
+            return str(nested).strip()
+    return ""
+
+
+def filter_collection_gated_tools(
+    run_context: Any,
+    tools: list[Any],
+) -> list[Any]:
+    """Drop hard-gated required_actions tools from the live tool list."""
+    if not tools:
+        return tools
+    config = resolve_collection_config(workflow_from_run_context(run_context))
+    if not config:
+        return tools
+    state = get_collection_state(run_context)
+    blocked = hard_gated_tool_names(state, config)
+    if not blocked:
+        return tools
+    kept: list[Any] = []
+    for tool in tools:
+        name = _tool_callable_name(tool)
+        if name and name in blocked:
+            logger.info(
+                "collection hard-gate: hiding tool %s (phase=%s probe_done=%s missing=%s)",
+                name,
+                state.get("phase"),
+                state.get("probe_done"),
+                state.get("missing"),
+            )
+            continue
+        kept.append(tool)
+    return kept
+
+
+
+def required_action_auto_mark_done(config: dict[str, Any] | None) -> bool:
+    """Whether satisfying required MCP tools should auto ``completed=true``.
+
+    Default true when any ``required_actions`` is configured; override with
+    top-level ``auto_mark_done``.
+    """
+    if not config or not resolve_required_actions(config):
+        return False
+    if "auto_mark_done" in config:
+        return _as_bool(config.get("auto_mark_done"), True)
+    return True
+
+
+def pending_required_action_tools(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    for_mark_done: bool = False,
+) -> list[str]:
+    """Return required MCP tool names not yet recorded in ``actions_done``.
+
+    ``when=missing_empty`` applies once required fields are filled and probe
+    finished. ``when=before_mark_done`` only gates mark_done.
+    """
+    current = ensure_collection_state(state, config)
+    actions = resolve_required_actions(config)
+    if not actions:
+        return []
+    done = current.get("actions_done") if isinstance(current.get("actions_done"), dict) else {}
+    pending: list[str] = []
+    for action in actions:
+        tool = str(action.get("tool") or "").strip()
+        if not tool or tool in done:
+            continue
+        if not required_action_when_met(
+            current, config, action, for_mark_done=for_mark_done
+        ):
+            continue
+        pending.append(tool)
+    return pending
 
 
 def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
@@ -264,6 +635,19 @@ def empty_collection_state() -> dict[str, Any]:
         "completed": False,
         "draft_payload": None,
         "complete_result": None,
+        "actions_done": {},
+        # enrichment loop (config ``probe``)
+        "probe_rounds": 0,
+        "probe_notes": [],
+        "probe_done": False,
+        # workflow.scripts delivery flags (cluster-safe in session_state)
+        "opening_delivered": False,
+        "closing_delivered": False,
+        # Internal-only: remind model next turn to call collection_probe_note
+        "probe_nudge_due": False,
+        # Internal-only: remind next turn after multi-ask / A-or-B / repeat-ask
+        "ask_quality_nudge_due": False,
+        "last_ask_text": "",
     }
 
 
@@ -282,10 +666,35 @@ def ensure_collection_state(
             state["schema"] = normalize_schema_fields(existing["schema"])
         if isinstance(existing.get("missing"), list):
             state["missing"] = [str(x) for x in existing["missing"]]
+        if isinstance(existing.get("actions_done"), dict):
+            state["actions_done"] = {
+                str(k): v
+                for k, v in existing["actions_done"].items()
+                if str(k).strip()
+            }
+        else:
+            state["actions_done"] = {}
         phase = str(existing.get("phase") or PHASE_INIT).strip()
         state["phase"] = phase if phase in _VALID_PHASES else PHASE_INIT
         state["user_confirmed"] = _as_bool(existing.get("user_confirmed"), False)
         state["completed"] = _as_bool(existing.get("completed"), False)
+        try:
+            state["probe_rounds"] = max(0, int(existing.get("probe_rounds") or 0))
+        except (TypeError, ValueError):
+            state["probe_rounds"] = 0
+        notes = existing.get("probe_notes")
+        if isinstance(notes, list):
+            state["probe_notes"] = [str(x).strip() for x in notes if str(x).strip()]
+        else:
+            state["probe_notes"] = []
+        state["probe_done"] = _as_bool(existing.get("probe_done"), False)
+        state["opening_delivered"] = _as_bool(existing.get("opening_delivered"), False)
+        state["closing_delivered"] = _as_bool(existing.get("closing_delivered"), False)
+        state["probe_nudge_due"] = _as_bool(existing.get("probe_nudge_due"), False)
+        state["ask_quality_nudge_due"] = _as_bool(
+            existing.get("ask_quality_nudge_due"), False
+        )
+        state["last_ask_text"] = str(existing.get("last_ask_text") or "").strip()
 
     # Inline schema is always owned by published agno_agent.workflow (SaaS-editable).
     # Reconcile every call so admin field edits take effect without writing agent rows
@@ -345,11 +754,18 @@ def advance_collection_phase(
         return out
 
     out["missing"] = compute_missing(out["schema"], out["collected"])
+
+    # Probe may start before all required are filled when gate_fields is set
+    # (e.g. remaining required slots after gate_fields). Check probe before missing→collecting.
+    if is_probe_active(out, config):
+        out["phase"] = PHASE_PROBING
+        return out
+
     if out["missing"]:
         out["phase"] = PHASE_COLLECTING
         return out
 
-    # schema loaded and required fields filled
+    # required filled, probe finished
     if confirm_required(config) and not out["user_confirmed"]:
         out["phase"] = PHASE_READY
         return out
@@ -360,6 +776,87 @@ def advance_collection_phase(
 
     out["phase"] = PHASE_CONFIRMED
     return out
+
+
+def append_probe_note(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    note: str,
+) -> dict[str, Any]:
+    """Record one enrichment note and increment ``probe_rounds``."""
+    out = ensure_collection_state(state, config)
+    probe = resolve_probe_config(config)
+    if not probe:
+        raise ValueError("probe loop is not enabled in workflow")
+    if not is_probe_ready(out, config):
+        raise ValueError(
+            "cannot probe until gate_fields (or all required fields) are filled"
+        )
+    text = str(note or "").strip()
+    if not text:
+        raise ValueError("probe note must be non-empty")
+    notes = list(out.get("probe_notes") or [])
+    notes.append(text)
+    out["probe_notes"] = notes
+    try:
+        rounds = int(out.get("probe_rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    out["probe_rounds"] = rounds + 1
+    if out["probe_rounds"] >= int(probe.get("max_rounds") or 0):
+        out["probe_done"] = True
+    return advance_collection_phase(out, config)
+
+
+def _probe_early_finish_allowed(
+    reason: str | None,
+    keywords: list[str] | tuple[str, ...] | None = None,
+) -> bool:
+    """True when finish reason matches configured early_finish_keywords."""
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    keys = keywords if keywords is not None else _DEFAULT_PROBE_EARLY_FINISH_KEYWORDS
+    return any(str(k).strip().lower() in text for k in keys if str(k).strip())
+
+
+def finish_probe(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """End the enrichment loop early (skip remaining rounds)."""
+    out = ensure_collection_state(state, config)
+    probe = resolve_probe_config(config)
+    if not probe:
+        raise ValueError("probe loop is not enabled in workflow")
+    if not is_probe_ready(out, config):
+        raise ValueError(
+            "cannot finish probe until gate_fields (or all required fields) are filled"
+        )
+    if not _as_bool(probe.get("allow_skip"), True) and not is_probe_finished(out, config):
+        raise ValueError(
+            "probe.allow_skip=false; continue until max_rounds via collection_probe_note"
+        )
+    try:
+        rounds = int(out.get("probe_rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    min_rounds = int(probe.get("min_rounds") or 0)
+    if rounds < min_rounds and not _probe_early_finish_allowed(
+        reason, probe.get("early_finish_keywords")
+    ):
+        raise ValueError(
+            f"probe.min_rounds={min_rounds}; need more collection_probe_note "
+            "or a reason matching probe.early_finish_keywords"
+        )
+    out["probe_done"] = True
+    if reason and str(reason).strip():
+        notes = list(out.get("probe_notes") or [])
+        notes.append(f"[skip] {str(reason).strip()}")
+        out["probe_notes"] = notes
+    return advance_collection_phase(out, config)
 
 
 def _request_confirm_flag(run_context: Any) -> bool:
@@ -505,14 +1002,171 @@ def mark_collection_done(
     config: dict[str, Any] | None,
     result: Any = None,
 ) -> dict[str, Any]:
-    """Record that a write / update MCP succeeded. Allows early and repeated writes."""
+    """Record that a write / update MCP succeeded. Allows early and repeated writes.
+
+    Rejects when configured ``required_actions`` tools have not been recorded
+    in ``actions_done`` yet.
+    """
     out = ensure_collection_state(state, config)
+    pending = pending_required_action_tools(out, config, for_mark_done=True)
+    if pending:
+        raise ValueError(
+            "required actions not done before collection_mark_done: "
+            + ", ".join(pending)
+            + ". Call these tools successfully first (successes are tracked "
+            "automatically from this turn's tool results)."
+        )
     out["completed"] = True
     if result is not None:
         out["complete_result"] = (
             result if isinstance(result, (str, dict, list)) else str(result)
         )
     return advance_collection_phase(out, config)
+
+
+def record_action_done(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    tool_name: str,
+    *,
+    detail: Any = None,
+) -> dict[str, Any]:
+    """Persist that ``tool_name`` succeeded (cluster-safe under collection state)."""
+    out = ensure_collection_state(state, config)
+    name = str(tool_name or "").strip()
+    if not name:
+        return out
+    done = dict(out.get("actions_done") or {})
+    entry: dict[str, Any] = {"ok": True}
+    if detail is not None:
+        entry["detail"] = (
+            detail if isinstance(detail, (str, dict, list)) else str(detail)
+        )
+    done[name] = entry
+    out["actions_done"] = done
+    return advance_collection_phase(out, config)
+
+
+def _tool_entry_name(entry: Any) -> str | None:
+    if isinstance(entry, dict):
+        name = entry.get("tool_name") or entry.get("name") or entry.get("tool")
+    else:
+        name = (
+            getattr(entry, "tool_name", None)
+            or getattr(entry, "name", None)
+            or getattr(entry, "tool", None)
+        )
+    text = str(name or "").strip()
+    return text or None
+
+
+def _tool_entry_succeeded(entry: Any) -> bool:
+    if isinstance(entry, dict):
+        if entry.get("tool_call_error"):
+            return False
+        result = entry.get("result")
+    else:
+        if getattr(entry, "tool_call_error", None):
+            return False
+        result = getattr(entry, "result", None)
+    if result is None:
+        return True
+    text = str(result).strip()
+    if not text:
+        return True
+    # Agno/MCP often returns transport errors as plain text with tool_call_error=false.
+    lower = text.lower()
+    if lower.startswith("error from mcp tool"):
+        return False
+    if "serviceexception" in lower or "exception(" in lower:
+        return False
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict) and data.get("ok") is False:
+                return False
+        except json.JSONDecodeError:
+            pass
+    return True
+
+
+def extract_successful_tool_names(run_output: Any) -> list[str]:
+    """Collect successful tool names from Agno tools list and/or messages.
+
+    Mid-turn ``collection_mark_done`` often sees prior MCP results on
+    ``run_context.messages`` before they appear on ``run_context.tools``.
+    """
+    if run_output is None:
+        return []
+    tools = getattr(run_output, "tools", None)
+    messages = getattr(run_output, "messages", None)
+    if isinstance(run_output, dict):
+        if tools is None:
+            tools = run_output.get("tools")
+        if messages is None:
+            messages = run_output.get("messages")
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(entry: Any) -> None:
+        if not _tool_entry_succeeded(entry):
+            return
+        name = _tool_entry_name(entry)
+        if not name or name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    for entry in tools or []:
+        _add(entry)
+    for msg in messages or []:
+        if isinstance(msg, dict):
+            role = str(msg.get("role") or "").lower()
+            tool_name = msg.get("tool_name") or msg.get("name")
+            content = msg.get("content")
+        else:
+            role = str(getattr(msg, "role", "") or "").lower()
+            tool_name = getattr(msg, "tool_name", None) or getattr(msg, "name", None)
+            content = getattr(msg, "content", None)
+        if role not in {"tool", "function"} and not tool_name:
+            continue
+        _add({"tool_name": tool_name, "result": content, "tool_call_error": False})
+    return names
+
+
+def apply_required_actions_from_run(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    run_output: Any,
+) -> dict[str, Any]:
+    """Record required MCP successes from this turn; optionally auto mark_done.
+
+    Call from post_hook before session scrub so ``run_output.tools`` is still present.
+    """
+    out = ensure_collection_state(state, config)
+    required = resolve_required_actions(config)
+    if not required:
+        return out
+    required_names = {
+        str(a.get("tool") or "").strip()
+        for a in required
+        if str(a.get("tool") or "").strip()
+    }
+    for name in extract_successful_tool_names(run_output):
+        if name in required_names:
+            out = record_action_done(out, config, name)
+    pending = pending_required_action_tools(out, config)
+    if (
+        not pending
+        and required_action_auto_mark_done(config)
+        and not out.get("missing")
+        and out.get("schema")
+        and is_probe_finished(out, config)
+        and not out.get("completed")
+    ):
+        out["completed"] = True
+        out = advance_collection_phase(out, config)
+    return out
 
 
 def workflow_from_run_context(run_context: Any) -> dict[str, Any]:
@@ -593,6 +1247,11 @@ def collection_instructions_appendix(
     focus = missing[:batch]
     source = schema_source(config)
     write_tool = suggested_write_tool(config)
+    probe = resolve_probe_config(config)
+    gated = sorted(hard_gated_tool_names(current, config))
+    if write_tool and write_tool in gated:
+        # Do not prompt the model to call a tool that is hard-hidden.
+        write_tool = None
     lines = [
         "## collection_protocol",
         f"phase: {current.get('phase')}",
@@ -601,11 +1260,26 @@ def collection_instructions_appendix(
         f"confirm_required: {confirm_required(config)}",
         f"user_confirmed: {current.get('user_confirmed')}",
         f"completed_once: {current.get('completed')}",
+        f"actions_done: {json.dumps(sorted((current.get('actions_done') or {}).keys()), ensure_ascii=False)}",
+        f"required_actions_pending: {json.dumps(pending_required_action_tools(current, config), ensure_ascii=False)}",
+        f"write_tools_hard_gated: {json.dumps(gated, ensure_ascii=False)}",
         f"missing: {json.dumps(missing, ensure_ascii=False)}",
         f"collected: {json.dumps(current.get('collected') or {}, ensure_ascii=False)}",
-        "",
-        "Rules:",
     ]
+    if probe:
+        lines.extend(
+            [
+                f"probe_enabled: true",
+                f"probe_rounds: {current.get('probe_rounds') or 0}/{probe.get('max_rounds')}",
+                f"probe_min_rounds: {probe.get('min_rounds') or 0}",
+                f"probe_done: {bool(current.get('probe_done'))}",
+                f"probe_notes: {json.dumps(current.get('probe_notes') or [], ensure_ascii=False)}",
+                f"probe_goal: {json.dumps(probe.get('goal') or '', ensure_ascii=False)}",
+                f"probe_hints: {json.dumps(probe.get('hints') or [], ensure_ascii=False)}",
+                f"probe_allow_skip: {bool(probe.get('allow_skip'))}",
+            ]
+        )
+    lines.extend(["", "Rules:"])
     if source == "mcp" or not current.get("schema"):
         lines.append(
             "1. If schema is empty, call collection_load_schema "
@@ -619,24 +1293,154 @@ def collection_instructions_appendix(
         [
             f"2. Each turn ask at most {batch} items from missing; then call "
             "collection_update_fields with ONLY schema field names.",
-            "3. While missing is non-empty, keep asking the patient for those fields. "
-            "You may still call write/update MCP if the user asks to save a partial case.",
+            "3. While missing is non-empty OR write_tools_hard_gated is non-empty, "
+            "do not attempt write/required_actions MCP — those tools are removed "
+            "from the available tool list until conditions are met.",
             "4. Do not invent completion; call collection_status to inspect progress.",
-            "5. When missing is empty, summarize for the user"
+            "4b. HIGH-QUALITY QUESTIONING (collecting + probing): "
+            "patient-visible reply may contain at most ONE question (one '?' / '？'). "
+            "Do not bundle two topics into one turn. "
+            "FORBIDDEN even with a single '?': A-or-B choice forms "
+            "(Chinese '还是' / '或者' between two symptom options) — ask one yes/no side only. "
+            "Pick the single next ask with maximal information gain for the goal; "
+            "ground it in the user's last answer + collected (do not ignore what they "
+            "just said). Never re-ask facts already stated; never repeat the same "
+            "(or near-identical) question after the user already answered — advance. "
+            "Prefer short colloquial phrasing over checklist / form language. "
+            "Optional brief empathy (<=1 short clause) then the question — no preamble lists. "
+            "Patient-visible text must NEVER include tool names, function-call syntax, "
+            "or bracket tags like [系统提示].",
+        ]
+    )
+    if current.get("ask_quality_nudge_due"):
+        lines.append(
+            "4c. PREVIOUS TURN ask-quality miss (multi-question, A-or-B, or repeated ask). "
+            "This turn: exactly ONE atomic question; no '还是/或者' choice; "
+            "explicitly build on the patient's latest answer; do not repeat the prior question."
+        )
+    if probe and current.get("phase") == PHASE_PROBING:
+        goal = str(probe.get("goal") or "").strip()
+        goal_clause = (
+            f"Follow probe_goal: {goal}. "
+            if goal
+            else "Follow agent instructions for enrichment purpose. "
+        )
+        lines.extend(
+            [
+                "5. PROBE LOOP (phase=probing): gate/required slots for probing are filled. "
+                + goal_clause
+                + "Choose the next question from dialogue + collected to close the "
+                "largest remaining information gap for that goal — adaptive, not a "
+                "fixed questionnaire. "
+                "If probe_hints is non-empty, treat it as an optional dimension checklist: "
+                "prefer unanswered dimensions; skip what is already clear; "
+                "do not recite hints verbatim. "
+                "If probe_hints is empty, rely on probe_goal + dialogue + collected. "
+                "Ask exactly 1 atomic question per turn (see rule 4b). "
+                "FORBIDDEN: A-or-B ('还是/或者') compound asks. "
+                "After each user answer, the next ask MUST advance using that answer "
+                "(do not ignore new information and repeat an unrelated prior ask). "
+                "Prefer questions that best discriminate among remaining plausible "
+                "paths for the goal, rather than generic completeness fishing. "
+                "CRITICAL: after the user answers, you MUST call "
+                "collection_probe_note via the TOOL INTERFACE in the SAME turn "
+                "(note=concise enrichment note: why this ask + "
+                "key positives / pertinent negatives) "
+                "before ending — otherwise probe_rounds will not advance. "
+                "FORBIDDEN: writing tool names or call syntax such as "
+                "collection_probe_note(...) into the patient-visible reply. "
+                "Default: continue until probe_rounds reaches max_rounds. "
+                "collection_probe_finish is blocked until probe_min_rounds notes "
+                "unless reason matches probe.early_finish_keywords. "
+                "Do not end early just because information 'seems enough'. "
+                "Write/required_actions MCP tools are HARD-REMOVED while probing "
+                "(see write_tools_hard_gated); do not invent a write call. "
+                "Also forbidden: filling remaining decision/result slots that should "
+                "wait until after probe, closing summary, collection_mark_done. "
+                "Prefer probe.goal / probe.hints and schema field guidance; "
+                "do not invent off-config topics beyond those.",
+            ]
+        )
+        if current.get("probe_nudge_due"):
+            lines.append(
+                "5b. PREVIOUS TURN missed collection_probe_note. This turn: "
+                "first call collection_probe_note for the latest patient answer "
+                "(tool interface only), then ask the next atomic clinical question. "
+                "Do not print tool syntax to the patient."
+            )
+        rule_base = 6
+        # Do not nudge write tools while still probing.
+        write_tool = None
+    else:
+        lines.append(
+            "5. When missing is empty"
+            + (
+                " and probe is finished,"
+                if probe
+                else ","
+            )
+            + " produce a brief structured summary for the operator"
             + (
                 " and ask for confirmation (collection_confirm or wait for confirm)."
                 if confirm_required(config)
                 else "."
-            ),
-            "6. Write/update MCP tools are always available. After a successful write, "
-            "call collection_mark_done(result=...). User may later add symptoms — "
-            "update fields and write again.",
-        ]
-    )
-    if focus:
-        lines.append(f"7. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
+            )
+            + (
+                f" Then call write MCP ({write_tool}) if configured."
+                if write_tool
+                else " Then call any pending required_actions write tools."
+            )
+        )
+        rule_base = 6
+    if write_tool or pending_required_action_tools(current, config):
+        lines.append(
+            f"{rule_base}. After a successful write/update MCP call, "
+            "collection_mark_done(result=...). User may later add details — "
+            "update fields / probe notes and write again."
+        )
+        rule_n = rule_base + 1
+    else:
+        rule_n = rule_base
+    pending = pending_required_action_tools(current, config)
+    if pending:
+        lines.append(
+            f"{rule_n}. REQUIRED before closing / ending this turn: call these tools "
+            "successfully first (do not only reply with text): "
+            + json.dumps(pending, ensure_ascii=False)
+            + ". collection_mark_done is blocked until they succeed."
+        )
+        rule_n += 1
+        # Cross-turn anti-repeat: once decision/result slots are filled, do not
+        # re-emit the same patient-facing closing / recommendation block.
+        collected = current.get("collected") or {}
+        if isinstance(collected, dict) and collected and not (current.get("missing") or []):
+            lines.append(
+                f"{rule_n}. Anti-repeat: missing is empty and write tools are still "
+                "pending. Call the pending tools first. Patient-visible reply must be "
+                "ONE short status line only — do NOT restate the previous recommendation, "
+                "closing tips, or summary verbatim."
+            )
+            rule_n += 1
+    elif (
+        str(current.get("phase") or "") in {PHASE_CONFIRMED, PHASE_DONE}
+        and (current.get("completed") or not (current.get("missing") or []))
+    ):
+        lines.append(
+            f"{rule_n}. Collection finished (completed or all slots filled): "
+            "patient-visible reply MUST be brief (<=2 short sentences). "
+            "FORBIDDEN: restate recommendation / decision reasons, closing tips, "
+            "or the previous summary — even if the user asks again for the result. "
+            "If they re-ask, answer with only the already collected decision value "
+            "in one line, nothing else."
+        )
+        rule_n += 1
+    elif focus:
+        lines.append(f"{rule_n}. This turn focus fields: {json.dumps(focus, ensure_ascii=False)}")
+        rule_n += 1
     if write_tool:
-        lines.append(f"8. Suggested write/update MCP tool: {write_tool}")
+        label = "MUST call" if pending and write_tool in pending else "Suggested write/update MCP tool"
+        lines.append(f"{rule_n}. {label}: {write_tool}")
+        rule_n += 1
     patterned = [
         {
             "name": f.get("name"),
@@ -648,15 +1452,267 @@ def collection_instructions_appendix(
     ]
     if patterned:
         lines.append(
-            "9. Fields with pattern MUST match when calling collection_update_fields: "
+            f"{rule_n}. Fields with pattern MUST match when calling collection_update_fields: "
             + json.dumps(patterned, ensure_ascii=False)
         )
+        rule_n += 1
+    _append_dialogue_scripts_rules(lines, current, config, rule_n)
     return "\n".join(lines)
+
+
+def _append_dialogue_scripts_rules(
+    lines: list[str],
+    current: dict[str, Any],
+    config: dict[str, Any] | None,
+    rule_n: int,
+) -> None:
+    """Inject workflow.scripts opening/closing constraints into the protocol appendix."""
+    scripts = resolve_scripts_config(config)
+    if not scripts:
+        return
+    phase = str(current.get("phase") or "")
+    opening = scripts.get("opening") or ""
+    closing = scripts.get("closing") or ""
+    policy = scripts.get("opening_policy") or OPENING_POLICY_FIRST_TURN
+
+    lines.extend(["", "## dialogue_scripts"])
+    if opening:
+        lines.append(f"scripts.opening: {json.dumps(opening, ensure_ascii=False)}")
+    guide = scripts.get("guide") or ""
+    if guide:
+        lines.append(f"scripts.guide: {json.dumps(guide, ensure_ascii=False)}")
+    if closing:
+        lines.append(f"scripts.closing: {json.dumps(closing, ensure_ascii=False)}")
+    lines.append(f"opening_delivered: {bool(current.get('opening_delivered'))}")
+    lines.append(f"closing_delivered: {bool(current.get('closing_delivered'))}")
+    lines.append(f"opening_policy: {policy}")
+
+    if guide:
+        lines.append(
+            f"{rule_n}. GUIDE (workflow.scripts): when asking patients, follow "
+            "scripts.guide (tone/pace); still at most one atomic question per turn."
+        )
+        rule_n += 1
+
+    if (
+        opening
+        and policy == OPENING_POLICY_FIRST_TURN
+        and not current.get("opening_delivered")
+        and phase in {PHASE_INIT, PHASE_COLLECTING}
+    ):
+        lines.append(
+            f"{rule_n}. OPENING REQUIRED (workflow.scripts): patient-visible reply MUST "
+            "begin with scripts.opening (light paraphrase OK; keep identity/welcome). "
+            "Even if the user already stated a chief complaint, do not skip the opening. "
+            "After the opening, ask at most ONE next missing question "
+            "(do not re-ask facts already given). "
+            "FORBIDDEN: first reply that is only a follow-up question with no opening."
+        )
+        rule_n += 1
+    elif (
+        opening
+        and policy == OPENING_POLICY_OPTIONAL
+        and not current.get("opening_delivered")
+        and phase in {PHASE_INIT, PHASE_COLLECTING}
+    ):
+        lines.append(
+            f"{rule_n}. OPENING OPTIONAL: prefer scripts.opening on the first patient-visible "
+            "reply when natural; still at most one question after it."
+        )
+        rule_n += 1
+
+    ready_to_close = (
+        bool(closing)
+        and not current.get("closing_delivered")
+        and not (current.get("missing") or [])
+        and is_probe_finished(current, config)
+        and phase in {PHASE_READY, PHASE_CONFIRMED}
+    )
+    if ready_to_close:
+        lines.append(
+            f"{rule_n}. CLOSING REQUIRED (workflow.scripts): for this patient-visible "
+            "closing turn, base the reply on scripts.closing (light paraphrase OK). "
+            "Emit the full closing at most ONCE in the session; then call pending "
+            "write/required_actions tools. Do not invent a second closing block after tools. "
+            "Do NOT name specific disease diagnoses in the patient-visible closing; "
+            "use cautious direction/mechanism wording only."
+        )
+    elif (
+        closing
+        and not current.get("closing_delivered")
+        and not (current.get("missing") or [])
+        and is_probe_finished(current, config)
+        and pending_required_action_tools(current, config)
+        and phase != PHASE_DONE
+    ):
+        lines.append(
+            f"{rule_n}. CLOSING REQUIRED (workflow.scripts): missing is empty and write "
+            "tools are pending — patient-visible closing MUST follow scripts.closing "
+            "once (with recommendation/summary as configured), then call pending tools. "
+            "Do NOT name specific disease diagnoses in the patient-visible closing."
+        )
+
+
+def apply_scripts_progress_from_run(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    had_patient_reply: bool,
+) -> dict[str, Any]:
+    """Advance opening/closing delivery flags after a turn (cluster-safe)."""
+    out = ensure_collection_state(state, config)
+    scripts = resolve_scripts_config(config)
+    if not scripts:
+        return out
+    if (
+        scripts.get("opening")
+        and had_patient_reply
+        and not out.get("opening_delivered")
+        and str(out.get("phase") or "") in {PHASE_INIT, PHASE_COLLECTING, PHASE_PROBING}
+    ):
+        out["opening_delivered"] = True
+    if scripts.get("closing") and not out.get("closing_delivered"):
+        phase = str(out.get("phase") or "")
+        if out.get("completed") or phase in {PHASE_CONFIRMED, PHASE_DONE}:
+            out["closing_delivered"] = True
+        elif (
+            had_patient_reply
+            and not (out.get("missing") or [])
+            and is_probe_finished(out, config)
+            and phase in {PHASE_READY, PHASE_CONFIRMED}
+        ):
+            out["closing_delivered"] = True
+    return out
+
+
+_SYSTEM_TIP_RE = re.compile(r"\n*\[系统提示\][^\n]*", re.MULTILINE)
+# Model sometimes prints tool calls as chat text instead of invoking tools.
+_TEXTUAL_TOOL_CALL_RE = re.compile(
+    r"(?:^|\n)\s*(collection_[a-z_]+)\s*\(\s*(?:note\s*=\s*)?"
+    r"(?P<q>['\"])(?P<body>.*?)(?P=q)\s*\)\s*(?=\n|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+_TEXTUAL_TOOL_CALL_LOOSE_RE = re.compile(
+    r"(?:^|\n)\s*collection_[a-z_]+\s*\([^()\n]*\)\s*(?=\n|$)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_patient_visible_reply(text: str | None) -> tuple[str, list[dict[str, str]]]:
+    """Strip operator/system leaks from patient-visible text; salvage fake tool calls.
+
+    Returns ``(clean_text, salvaged)`` where salvaged items look like
+    ``{"tool": "collection_probe_note", "note": "..."}``.
+    """
+    if not text:
+        return "", []
+    salvaged: list[dict[str, str]] = []
+    cleaned = str(text)
+
+    def _consume(match: re.Match[str]) -> str:
+        tool = str(match.group(1) or "").strip()
+        body = str(match.group("body") or "").strip()
+        if tool and body:
+            salvaged.append({"tool": tool, "note": body})
+        return "\n"
+
+    cleaned = _TEXTUAL_TOOL_CALL_RE.sub(_consume, cleaned)
+    cleaned = _TEXTUAL_TOOL_CALL_LOOSE_RE.sub("\n", cleaned)
+    cleaned = _SYSTEM_TIP_RE.sub("", cleaned)
+    # Collapse excessive blank lines left by stripping.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, salvaged
+
+
+_OR_CHOICE_RE = re.compile(r"还是")
+_ASK_NORMALIZE_RE = re.compile(r"[\s？?\s，,。.!！、；;：:（）()【】\[\]\"'“”‘’]+")
+
+
+def _normalize_ask_text(text: str) -> str:
+    return _ASK_NORMALIZE_RE.sub("", str(text or "")).strip().lower()
+
+
+def patient_ask_quality_issues(text: str | None) -> list[str]:
+    """Detect multi-question / A-or-B patterns in patient-visible reply."""
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    issues: list[str] = []
+    qmarks = raw.count("？") + raw.count("?")
+    if qmarks > 1:
+        issues.append("multi_qmark")
+    # 「A还是B？」is compound even with one qmark. Plain 「恶心、呕吐或者耳鸣」lists OK.
+    if qmarks >= 1 and _OR_CHOICE_RE.search(raw):
+        issues.append("or_choice")
+    return issues
+
+
+def apply_ask_quality_tracking(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    reply_text: str | None,
+) -> dict[str, Any]:
+    """Record last ask; set next-turn nudge on quality misses / near-repeat."""
+    out = ensure_collection_state(state, config)
+    cleaned = str(reply_text or "").strip()
+    issues = patient_ask_quality_issues(cleaned)
+    prev = str(out.get("last_ask_text") or "").strip()
+    prev_norm = _normalize_ask_text(prev)
+    cur_norm = _normalize_ask_text(cleaned)
+    if (
+        prev_norm
+        and cur_norm
+        and len(cur_norm) >= 8
+        and (
+            cur_norm == prev_norm
+            or cur_norm in prev_norm
+            or prev_norm in cur_norm
+        )
+    ):
+        issues.append("repeat_ask")
+    out["ask_quality_nudge_due"] = bool(issues)
+    if cleaned:
+        out["last_ask_text"] = cleaned
+    return out
+
+
+def apply_probe_salvage_and_nudge(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    tools_ok: set[str],
+    salvaged: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Apply text-salvaged probe notes; set/clear next-turn internal nudge."""
+    out = ensure_collection_state(state, config)
+    if str(out.get("phase") or "") != PHASE_PROBING:
+        out["probe_nudge_due"] = False
+        return out
+
+    salvaged_ok = False
+    for item in salvaged:
+        if item.get("tool") == "collection_probe_note" and item.get("note"):
+            try:
+                out = append_probe_note(out, config, item["note"])
+                salvaged_ok = True
+            except ValueError:
+                # FSM not ready (e.g. gate not filled) — keep textual salvage out of
+                # patient reply, but do not crash post_hook.
+                pass
+
+    called = bool(tools_ok & {"collection_probe_note", "collection_probe_finish"})
+    if called or salvaged_ok:
+        out["probe_nudge_due"] = False
+    else:
+        # Missed note this probing turn → remind via instructions next turn (not patient text).
+        out["probe_nudge_due"] = True
+    return out
 
 
 def collection_status_payload(
     state: dict[str, Any],
     reply_text: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Structured progress for H5 / SSE metadata (prefer over parsing reply text).
 
@@ -665,14 +1721,25 @@ def collection_status_payload(
     """
     collected = state.get("collected") if isinstance(state.get("collected"), dict) else {}
     schema = state.get("schema") if isinstance(state.get("schema"), list) else []
+    actions_done = (
+        state.get("actions_done") if isinstance(state.get("actions_done"), dict) else {}
+    )
+    pending = pending_required_action_tools(state, config) if config else []
     payload: dict[str, Any] = {
         "phase": state.get("phase"),
         "missing": list(state.get("missing") or []),
-        "ready": not bool(state.get("missing")) and bool(schema),
+        "ready": not bool(state.get("missing"))
+        and bool(schema)
+        and is_probe_finished(state, config),
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
         "collected_keys": sorted(collected.keys()),
         "collected": dict(collected),
+        "actions_done": sorted(actions_done.keys()),
+        "required_actions_pending": pending,
+        "probe_rounds": int(state.get("probe_rounds") or 0),
+        "probe_done": bool(state.get("probe_done")),
+        "probe_notes": list(state.get("probe_notes") or []),
     }
     exported = apply_schema_exports(schema, collected, reply_text=reply_text)
     payload.update(exported)
@@ -682,18 +1749,23 @@ def collection_status_payload(
 def format_status_marker(
     state: dict[str, Any],
     reply_text: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> str:
     body = json.dumps(
-        collection_status_payload(state, reply_text=reply_text),
+        collection_status_payload(state, reply_text=reply_text, config=config),
         ensure_ascii=False,
         separators=(",", ":"),
     )
     return f"{STATUS_MARKER_PREFIX} {body}{STATUS_MARKER_SUFFIX}"
 
 
-def append_status_marker(content: str | None, state: dict[str, Any]) -> str:
+def append_status_marker(
+    content: str | None,
+    state: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> str:
     text = str(content or "")
-    marker = format_status_marker(state, reply_text=text)
+    marker = format_status_marker(state, reply_text=text, config=config)
     if STATUS_MARKER_PREFIX in text:
         # Refresh marker so late-parsed dept_code from the reply is visible to H5.
         prefix, _, _tail = text.partition(STATUS_MARKER_PREFIX)
@@ -826,6 +1898,7 @@ def build_collection_tools() -> list[Any]:
             return json.dumps({"ok": False, "error": "run_context missing"}, ensure_ascii=False)
         config = resolve_collection_config(workflow_from_run_context(ctx))
         state = get_collection_state(ctx)
+        pending = pending_required_action_tools(state, config)
         return json.dumps(
             {
                 "ok": True,
@@ -836,9 +1909,97 @@ def build_collection_tools() -> list[Any]:
                 "schema": state["schema"],
                 "user_confirmed": state["user_confirmed"],
                 "completed": state["completed"],
+                "actions_done": sorted((state.get("actions_done") or {}).keys()),
+                "required_actions_pending": pending,
+                "probe_rounds": state.get("probe_rounds") or 0,
+                "probe_done": bool(state.get("probe_done")),
+                "probe_notes": list(state.get("probe_notes") or []),
             },
             ensure_ascii=False,
         )
+
+    @tool(
+        name="collection_probe_note",
+        description=(
+            "During phase=probing: record one enrichment note from the user's "
+            "latest answer, then advance probe_rounds. Call once per answered "
+            "probe question. When max_rounds is reached, probe ends."
+        ),
+    )
+    def collection_probe_note(
+        note: str,
+        run_context: Any = None,
+    ) -> str:
+        ctx = run_context
+        if ctx is None:
+            return json.dumps({"ok": False, "error": "run_context missing"}, ensure_ascii=False)
+        config = resolve_collection_config(workflow_from_run_context(ctx))
+        if not config:
+            return json.dumps(
+                {"ok": False, "error": "collection protocol not enabled"},
+                ensure_ascii=False,
+            )
+        try:
+            state = append_probe_note(get_collection_state(ctx), config, note)
+            set_collection_state(ctx, state)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "phase": state["phase"],
+                    "probe_rounds": state.get("probe_rounds"),
+                    "probe_done": bool(state.get("probe_done")),
+                    "probe_notes": state.get("probe_notes") or [],
+                    "required_actions_pending": pending_required_action_tools(state, config),
+                },
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+
+    @tool(
+        name="collection_probe_finish",
+        description=(
+            "End the probing loop early (skip remaining rounds). Use only when "
+            "reason matches workflow.probe.early_finish_keywords (e.g. user refuses). "
+            "Blocked until probe_min_rounds notes unless reason matches those keywords. "
+            "Also blocked when probe.allow_skip=false and max_rounds not yet reached. "
+            "Do NOT use merely because information 'seems enough'."
+        ),
+    )
+    def collection_probe_finish(
+        reason: str = "",
+        run_context: Any = None,
+    ) -> str:
+        ctx = run_context
+        if ctx is None:
+            return json.dumps({"ok": False, "error": "run_context missing"}, ensure_ascii=False)
+        config = resolve_collection_config(workflow_from_run_context(ctx))
+        if not config:
+            return json.dumps(
+                {"ok": False, "error": "collection protocol not enabled"},
+                ensure_ascii=False,
+            )
+        try:
+            state = finish_probe(get_collection_state(ctx), config, reason=reason or None)
+            set_collection_state(ctx, state)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "phase": state["phase"],
+                    "probe_done": True,
+                    "probe_rounds": state.get("probe_rounds"),
+                    "required_actions_pending": pending_required_action_tools(state, config),
+                    "hint": (
+                        "Probe finished; produce operator summary then call write MCP "
+                        "if required_actions pending."
+                        if not state.get("missing")
+                        else "Probe finished but required fields still missing."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
     @tool(
         name="collection_confirm",
@@ -915,8 +2076,10 @@ def build_collection_tools() -> list[Any]:
     @tool(
         name="collection_mark_done",
         description=(
-            "Record that a write/update MCP call succeeded. Safe after early or "
-            "partial saves; user may continue adding fields and write again."
+            "Record that a write/update MCP call succeeded. Blocked while "
+            "required_actions tools are still pending. "
+            "Safe after early or partial saves; user may continue adding fields "
+            "and write again."
         ),
     )
     def collection_mark_done(
@@ -933,11 +2096,16 @@ def build_collection_tools() -> list[Any]:
                 ensure_ascii=False,
             )
         try:
-            state = mark_collection_done(
+            # Same-turn MCP successes: prefer run_context.tools, fall back to messages.
+            state = apply_required_actions_from_run(
                 get_collection_state(ctx),
                 config,
-                result or None,
+                SimpleNamespace(
+                    tools=getattr(ctx, "tools", None) or [],
+                    messages=getattr(ctx, "messages", None) or [],
+                ),
             )
+            state = mark_collection_done(state, config, result or None)
             set_collection_state(ctx, state)
             return json.dumps(
                 {
@@ -945,6 +2113,7 @@ def build_collection_tools() -> list[Any]:
                     "phase": state["phase"],
                     "completed": True,
                     "missing": state["missing"],
+                    "actions_done": sorted((state.get("actions_done") or {}).keys()),
                     "hint": (
                         "Keep asking for missing fields."
                         if state.get("missing")
@@ -960,6 +2129,8 @@ def build_collection_tools() -> list[Any]:
         collection_load_schema,
         collection_update_fields,
         collection_status,
+        collection_probe_note,
+        collection_probe_finish,
         collection_confirm,
         collection_complete,
         collection_mark_done,
@@ -974,4 +2145,7 @@ def snapshot_collection_for_log(state: dict[str, Any]) -> dict[str, Any]:
         "collected_keys": sorted((state.get("collected") or {}).keys()),
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
+        "actions_done": sorted((state.get("actions_done") or {}).keys()),
+        "probe_rounds": state.get("probe_rounds") or 0,
+        "probe_done": bool(state.get("probe_done")),
     }

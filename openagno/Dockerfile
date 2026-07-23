@@ -49,6 +49,7 @@ RUN python -m venv /opt/venv/agno \
         "psycopg[binary]>=3.1" \
         "uvicorn[standard]>=0.27" \
         "fastapi>=0.109" \
+        "anyio>=4.9,<4.14" \
         "python-multipart>=0.0.9" \
         "pyjwt>=2.8" \
         "mcp>=1.0" \

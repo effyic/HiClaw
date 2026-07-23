@@ -9,10 +9,11 @@ more than once). That produced a 5s+ SSE silence after PreHook.
 
 Design
 ------
-* Pool key = ``(name, url)`` only. Headers (including ``session-id`` / ``user-id`` /
-  ``tenant-id``), transport, and tool filters are **not** part of the key — one
-  shared connection per MCP endpoint. Per-chat identity is injected at call time
-  via Agno ``header_provider`` (see ``mcp/loader.py``), not by pooling separately.
+* Pool key = ``(name, url)`` only. Headers, transport, and tool filters are
+  **not** part of the key — one shared MCPTools instance per endpoint.
+  On every borrow, ``bind_mcp_tool_headers`` rebinds ``header_provider`` to
+  **current agent DB headers ∪ request identity/x-*** (see ``mcp/headers.py``),
+  so ``campus-id`` / API keys cannot stick from the first creator.
 * Soft-close: Agno may call ``close()`` on run teardown for list-mounted tools;
   pooled instances must survive.
 * Stable ``is_alive``: many servers lack ping; a failed ping used to force
