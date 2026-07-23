@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS agno_agent (
   mcp_config    JSONB,
   workflow      JSONB,
   enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
-  created_at    TIMESTAMPTZ  DEFAULT CURRENT_TIMESTAMP,
-  updated_at    TIMESTAMPTZ  DEFAULT CURRENT_TIMESTAMP,
+  created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (tenant_id, role_code)
 );
 
