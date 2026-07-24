@@ -214,16 +214,229 @@ def test_field_probe_before_global_probe():
     }
     state = update_collected_fields(empty_collection_state(), {"主诉": "头痛"}, config)
     assert state["phase"] == PHASE_COLLECTING
+    assert state["current_field"] == "主诉"
+    assert state["field_stage"] == "probe"
     assert state["field_probe_active"] == "主诉"
     state = append_probe_note(state, config, "胀痛", field="主诉")
     assert state["field_probes"]["主诉"]["rounds"] == 1
     state = finish_probe(state, config, field="主诉", reason="主诉已够细")
     assert not state.get("field_probe_active")
+    assert not state.get("current_field")
     assert state["phase"] == PHASE_PROBING
     state = append_probe_note(state, config, "全局鉴别")
     state = finish_probe(state, config, reason="可推荐")
     assert state["phase"] == PHASE_COLLECTING
     assert "推荐科室" in state["missing"]
+
+
+def test_cursor_stashes_ahead_and_blocks_while_min_probe():
+    """Cursor: stash multi-facts; hard-block later writes until field probe min met."""
+    config = {
+        "kind": "collection_dialogue",
+        "confirm_required": False,
+        "probe": {
+            "enabled": True,
+            "min_rounds": 0,
+            "max_rounds": 2,
+            "allow_skip": True,
+        },
+        "schema": {
+            "source": "inline",
+            "fields": [
+                {
+                    "name": "主诉",
+                    "required": True,
+                    "probe": {"enabled": True, "min_rounds": 1, "max_rounds": 2},
+                },
+                {
+                    "name": "持续时间",
+                    "required": True,
+                },
+                {"name": "推荐科室", "required": True, "after_probe": True},
+            ],
+        },
+    }
+    state = update_collected_fields(
+        empty_collection_state(),
+        {"主诉": "头晕", "持续时间": "两天"},
+        config,
+    )
+    assert state["collected"] == {"主诉": "头晕"}
+    assert state["pending_collected"] == {"持续时间": "两天"}
+    assert state["current_field"] == "主诉"
+    assert state["field_stage"] == "probe"
+
+    try:
+        update_collected_fields(state, {"持续时间": "两天"}, config)
+        raise AssertionError("expected block of next slot during field probe min")
+    except ValueError as exc:
+        assert "cursor locked" in str(exc)
+        assert "主诉" in str(exc)
+
+    state = append_probe_note(state, config, "体位相关", field="主诉")
+    state = finish_probe(state, config, field="主诉", reason="主诉够细")
+    # Pending auto-applies when cursor advances.
+    assert state["collected"]["持续时间"] == "两天"
+    assert "持续时间" not in (state.get("pending_collected") or {})
+    assert state["current_field"] == ""
+    assert state["phase"] == PHASE_PROBING
+
+
+def test_cursor_auto_finish_probe_when_writing_next_and_min_met():
+    """min_rounds=0: writing the next field auto-finishes current field probe."""
+    config = {
+        "kind": "collection_dialogue",
+        "confirm_required": False,
+        "probe": {
+            "enabled": True,
+            "min_rounds": 0,
+            "max_rounds": 2,
+            "allow_skip": True,
+        },
+        "schema": {
+            "source": "inline",
+            "fields": [
+                {
+                    "name": "主诉",
+                    "required": True,
+                    "probe": {"enabled": True, "min_rounds": 0, "max_rounds": 2},
+                },
+                {"name": "持续时间", "required": True},
+                {"name": "推荐科室", "required": True, "after_probe": True},
+            ],
+        },
+    }
+    state = update_collected_fields(empty_collection_state(), {"主诉": "头晕"}, config)
+    assert state["field_stage"] == "probe"
+    state = update_collected_fields(state, {"持续时间": "两天"}, config)
+    assert state["collected"]["主诉"] == "头晕"
+    assert state["collected"]["持续时间"] == "两天"
+    assert state["field_probes"]["主诉"]["done"] is True
+    assert state["phase"] == PHASE_PROBING
+    assert not state.get("current_field")
+
+
+def test_cursor_cascade_pending_without_field_probe():
+    """Without field probes, stashed facts cascade onto the advancing cursor."""
+    config = {
+        "kind": "collection_dialogue",
+        "confirm_required": False,
+        "probe": {
+            "enabled": True,
+            "min_rounds": 0,
+            "max_rounds": 1,
+            "allow_skip": True,
+        },
+        "schema": {
+            "source": "inline",
+            "fields": [
+                {"name": "主诉", "required": True},
+                {"name": "持续时间", "required": True},
+                {"name": "既往病史", "required": True},
+                {"name": "推荐科室", "required": True, "after_probe": True},
+            ],
+        },
+    }
+    state = update_collected_fields(
+        empty_collection_state(),
+        {"主诉": "头晕", "持续时间": "两天", "既往病史": "高血压"},
+        config,
+    )
+    assert state["collected"] == {
+        "主诉": "头晕",
+        "持续时间": "两天",
+        "既往病史": "高血压",
+    }
+    assert not (state.get("pending_collected") or {})
+    assert not state.get("current_field")
+    assert state["phase"] == PHASE_PROBING
+
+
+def test_cursor_pending_applies_when_field_probe_hits_max_rounds():
+    """max_rounds auto-done must cascade pending like finish_probe."""
+    config = {
+        "kind": "collection_dialogue",
+        "confirm_required": False,
+        "probe": {
+            "enabled": True,
+            "min_rounds": 0,
+            "max_rounds": 2,
+            "allow_skip": True,
+        },
+        "schema": {
+            "source": "inline",
+            "fields": [
+                {
+                    "name": "主诉",
+                    "required": True,
+                    "probe": {"enabled": True, "min_rounds": 1, "max_rounds": 1},
+                },
+                {"name": "持续时间", "required": True},
+                {"name": "推荐科室", "required": True, "after_probe": True},
+            ],
+        },
+    }
+    state = update_collected_fields(
+        empty_collection_state(),
+        {"主诉": "头晕", "持续时间": "两天"},
+        config,
+    )
+    assert state["pending_collected"] == {"持续时间": "两天"}
+    state = append_probe_note(state, config, "体位相关", field="主诉")
+    assert state["field_probes"]["主诉"]["done"] is True
+    assert state["collected"]["持续时间"] == "两天"
+    assert not (state.get("pending_collected") or {})
+    assert state["phase"] == PHASE_PROBING
+
+
+def test_enrichment_skipped_when_only_after_probe_fields():
+    """Schemas with no pre-probe slots must not empty-run enrichment."""
+    from agno_worker.tenant.collection import (
+        is_probe_finished,
+        is_probe_ready,
+        load_schema_into_state,
+    )
+
+    config = {
+        "kind": "collection_dialogue",
+        "confirm_required": False,
+        "probe": {
+            "enabled": True,
+            "min_rounds": 1,
+            "max_rounds": 2,
+            "allow_skip": True,
+        },
+        "schema": {
+            "source": "inline",
+            "fields": [
+                {"name": "决策项", "required": True, "after_probe": True},
+            ],
+        },
+        "required_actions": [
+            {"type": "reply", "field": "决策项", "when": "missing_empty"},
+        ],
+    }
+    state = load_schema_into_state(
+        empty_collection_state(),
+        config["schema"]["fields"],
+        config,
+    )
+    assert state["phase"] == PHASE_COLLECTING
+    assert "决策项" in state["missing"]
+    assert not state.get("current_field")
+    assert is_probe_ready(state, config) is False
+    assert is_probe_finished(state, config) is True
+    state = update_collected_fields(state, {"决策项": "选项A"}, config)
+    assert state["collected"]["决策项"] == "选项A"
+    assert state["phase"] == PHASE_CONFIRMED
+
+
+def test_ask_batch_size_hard_cursor_always_one():
+    from agno_worker.tenant.collection import ask_batch_size
+
+    assert ask_batch_size({"ask_batch_size": 5}) == 1
+    assert ask_batch_size({"ask_batch_size": 1}) == 1
+    assert ask_batch_size(None) == 1
 
 
 def test_hard_gate_hides_write_tool_until_probe_and_missing_done():
@@ -292,6 +505,12 @@ if __name__ == "__main__":
     test_serial_reply_then_mcp_hard_gates_write_until_reply_done()
     test_after_probe_defers_decision_slot()
     test_field_probe_before_global_probe()
+    test_cursor_stashes_ahead_and_blocks_while_min_probe()
+    test_cursor_auto_finish_probe_when_writing_next_and_min_met()
+    test_cursor_cascade_pending_without_field_probe()
+    test_cursor_pending_applies_when_field_probe_hits_max_rounds()
+    test_enrichment_skipped_when_only_after_probe_fields()
+    test_ask_batch_size_hard_cursor_always_one()
     test_hard_gate_hides_write_tool_until_probe_and_missing_done()
     test_filter_collection_gated_tools_drops_write_mcp()
     print("ok")

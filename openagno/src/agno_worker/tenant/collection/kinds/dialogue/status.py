@@ -10,9 +10,11 @@ from agno_worker.tenant.collection.kinds.dialogue.constants import (
 )
 from agno_worker.tenant.collection.kinds.dialogue.config import required_actions_mode
 from agno_worker.tenant.collection.kinds.dialogue.core import (
+    FIELD_STAGE_PROBE,
     current_required_action,
-    is_field_probe_active,
+    field_stage,
     is_probe_finished,
+    later_collectable_fields,
     pending_required_actions,
     pending_required_action_tools,
 )
@@ -36,13 +38,23 @@ def collection_status_payload(
     pending = pending_required_action_tools(state, config) if config else []
     pending_actions = pending_required_actions(state, config) if config else []
     active = current_required_action(state, config) if config else None
+    cursor = str(state.get("current_field") or "").strip()
+    stage = field_stage(state)
     payload: dict[str, Any] = {
         "phase": state.get("phase"),
         "missing": list(state.get("missing") or []),
+        "current_field": cursor,
+        "field_stage": stage,
+        "ask_focus": [cursor] if cursor else [],
+        "later_fields": later_collectable_fields(state, config) if config else [],
+        "pending_collected": dict(state.get("pending_collected") or {})
+        if isinstance(state.get("pending_collected"), dict)
+        else {},
         "ready": not bool(state.get("missing"))
         and bool(schema)
         and is_probe_finished(state, config)
-        and not is_field_probe_active(state),
+        and stage != FIELD_STAGE_PROBE
+        and not cursor,
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
         "collected_keys": sorted(collected.keys()),
@@ -55,11 +67,15 @@ def collection_status_payload(
         "probe_rounds": int(state.get("probe_rounds") or 0),
         "probe_done": bool(state.get("probe_done")),
         "probe_notes": list(state.get("probe_notes") or []),
+        # Alias: enrichment probe is post-required only (not a global round budget).
+        "enrichment_probe_rounds": int(state.get("probe_rounds") or 0),
+        "enrichment_probe_done": bool(state.get("probe_done")),
         "field_probe_active": str(state.get("field_probe_active") or ""),
         "field_probes": dict(state.get("field_probes") or {})
         if isinstance(state.get("field_probes"), dict)
         else {},
-        "field_probe_busy": is_field_probe_active(state),
+        # Alias of field_stage == "probe" (derived mirror for older clients).
+        "field_probe_busy": stage == FIELD_STAGE_PROBE,
     }
     exported = apply_schema_exports(schema, collected, reply_text=reply_text)
     payload.update(exported)
@@ -87,7 +103,7 @@ def append_status_marker(
     text = str(content or "")
     marker = format_status_marker(state, reply_text=text, config=config)
     if STATUS_MARKER_PREFIX in text:
-        # Refresh marker so late-parsed dept_code from the reply is visible to H5.
+        # Refresh marker so late-parsed schema exports from the reply are visible to clients.
         prefix, _, _tail = text.partition(STATUS_MARKER_PREFIX)
         return f"{prefix.rstrip()}\n\n{marker}" if prefix.strip() else marker
     if text.strip():

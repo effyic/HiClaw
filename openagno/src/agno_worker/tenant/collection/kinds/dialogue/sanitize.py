@@ -22,10 +22,17 @@ _TEXTUAL_TOOL_CALL_LOOSE_RE = re.compile(
     r"(?:^|\n)\s*collection_[a-z_]+\s*\([^()\n]*\)\s*(?=\n|$)",
     re.IGNORECASE,
 )
+# Never expose write/EMR tool outcomes to patients.
+_WRITE_OUTCOME_SENTENCE_RE = re.compile(
+    r"[^。！？\n]*(?:写库|电子病历|病历生成|mec_create_emr_case|"
+    r"系统暂时无法|无法生成电子病历|写库失败|写库成功|病例写入|"
+    r"记录失败|入库失败)[^。！？\n]*[。！？]?",
+    re.IGNORECASE,
+)
 
 
 def sanitize_patient_visible_reply(text: str | None) -> tuple[str, list[dict[str, str]]]:
-    """Strip operator/system leaks from patient-visible text; salvage fake tool calls.
+    """Strip operator/system leaks from user-visible text; salvage fake tool calls.
 
     Returns ``(clean_text, salvaged)`` where salvaged items look like
     ``{"tool": "collection_probe_note", "note": "..."}``.
@@ -45,21 +52,31 @@ def sanitize_patient_visible_reply(text: str | None) -> tuple[str, list[dict[str
     cleaned = _TEXTUAL_TOOL_CALL_RE.sub(_consume, cleaned)
     cleaned = _TEXTUAL_TOOL_CALL_LOOSE_RE.sub("\n", cleaned)
     cleaned = _SYSTEM_TIP_RE.sub("", cleaned)
+    cleaned = _WRITE_OUTCOME_SENTENCE_RE.sub("", cleaned)
     # Collapse excessive blank lines left by stripping.
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    # If scrubbing removed everything, leave a short neutral status.
+    if not cleaned:
+        cleaned = "好的，已收到。"
     return cleaned, salvaged
 
 
-_OR_CHOICE_RE = re.compile(r"还是")
+_OR_CHOICE_RE = re.compile(r"(还是|或者)")
 _ASK_NORMALIZE_RE = re.compile(r"[\s？?\s，,。.!！、；;：:（）()【】\[\]\"'“”‘’]+")
+_POSITION_AGGRO_RE = re.compile(r"(翻身|起床|站起|体位).{0,24}(加重|更晕|明显|天旋地转)")
+_POSITION_FACT_RE = re.compile(r"(翻身|起床|站起|体位).{0,16}(天旋地转|眩晕|更晕|加重|晕)")
 
 
 def _normalize_ask_text(text: str) -> str:
     return _ASK_NORMALIZE_RE.sub("", str(text or "")).strip().lower()
 
 
-def patient_ask_quality_issues(text: str | None) -> list[str]:
-    """Detect multi-question / A-or-B patterns in patient-visible reply."""
+def patient_ask_quality_issues(
+    text: str | None,
+    *,
+    collected: dict[str, Any] | None = None,
+) -> list[str]:
+    """Detect multi-question / A-or-B / collected-overlap patterns in reply."""
     raw = str(text or "").strip()
     if not raw:
         return []
@@ -70,6 +87,23 @@ def patient_ask_quality_issues(text: str | None) -> list[str]:
     # 「A还是B？」is compound even with one qmark. Plain 「恶心、呕吐或者耳鸣」lists OK.
     if qmarks >= 1 and _OR_CHOICE_RE.search(raw):
         issues.append("or_choice")
+    # Re-asking facts already stored in collected (esp. position aggravation).
+    collected = collected if isinstance(collected, dict) else {}
+    ask_norm = _normalize_ask_text(raw)
+    for value in collected.values():
+        val_norm = _normalize_ask_text(str(value or ""))
+        if len(val_norm) < 6 or len(ask_norm) < 6:
+            continue
+        # Shared concrete chunk (e.g. 翻身时天旋地转) already answered.
+        if val_norm in ask_norm or (
+            len(val_norm) >= 8 and ask_norm in val_norm and qmarks >= 1
+        ):
+            issues.append("collected_repeat")
+            break
+    if qmarks >= 1 and _POSITION_AGGRO_RE.search(raw):
+        blob = " ".join(str(v) for v in collected.values())
+        if _POSITION_FACT_RE.search(blob):
+            issues.append("collected_repeat")
     return issues
 
 
@@ -81,7 +115,8 @@ def apply_ask_quality_tracking(
     """Record last ask; set next-turn nudge on quality misses / near-repeat."""
     out = ensure_collection_state(state, config)
     cleaned = str(reply_text or "").strip()
-    issues = patient_ask_quality_issues(cleaned)
+    collected = out.get("collected") if isinstance(out.get("collected"), dict) else {}
+    issues = patient_ask_quality_issues(cleaned, collected=collected)
     prev = str(out.get("last_ask_text") or "").strip()
     prev_norm = _normalize_ask_text(prev)
     cur_norm = _normalize_ask_text(cleaned)
@@ -100,7 +135,6 @@ def apply_ask_quality_tracking(
     if cleaned:
         out["last_ask_text"] = cleaned
     return out
-
 
 def apply_probe_salvage_and_nudge(
     state: dict[str, Any],

@@ -54,13 +54,20 @@ def empty_field_probe_entry() -> dict[str, Any]:
     return {"rounds": 0, "notes": [], "done": False}
 
 
+FIELD_STAGE_COLLECT = "collect"
+FIELD_STAGE_PROBE = "probe"
+
+
 def pre_probe_field_names(
     schema: list[dict[str, Any]],
     config: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Required slot names that must be filled (+ field-probed) before global probe.
+    """Ordered collectable slots before enrichment probe (cursor walk order).
 
-    Deferred slots: ``after_probe=true`` or referenced by ``required_actions`` type=reply.
+    Includes required fields that are not deferred. Optional (``required=false``)
+    fields are never walked by the cursor (they may still be written when the
+    cursor is idle / via explicit update after enrichment). Deferred slots:
+    ``after_probe=true`` or referenced by ``required_actions`` type=reply.
     """
     deferred = reply_action_fields(config)
     names: list[str] = []
@@ -104,9 +111,34 @@ def _normalize_field_probe_entry(raw: Any) -> dict[str, Any]:
     return entry
 
 
-def ensure_field_probe_maps(state: dict[str, Any]) -> dict[str, Any]:
-    """Normalize ``field_probes`` / ``field_probe_active`` on state."""
+def ensure_pending_collected(state: dict[str, Any]) -> dict[str, Any]:
+    """Normalize ``pending_collected`` stash (facts extracted ahead of the cursor).
+
+    Drops keys already present in ``collected`` so re-extracted facts cannot
+    linger after the cursor has moved past them.
+    """
     out = dict(state)
+    raw = out.get("pending_collected")
+    collected = out.get("collected") if isinstance(out.get("collected"), dict) else {}
+    cleaned: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            name = str(key).strip()
+            if not name or value is None:
+                continue
+            if _value_filled(collected, name):
+                continue
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            text = str(text).strip()
+            if text:
+                cleaned[name] = text
+    out["pending_collected"] = cleaned
+    return out
+
+
+def ensure_field_probe_maps(state: dict[str, Any]) -> dict[str, Any]:
+    """Normalize probe maps + cursor fields on state."""
+    out = ensure_pending_collected(state)
     raw_map = out.get("field_probes")
     cleaned: dict[str, Any] = {}
     if isinstance(raw_map, dict):
@@ -116,6 +148,11 @@ def ensure_field_probe_maps(state: dict[str, Any]) -> dict[str, Any]:
                 cleaned[name] = _normalize_field_probe_entry(value)
     out["field_probes"] = cleaned
     out["field_probe_active"] = str(out.get("field_probe_active") or "").strip()
+    out["current_field"] = str(out.get("current_field") or "").strip()
+    stage = str(out.get("field_stage") or "").strip()
+    if stage not in {FIELD_STAGE_COLLECT, FIELD_STAGE_PROBE, ""}:
+        stage = ""
+    out["field_stage"] = stage
     return out
 
 
@@ -131,48 +168,97 @@ def is_field_probe_finished(
     return int(current.get("rounds") or 0) >= int(field_probe.get("max_rounds") or 0)
 
 
-def pending_field_probe_name(state: dict[str, Any]) -> str | None:
-    """First filled schema field whose per-field probe is still open."""
+def _field_incomplete_for_cursor(
+    state: dict[str, Any],
+    name: str,
+) -> tuple[bool, str]:
+    """Return (incomplete, stage) for one collectable field."""
     collected = state.get("collected") if isinstance(state.get("collected"), dict) else {}
     probes = state.get("field_probes") if isinstance(state.get("field_probes"), dict) else {}
-    for field in state.get("schema") or []:
-        if not isinstance(field, dict):
-            continue
-        name = str(field.get("name") or "").strip()
-        if not name or not _value_filled(collected, name):
-            continue
-        field_probe = resolve_field_probe(field)
-        if not field_probe:
-            continue
-        entry = probes.get(name)
-        if not is_field_probe_finished(entry, field_probe):
-            return name
-    return None
+    if not _value_filled(collected, name):
+        return True, FIELD_STAGE_COLLECT
+    field = _schema_field_by_name(state.get("schema") or [], name)
+    field_probe = resolve_field_probe(field)
+    if field_probe and not is_field_probe_finished(probes.get(name), field_probe):
+        return True, FIELD_STAGE_PROBE
+    return False, ""
 
 
-def sync_field_probe_active(state: dict[str, Any]) -> dict[str, Any]:
-    """Clear finished active field probe; activate next pending field probe."""
+def resolve_cursor_target(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """First incomplete pre-probe field and its stage (collect|probe|'')."""
+    for name in pre_probe_field_names(state.get("schema") or [], config):
+        incomplete, stage = _field_incomplete_for_cursor(state, name)
+        if incomplete:
+            return name, stage
+    return "", ""
+
+
+def later_collectable_fields(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> list[str]:
+    """Collectable fields after ``current_field`` (must not be asked yet)."""
+    names = pre_probe_field_names(state.get("schema") or [], config)
+    current = str(state.get("current_field") or "").strip()
+    if not current or current not in names:
+        return [n for n in names if n != current]
+    idx = names.index(current)
+    return names[idx + 1 :]
+
+
+def sync_field_cursor(
+    state: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Single ask/write cursor: ``current_field`` + ``field_stage``.
+
+    ``field_probe_active`` is a derived mirror of the probe-stage cursor
+    (kept for status/tool payloads); readers should prefer ``field_stage``.
+    """
     out = ensure_field_probe_maps(state)
-    active = out.get("field_probe_active") or ""
-    if active:
-        field = _schema_field_by_name(out.get("schema") or [], active)
-        field_probe = resolve_field_probe(field)
-        entry = (out.get("field_probes") or {}).get(active)
-        if not field_probe or is_field_probe_finished(entry, field_probe):
-            out["field_probe_active"] = ""
-            active = ""
-    if not active:
-        pending = pending_field_probe_name(out)
-        if pending:
-            out["field_probe_active"] = pending
-            probes = dict(out.get("field_probes") or {})
-            probes.setdefault(pending, empty_field_probe_entry())
-            out["field_probes"] = probes
+    name, stage = resolve_cursor_target(out, config)
+    out["current_field"] = name
+    out["field_stage"] = stage
+    if stage == FIELD_STAGE_PROBE and name:
+        out["field_probe_active"] = name
+        probes = dict(out.get("field_probes") or {})
+        probes.setdefault(name, empty_field_probe_entry())
+        out["field_probes"] = probes
+    else:
+        out["field_probe_active"] = ""
     return out
 
 
+def _finish_field_probe_segment(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """After a field probe segment ends: apply stash, sync cursor, advance phase."""
+    out = _apply_pending_collected(state, config)
+    return advance_collection_phase(out, config)
+
+
+def field_stage(state: dict[str, Any]) -> str:
+    """Canonical cursor stage: ``collect`` | ``probe`` | ``\"\"``."""
+    stage = str(state.get("field_stage") or "").strip()
+    if stage in {FIELD_STAGE_COLLECT, FIELD_STAGE_PROBE}:
+        return stage
+    # Recover from partially synced state (e.g. older sessions).
+    current = str(state.get("current_field") or "").strip()
+    if not current:
+        return ""
+    incomplete, derived = _field_incomplete_for_cursor(state, current)
+    if incomplete:
+        return derived
+    return ""
+
+
 def is_field_probe_active(state: dict[str, Any]) -> bool:
-    return bool(str(state.get("field_probe_active") or "").strip())
+    """True while the cursor is enriching the current field (not enrichment probe)."""
+    return field_stage(state) == FIELD_STAGE_PROBE
 
 
 def _pre_probe_slots_filled(state: dict[str, Any], field_names: list[str]) -> bool:
@@ -197,29 +283,38 @@ def _pre_probe_field_probes_done(state: dict[str, Any], field_names: list[str]) 
 
 
 def is_probe_ready(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
-    """Whether global enrichment may start (pre-probe slots + field probes done)."""
+    """Whether post-required enrichment may start.
+
+    Requires at least one pre-probe collectable field that is fully collected
+    (+ field probes done). Schemas with only deferred / after_probe slots never
+    enter enrichment (avoids an empty probing loop with nothing to enrich).
+    """
     probe = resolve_probe_config(config)
     if not probe:
         return False
     if is_field_probe_active(state):
         return False
     pre_names = pre_probe_field_names(state.get("schema") or [], config)
-    if pre_names:
-        if not _pre_probe_slots_filled(state, pre_names):
-            return False
-        return _pre_probe_field_probes_done(state, pre_names)
-    # No pre-probe required slots: wait until non-deferred required slots are filled.
-    deferred = deferred_required_fields(state.get("schema") or [], config)
-    missing = [m for m in (state.get("missing") or []) if str(m) not in deferred]
-    return not bool(missing)
+    if not pre_names:
+        return False
+    if not _pre_probe_slots_filled(state, pre_names):
+        return False
+    return _pre_probe_field_probes_done(state, pre_names)
 
 
 def is_probe_finished(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
-    """True when global probe is disabled, skipped/finished, or max rounds reached."""
+    """True when enrichment is disabled, skipped, finished, or max rounds reached.
+
+    When the schema has no pre-probe collectable fields, enrichment is skipped
+    (treated as finished) so deferred / after_probe slots can proceed.
+    """
     probe = resolve_probe_config(config)
     if not probe:
         return True
     if as_bool(state.get("probe_done"), False):
+        return True
+    pre_names = pre_probe_field_names(state.get("schema") or [], config)
+    if not pre_names:
         return True
     try:
         rounds = int(state.get("probe_rounds") or 0)
@@ -486,6 +581,85 @@ def pending_required_action_tools(
     return pending
 
 
+def _mark_field_probe_done(
+    state: dict[str, Any],
+    field_name: str,
+    *,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Mark a field probe finished without min_rounds checks (caller already gated)."""
+    out = ensure_field_probe_maps(state)
+    probes = dict(out.get("field_probes") or {})
+    entry = _normalize_field_probe_entry(probes.get(field_name))
+    entry["done"] = True
+    if reason and str(reason).strip():
+        notes = list(entry.get("notes") or [])
+        notes.append(f"[skip] {str(reason).strip()}")
+        entry["notes"] = notes
+    probes[field_name] = entry
+    out["field_probes"] = probes
+    return out
+
+
+def _try_auto_finish_current_probe(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """If current field is probing and min_rounds met, finish it so cursor can advance."""
+    out = sync_field_cursor(state, config)
+    current = str(out.get("current_field") or "").strip()
+    if not current or out.get("field_stage") != FIELD_STAGE_PROBE:
+        return out
+    field = _schema_field_by_name(out.get("schema") or [], current)
+    field_probe = resolve_field_probe(field)
+    if not field_probe:
+        return out
+    entry = _normalize_field_probe_entry((out.get("field_probes") or {}).get(current))
+    if is_field_probe_finished(entry, field_probe):
+        return sync_field_cursor(out, config)
+    if not as_bool(field_probe.get("allow_skip"), True):
+        return out
+    rounds = int(entry.get("rounds") or 0)
+    min_rounds = int(field_probe.get("min_rounds") or 0)
+    if rounds < min_rounds:
+        return out
+    out = _mark_field_probe_done(out, current, reason=reason)
+    return sync_field_cursor(out, config)
+
+
+def _apply_pending_collected(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Auto-fill ``current_field`` from stash when the cursor lands on it."""
+    out = sync_field_cursor(state, config)
+    pending = dict(out.get("pending_collected") or {})
+    if not pending:
+        return out
+    # Cap iterations to schema length to avoid pathological loops.
+    for _ in range(max(1, len(pre_probe_field_names(out.get("schema") or [], config)) + 2)):
+        out = sync_field_cursor(out, config)
+        current = str(out.get("current_field") or "").strip()
+        if not current or out.get("field_stage") != FIELD_STAGE_COLLECT:
+            break
+        if current not in pending:
+            break
+        raw = pending.pop(current)
+        collected = dict(out.get("collected") or {})
+        collected[current] = _validate_field_value(out.get("schema") or [], current, str(raw))
+        out["collected"] = collected
+        out["pending_collected"] = pending
+        out["missing"] = compute_missing(out.get("schema") or [], collected)
+        logger.info("collection cursor: applied pending %s", current)
+        out = sync_field_cursor(out, config)
+        # Newly filled field may enter probe; do not auto-skip unless min=0
+        # and allow_skip — leave probe for model / advance-by-next-write.
+    out["pending_collected"] = pending
+    return out
+
+
 def append_probe_note(
     state: dict[str, Any],
     config: dict[str, Any] | None,
@@ -495,12 +669,20 @@ def append_probe_note(
 ) -> dict[str, Any]:
     """Record one enrichment note (per-field or global) and advance rounds."""
     out = ensure_collection_state(state, config)
-    out = sync_field_probe_active(out)
+    out = sync_field_cursor(out, config)
     text = str(note or "").strip()
     if not text:
         raise ValueError("probe note must be non-empty")
 
-    target = str(field or "").strip() or str(out.get("field_probe_active") or "").strip()
+    target = (
+        str(field or "").strip()
+        or str(out.get("field_probe_active") or "").strip()
+        or (
+            str(out.get("current_field") or "").strip()
+            if out.get("field_stage") == FIELD_STAGE_PROBE
+            else ""
+        )
+    )
     if target:
         schema_field = _schema_field_by_name(out.get("schema") or [], target)
         field_probe = resolve_field_probe(schema_field)
@@ -521,8 +703,12 @@ def append_probe_note(
             entry["done"] = True
         probes[target] = entry
         out["field_probes"] = probes
-        out["field_probe_active"] = target
         out["probe_nudge_due"] = False
+        if entry.get("done"):
+            return _finish_field_probe_segment(out, config)
+        out["field_probe_active"] = target
+        out["current_field"] = target
+        out["field_stage"] = FIELD_STAGE_PROBE
         return advance_collection_phase(out, config)
 
     probe = resolve_probe_config(config)
@@ -530,7 +716,8 @@ def append_probe_note(
         raise ValueError("probe loop is not enabled in workflow")
     if not is_probe_ready(out, config):
         raise ValueError(
-            "cannot global-probe until pre-probe fields (and their field probes) are done"
+            "cannot run enrichment probe until pre-probe fields "
+            "(and their field probes) are done"
         )
     notes = list(out.get("probe_notes") or [])
     notes.append(text)
@@ -559,8 +746,16 @@ def finish_probe(
     ``early_finish_keywords`` are no longer used.
     """
     out = ensure_collection_state(state, config)
-    out = sync_field_probe_active(out)
-    target = str(field or "").strip() or str(out.get("field_probe_active") or "").strip()
+    out = sync_field_cursor(out, config)
+    target = (
+        str(field or "").strip()
+        or str(out.get("field_probe_active") or "").strip()
+        or (
+            str(out.get("current_field") or "").strip()
+            if out.get("field_stage") == FIELD_STAGE_PROBE
+            else ""
+        )
+    )
 
     if target:
         schema_field = _schema_field_by_name(out.get("schema") or [], target)
@@ -570,7 +765,6 @@ def finish_probe(
         probes = dict(out.get("field_probes") or {})
         entry = _normalize_field_probe_entry(probes.get(target))
         if is_field_probe_finished(entry, field_probe):
-            out["field_probe_active"] = ""
             return advance_collection_phase(out, config)
         if not as_bool(field_probe.get("allow_skip"), True):
             raise ValueError(
@@ -583,23 +777,17 @@ def finish_probe(
                 f"field probe min_rounds={min_rounds} for {target!r}; "
                 "need more collection_probe_note before finish"
             )
-        entry["done"] = True
-        if reason and str(reason).strip():
-            notes = list(entry.get("notes") or [])
-            notes.append(f"[skip] {str(reason).strip()}")
-            entry["notes"] = notes
-        probes[target] = entry
-        out["field_probes"] = probes
-        out["field_probe_active"] = ""
+        out = _mark_field_probe_done(out, target, reason=reason)
         out["probe_nudge_due"] = False
-        return advance_collection_phase(out, config)
+        return _finish_field_probe_segment(out, config)
 
     probe = resolve_probe_config(config)
     if not probe:
         raise ValueError("probe loop is not enabled in workflow")
     if not is_probe_ready(out, config):
         raise ValueError(
-            "cannot finish global probe until pre-probe fields (and their field probes) are done"
+            "cannot finish enrichment probe until pre-probe fields "
+            "(and their field probes) are done"
         )
     if not as_bool(probe.get("allow_skip"), True) and not is_probe_finished(out, config):
         raise ValueError(
@@ -642,6 +830,11 @@ def empty_collection_state() -> dict[str, Any]:
         # per-field enrichment (schema.fields[].probe)
         "field_probes": {},
         "field_probe_active": "",
+        # hard ask/write cursor (walks pre_probe fields)
+        "current_field": "",
+        "field_stage": "",  # collect | probe | ""
+        # facts extracted ahead of the cursor (applied when cursor arrives)
+        "pending_collected": {},
         # workflow.scripts delivery flags (cluster-safe in session_state)
         "opening_delivered": False,
         "closing_delivered": False,
@@ -695,6 +888,9 @@ def ensure_collection_state(
                 **state,
                 "field_probes": existing.get("field_probes"),
                 "field_probe_active": existing.get("field_probe_active"),
+                "current_field": existing.get("current_field"),
+                "field_stage": existing.get("field_stage"),
+                "pending_collected": existing.get("pending_collected"),
             }
         )
         state["opening_delivered"] = as_bool(existing.get("opening_delivered"), False)
@@ -712,7 +908,8 @@ def ensure_collection_state(
         state = reconcile_inline_schema_from_config(state, config)
     elif state["schema"]:
         state["missing"] = compute_missing(state["schema"], state["collected"])
-    return ensure_field_probe_maps(state)
+    state = ensure_field_probe_maps(state)
+    return sync_field_cursor(state, config)
 
 
 def reconcile_inline_schema_from_config(
@@ -754,10 +951,10 @@ def advance_collection_phase(
 
     out["missing"] = compute_missing(out["schema"], out["collected"])
     out = sync_reply_actions_done(out, config)
-    out = sync_field_probe_active(out)
+    out = sync_field_cursor(out, config)
 
-    # Per-field probe runs inside collecting (active field set on state).
-    if is_field_probe_active(out):
+    # Cursor still on a collectable field (ask or field-probe).
+    if str(out.get("current_field") or "").strip():
         out["phase"] = PHASE_COLLECTING
         return out
 
@@ -850,6 +1047,15 @@ def update_collected_fields(
     updates: dict[str, Any],
     config: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Merge field values under the hard ``current_field`` cursor.
+
+    - Only ``current_field`` may be written into ``collected`` this turn
+      (refine allowed while probing that field).
+    - Extra extracted facts are stashed in ``pending_collected`` and auto-applied
+      when the cursor advances to them.
+    - Writing a *later* collectable field while probing, with min_rounds already
+      met, auto-finishes the current field probe (advance-by-next-write).
+    """
     out = ensure_collection_state(state, config)
     if not isinstance(updates, dict) or not updates:
         raise ValueError("fields must be a non-empty object of {name: value}")
@@ -868,35 +1074,124 @@ def update_collected_fields(
             + ", ".join(sorted(allowed))
         )
 
-    # Hard-gate deferred / after_probe decision slots until global probe finishes
-    # (and until any active field probe ends). Soft prompt alone is insufficient.
     deferred = deferred_required_fields(out["schema"], config)
     probe_cfg = resolve_probe_config(config)
-    probe_blocked = bool(probe_cfg) and (
-        is_field_probe_active(out) or not is_probe_finished(out, config)
-    )
+    collectable = pre_probe_field_names(out["schema"], config)
+    out = sync_field_cursor(out, config)
 
-    collected = dict(out["collected"])
+    # Normalize incoming payload.
+    normalized: dict[str, str] = {}
     for key, value in updates.items():
         name = str(key).strip()
         if not name:
             continue
         if value is None:
-            collected.pop(name, None)
             continue
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        text = text.strip()
-        if not text:
-            collected.pop(name, None)
-            continue
-        if probe_blocked and name in deferred:
+        text = str(text).strip()
+        if text:
+            normalized[name] = text
+
+    if not normalized:
+        raise ValueError("fields must be a non-empty object of {name: value}")
+
+    # Hard-gate after_probe / deferred decision slots until global probe ends
+    # and the collectable cursor is idle.
+    probe_blocked = bool(probe_cfg) and (
+        bool(out.get("current_field")) or not is_probe_finished(out, config)
+    )
+    for name in list(normalized):
+        if name in deferred and probe_blocked:
             raise ValueError(
                 f"field {name!r} is after_probe / deferred; "
                 "finish probe (probe_done) before collection_update_fields"
             )
+
+    # If the model writes a later collectable while current is probing and
+    # min_rounds is already met, auto-finish so the cursor can advance.
+    later_writes = [
+        n for n in collectable if n in normalized and n != out.get("current_field")
+    ]
+    if later_writes and out.get("field_stage") == FIELD_STAGE_PROBE:
+        before = str(out.get("current_field") or "")
+        out = _try_auto_finish_current_probe(
+            out,
+            config,
+            reason="advance_by_next_field_write",
+        )
+        out = _apply_pending_collected(out, config)
+        if out.get("field_stage") == FIELD_STAGE_PROBE and out.get("current_field") == before:
+            raise ValueError(
+                f"field cursor locked on {before!r} (stage=probe); "
+                "finish collection_probe_note/finish (min_rounds) before "
+                f"updating later fields (blocked: {', '.join(later_writes)})"
+            )
+
+    out = sync_field_cursor(out, config)
+    current = str(out.get("current_field") or "").strip()
+    stage = str(out.get("field_stage") or "").strip()
+    pending = dict(out.get("pending_collected") or {})
+    already = out.get("collected") if isinstance(out.get("collected"), dict) else {}
+    stashed: list[str] = []
+    applied: dict[str, str] = {}
+
+    # After collectable cursor is done, allow writing deferred / remaining missing
+    # (e.g. decision slots with after_probe) without a current_field.
+    if not current:
+        collected = dict(out["collected"])
+        for name, text in normalized.items():
+            collected[name] = _validate_field_value(out["schema"], name, text)
+        out["collected"] = collected
+        out["pending_collected"] = pending
+        return advance_collection_phase(out, config)
+
+    for name, text in normalized.items():
+        if name == current:
+            # collect: write value; probe: allow refine of the same slot
+            applied[name] = text
+            continue
+        if name in deferred:
+            # Deferred slots are never walked by the cursor — do not stash forever.
+            raise ValueError(
+                f"field {name!r} is after_probe / deferred; "
+                "finish enrichment probe (probe_done) and clear the collectable "
+                "cursor before collection_update_fields"
+            )
+        # Already on disk: ignore re-extraction (do not re-stash behind the cursor).
+        if _value_filled(already, name):
+            continue
+        if name in collectable or name in (out.get("missing") or []):
+            pending[name] = text
+            stashed.append(name)
+            continue
+        pending[name] = text
+        stashed.append(name)
+
+    if stage == FIELD_STAGE_PROBE and current not in applied and later_writes:
+        raise ValueError(
+            f"field cursor locked on {current!r} (stage=probe); "
+            "ask/probe this field only, or call collection_probe_finish"
+        )
+
+    collected = dict(out["collected"])
+    for name, text in applied.items():
         collected[name] = _validate_field_value(out["schema"], name, text)
     out["collected"] = collected
-    return advance_collection_phase(out, config)
+    out["pending_collected"] = pending
+    if stashed:
+        out["_cursor_stashed"] = stashed
+        logger.info(
+            "collection cursor: wrote %s; stashed ahead-of-cursor %s",
+            list(applied.keys()),
+            stashed,
+        )
+
+    out = sync_field_cursor(out, config)
+    out = _apply_pending_collected(out, config)
+    advanced = advance_collection_phase(out, config)
+    if "_cursor_stashed" in out:
+        advanced["_cursor_stashed"] = out["_cursor_stashed"]
+    return advanced
 
 
 def confirm_collection(

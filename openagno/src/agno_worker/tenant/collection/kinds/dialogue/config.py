@@ -44,16 +44,18 @@ def resolve_scripts_config(config: dict[str, Any] | None) -> dict[str, Any] | No
 
 
 def ask_batch_size(config: dict[str, Any] | None) -> int:
-    raw = (config or {}).get("ask_batch_size", 2)
-    try:
-        size = int(raw)
-    except (TypeError, ValueError):
-        size = 2
-    return max(1, min(size, 5))
+    """Legacy ask window size.
+
+    Hard-cursor collection always focuses a single ``current_field``, so this
+    always returns ``1``. ``workflow.ask_batch_size`` is ignored (kept only so
+    older published configs remain valid JSON).
+    """
+    _ = config
+    return 1
 
 
 def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Optional **global** enrichment loop after pre-probe slots are filled.
+    """Optional **post-required enrichment** loop (``phase=probing``).
 
     Published under ``workflow.probe``::
 
@@ -66,14 +68,24 @@ def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None
           "allow_skip": true
         }
 
+    Semantics (hard boundary):
+
+    - Runs **only after** all required pre-probe slots (and their
+      ``schema.fields[].probe``) are done — never during field cursor collect.
+    - ``min_rounds`` / ``max_rounds`` bound **this enrichment loop only**
+      (``collection_probe_note`` / ``collection_probe_finish`` without ``field=``).
+    - They are **not** a global dialogue round budget, and must **not** override
+      or stand in for ``schema.fields[].probe.min_rounds/max_rounds``.
+    - Product ``collectConfig.maxRounds`` (system_prompt soft hint) is unrelated.
+
     Platform owns only the FSM (rounds / notes). What to ask and why comes from
     ``goal`` / ``hints`` / agent instructions — never hardcoded here.
 
-    - ``min_rounds``: ``collection_probe_finish`` blocked until this many notes.
-      After min and before max, the model may finish early on its own judgment.
-    - ``max_rounds``: auto-complete when note count reaches this.
+    - ``min_rounds``: enrichment ``collection_probe_finish`` blocked until this
+      many notes. After min and before max, the model may finish early.
+    - ``max_rounds``: auto-complete enrichment when note count reaches this.
     - ``allow_skip``: when false, finish is blocked until max_rounds.
-    - Deferred slots use ``schema.fields[].after_probe=true`` (e.g. 推荐科室).
+    - Deferred slots use ``schema.fields[].after_probe=true`` (decision slots).
     - Per-field enrichment uses ``schema.fields[].probe``, not this block.
     """
     if not isinstance(config, dict):

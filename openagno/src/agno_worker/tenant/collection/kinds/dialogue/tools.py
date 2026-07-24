@@ -125,16 +125,38 @@ def build_collection_tools() -> list[Any]:
             if not isinstance(parsed, dict):
                 raise ValueError("fields_json must be a JSON object")
             state = update_collected_fields(get_collection_state(ctx), parsed, config)
+            stashed = list(state.pop("_cursor_stashed", []) or [])
             set_collection_state(ctx, state)
-            return json.dumps(
-                {
-                    "ok": True,
-                    "phase": state["phase"],
-                    "missing": state["missing"],
-                    "collected": state["collected"],
-                },
-                ensure_ascii=False,
-            )
+            cursor = state.get("current_field") or ""
+            stage = state.get("field_stage") or ""
+            payload: dict[str, Any] = {
+                "ok": True,
+                "phase": state["phase"],
+                "missing": state["missing"],
+                "collected": state["collected"],
+                "current_field": cursor,
+                "field_stage": stage,
+                "pending_collected": state.get("pending_collected") or {},
+                "field_probe_active": state.get("field_probe_active") or "",
+                "ask_focus": [cursor] if cursor else [],
+            }
+            if stashed:
+                payload["stashed_fields"] = stashed
+                payload["hint"] = (
+                    f"Cursor kept current_field={cursor!r} (stage={stage}). "
+                    f"Ahead-of-cursor facts stashed in pending_collected: {stashed}. "
+                    "Ask ONLY about current_field; do not re-ask stashed facts."
+                )
+            elif stage == "probe" and cursor:
+                payload["hint"] = (
+                    f"current_field={cursor!r} stage=probe: ask ONLY about this field "
+                    "for min..max probe rounds; later_fields are blocked."
+                )
+            elif stage == "collect" and cursor:
+                payload["hint"] = (
+                    f"current_field={cursor!r} stage=collect: ask/write ONLY this field."
+                )
+            return json.dumps(payload, ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
@@ -149,6 +171,7 @@ def build_collection_tools() -> list[Any]:
         config = resolve_collection_config(workflow_from_run_context(ctx))
         state = get_collection_state(ctx)
         pending = pending_required_action_tools(state, config)
+        cursor = state.get("current_field") or ""
         return json.dumps(
             {
                 "ok": True,
@@ -156,6 +179,10 @@ def build_collection_tools() -> list[Any]:
                 "phase": state["phase"],
                 "missing": state["missing"],
                 "collected": state["collected"],
+                "current_field": cursor,
+                "field_stage": state.get("field_stage") or "",
+                "pending_collected": state.get("pending_collected") or {},
+                "ask_focus": [cursor] if cursor else [],
                 "schema": state["schema"],
                 "user_confirmed": state["user_confirmed"],
                 "completed": state["completed"],
@@ -164,6 +191,7 @@ def build_collection_tools() -> list[Any]:
                 "probe_rounds": state.get("probe_rounds") or 0,
                 "probe_done": bool(state.get("probe_done")),
                 "probe_notes": list(state.get("probe_notes") or []),
+                "field_probe_active": state.get("field_probe_active") or "",
             },
             ensure_ascii=False,
         )
@@ -172,9 +200,10 @@ def build_collection_tools() -> list[Any]:
         name="collection_probe_note",
         description=(
             "Record one enrichment note after the user answers a probe question. "
-            "For per-field probe (field_probe_active set): pass field=<slot name>. "
-            "For global probe (phase=probing): omit field. Advances rounds; at "
-            "max_rounds the probe ends automatically."
+            "For per-field probe (current_field stage=probe): pass field=<slot name>; "
+            "rounds follow schema.fields[].probe min/max only. "
+            "For post-required enrichment (phase=probing): omit field; rounds follow "
+            "workflow.probe min/max only — not a global dialogue budget."
         ),
     )
     def collection_probe_note(
@@ -199,10 +228,14 @@ def build_collection_tools() -> list[Any]:
                 field=field or None,
             )
             set_collection_state(ctx, state)
+            cursor = state.get("current_field") or ""
             return json.dumps(
                 {
                     "ok": True,
                     "phase": state["phase"],
+                    "current_field": cursor,
+                    "field_stage": state.get("field_stage") or "",
+                    "pending_collected": state.get("pending_collected") or {},
                     "field_probe_active": state.get("field_probe_active") or "",
                     "field_probes": state.get("field_probes") or {},
                     "probe_rounds": state.get("probe_rounds"),
@@ -218,10 +251,12 @@ def build_collection_tools() -> list[Any]:
     @tool(
         name="collection_probe_finish",
         description=(
-            "End a field or global probe early after min_rounds and before max_rounds, "
-            "when the model judges enough information is present. "
-            "Pass field=<slot name> for per-field probe; omit for global probe. "
-            "Blocked until min_rounds notes. Blocked when allow_skip=false until max. "
+            "End a field or enrichment probe early after its own min_rounds and before "
+            "max_rounds, when the model judges enough information is present. "
+            "Pass field=<slot name> for per-field probe (schema.fields[].probe). "
+            "Omit field for post-required enrichment (workflow.probe) — those min/max "
+            "do NOT control field probes or the whole dialogue. "
+            "Blocked until that loop's min_rounds. Blocked when allow_skip=false until max. "
             "reason is optional free text for the note log (no keyword whitelist)."
         ),
     )
@@ -247,10 +282,14 @@ def build_collection_tools() -> list[Any]:
                 field=field or None,
             )
             set_collection_state(ctx, state)
+            cursor = state.get("current_field") or ""
             return json.dumps(
                 {
                     "ok": True,
                     "phase": state["phase"],
+                    "current_field": cursor,
+                    "field_stage": state.get("field_stage") or "",
+                    "pending_collected": state.get("pending_collected") or {},
                     "field_probe_active": state.get("field_probe_active") or "",
                     "field_probes": state.get("field_probes") or {},
                     "probe_done": bool(state.get("probe_done")),
@@ -259,8 +298,13 @@ def build_collection_tools() -> list[Any]:
                     "hint": (
                         "Probe finished; produce operator summary then call write MCP "
                         "if required_actions pending."
-                        if not state.get("missing") and not state.get("field_probe_active")
-                        else "Probe segment finished; continue collection / global probe as needed."
+                        if not state.get("missing") and not cursor
+                        else (
+                            f"Continue cursor: ask/write ONLY current_field={cursor!r} "
+                            f"(stage={state.get('field_stage') or ''})."
+                            if cursor
+                            else "Probe segment finished; continue global probe / actions."
+                        )
                     ),
                 },
                 ensure_ascii=False,
@@ -410,10 +454,14 @@ def snapshot_collection_for_log(state: dict[str, Any]) -> dict[str, Any]:
         "phase": state.get("phase"),
         "missing": list(state.get("missing") or []),
         "collected_keys": sorted((state.get("collected") or {}).keys()),
+        "current_field": state.get("current_field") or "",
+        "field_stage": state.get("field_stage") or "",
+        "pending_collected_keys": sorted((state.get("pending_collected") or {}).keys()),
         "user_confirmed": bool(state.get("user_confirmed")),
         "completed": bool(state.get("completed")),
         "actions_done": sorted((state.get("actions_done") or {}).keys()),
         "probe_rounds": state.get("probe_rounds") or 0,
         "probe_done": bool(state.get("probe_done")),
+        "field_probe_active": state.get("field_probe_active") or "",
     }
 

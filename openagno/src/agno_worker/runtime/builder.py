@@ -309,6 +309,7 @@ class AgentBuilder:
                             getattr(run_output, "content", None)
                         )
                 had_reply = bool((reply_text or "").strip())
+                was_closing = bool(coll.get("closing_delivered"))
                 coll = apply_scripts_progress_from_run(
                     coll, coll_cfg, had_patient_reply=had_reply
                 )
@@ -326,6 +327,17 @@ class AgentBuilder:
                 )
                 if reply_text is not None:
                     coll = apply_ask_quality_tracking(coll, coll_cfg, reply_text)
+                # Closing turn: restore reply-field substance if tools kept only
+                # scripts.closing as the last assistant segment.
+                just_closed = (not was_closing) and bool(coll.get("closing_delivered"))
+                if reply_text is not None and just_closed:
+                    from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+                        ensure_reply_fields_visible,
+                    )
+
+                    reply_text = ensure_reply_fields_visible(
+                        reply_text, coll, coll_cfg
+                    )
                 run_context.session_state[COLLECTION_STATE_KEY] = coll
                 if isinstance(coll, dict) and coll.get("phase"):
                     run_context.session_state["phase"] = coll["phase"]

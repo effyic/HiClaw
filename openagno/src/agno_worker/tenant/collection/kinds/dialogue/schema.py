@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
     """Normalize schema fields; preserve generic constraints (pattern / exports).
 
-    Domain-specific slots (e.g. medical triage dept code) belong in published
+    Domain-specific slots and exports belong in published
     ``agno_agent.workflow`` or ``transform_workflow_hook``, not in worker code.
     """
     if not isinstance(raw_fields, list):
@@ -57,7 +57,7 @@ def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
 
 
 def normalize_field_probe(raw: Any) -> dict[str, Any] | None:
-    """Optional per-field enrichment loop after the slot value is collected.
+    """Optional per-field enrichment after the slot value is collected.
 
     Published under ``schema.fields[].probe``::
 
@@ -68,6 +68,10 @@ def normalize_field_probe(raw: Any) -> dict[str, Any] | None:
           "goal": "optional field-specific purpose",
           "allow_skip": true
         }
+
+    These min/max bound **this field only** (while ``field_stage=probe``).
+    They are independent of ``workflow.probe.min_rounds/max_rounds``, which
+    only govern the post-required enrichment loop (``phase=probing``).
 
     After ``min_rounds`` and before ``max_rounds``, the model may call
     ``collection_probe_finish(field=...)`` to end early. At ``max_rounds`` the

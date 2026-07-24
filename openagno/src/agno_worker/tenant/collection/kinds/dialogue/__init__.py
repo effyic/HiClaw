@@ -29,6 +29,8 @@ from agno_worker.tenant.collection.kinds.dialogue.config import (
     suggested_write_tool,
 )
 from agno_worker.tenant.collection.kinds.dialogue.core import (
+    FIELD_STAGE_COLLECT,
+    FIELD_STAGE_PROBE,
     advance_collection_phase,
     append_probe_note,
     apply_metadata_flags,
@@ -38,6 +40,7 @@ from agno_worker.tenant.collection.kinds.dialogue.core import (
     empty_collection_state,
     ensure_collection_state,
     extract_successful_tool_names,
+    field_stage,
     filter_collection_gated_tools,
     finish_probe,
     get_collection_state,
@@ -46,6 +49,7 @@ from agno_worker.tenant.collection.kinds.dialogue.core import (
     is_probe_active,
     is_probe_finished,
     is_probe_ready,
+    later_collectable_fields,
     load_schema_into_state,
     mark_collection_done,
     pending_required_actions,
@@ -57,6 +61,7 @@ from agno_worker.tenant.collection.kinds.dialogue.core import (
     set_collection_state,
     store_collection_draft,
     sync_collection_into_session_state,
+    sync_field_cursor,
     update_collected_fields,
     workflow_from_run_context,
 )
@@ -127,6 +132,9 @@ __all__ = [
     "ensure_collection_state",
     "extract_config",
     "extract_successful_tool_names",
+    "FIELD_STAGE_COLLECT",
+    "FIELD_STAGE_PROBE",
+    "field_stage",
     "filter_collection_gated_tools",
     "resolve_field_probe",
     "normalize_field_probe",
@@ -136,6 +144,7 @@ __all__ = [
     "get_collection_state",
     "hard_gated_tool_names",
     "is_field_probe_active",
+    "later_collectable_fields",
     "pre_probe_field_names",
     "is_probe_active",
     "is_probe_finished",
@@ -166,6 +175,7 @@ __all__ = [
     "store_collection_draft",
     "suggested_write_tool",
     "sync_collection_into_session_state",
+    "sync_field_cursor",
     "update_collected_fields",
     "workflow_from_run_context",
 ]
