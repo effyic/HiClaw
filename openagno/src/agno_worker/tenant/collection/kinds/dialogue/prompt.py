@@ -149,13 +149,10 @@ def collection_instructions_appendix(
     )
     if current.get("ask_quality_nudge_due"):
         lines.append(
-            "4c. PREVIOUS TURN ask-quality miss (multi-question, A-or-B, "
-            "repeated ask, or re-ask of a fact already in collected). "
+            "4c. PREVIOUS TURN ask-quality miss (multi-question, A-or-B, or repeated ask). "
             "This turn: exactly ONE atomic question; no '还是/或者' choice; "
             "explicitly build on the user's latest answer; FORBIDDEN to repeat "
-            "or paraphrase the prior question OR any fact already in collected "
-            "(esp. position aggravation already described in 主诉) — ask a "
-            "different next gap, or finish probe if enrichment_min is met."
+            "or paraphrase the prior question — ask a different next gap."
         )
     if cursor and stage == FIELD_STAGE_PROBE:
         field_cfg = None
@@ -194,9 +191,8 @@ def collection_instructions_appendix(
                         "clear information gap remains that is NOT already stated in "
                         f"collected[{cursor!r}], pending_collected, or prior dialogue. "
                         "FORBIDDEN to re-ask / paraphrase facts already inside "
-                        f"collected[{cursor!r}] (e.g. position aggravation already "
-                        "described). Writing the next field also auto-finishes when "
-                        "min_rounds is met. "
+                        f"collected[{cursor!r}]. Writing the next field also "
+                        "auto-finishes when min_rounds is met. "
                     )
                 )
                 + "If you ask, ask exactly 1 atomic clarifying question about THIS field. "
@@ -252,11 +248,9 @@ def collection_instructions_appendix(
                 "Ask exactly 1 atomic question per turn (see rule 4b). "
                 "FORBIDDEN: A-or-B ('还是/或者') compound asks. "
                 "NO-REPEAT vs collected (hard): before asking, scan collected "
-                "values (especially chief complaint / 主诉*) and prior dialogue; "
-                "if the fact is already stated (e.g. position/turning aggravation, "
-                "duration, nausea), do NOT re-ask or paraphrase it — pick a "
-                "different uncovered gap or call collection_probe_finish when "
-                "enrichment_probe_min_rounds is met. "
+                "values and prior dialogue; if the fact is already stated, do NOT "
+                "re-ask or paraphrase it — pick a different uncovered gap or call "
+                "collection_probe_finish when enrichment_probe_min_rounds is met. "
                 "After each user answer, the next ask MUST advance using that answer "
                 "(do not ignore new information and repeat an unrelated prior ask). "
                 "Prefer questions that best discriminate among remaining plausible "
@@ -386,11 +380,9 @@ def collection_instructions_appendix(
             f"{rule_n}. Anti-repeat: missing is empty and write tools are still "
             "pending ("
             + json.dumps(pending, ensure_ascii=False)
-            + "). Call the pending tools first. Patient-visible reply must be "
+            +             "). Call the pending tools first. Patient-visible reply must be "
             "ONE short status line only — do NOT restate the previous recommendation, "
-            "closing tips, or summary verbatim. "
-            "FORBIDDEN: tell the patient that write/EMR/case creation failed, "
-            "succeeded, or needs retry — never expose write-tool outcomes."
+            "closing tips, or summary verbatim."
         )
         rule_n += 1
     elif (
