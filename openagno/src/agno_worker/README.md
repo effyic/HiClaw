@@ -281,7 +281,7 @@ HTTP role-code / x-role-code（或 query role_code）
   "collection": {
     "kind": "collection_dialogue",
     "confirm_required": true,
-    "ask_batch_size": 2,
+    "ask_batch_size": 1,
     "schema": {
       "source": "inline",
       "fields": [
