@@ -157,19 +157,21 @@ higress:
   higress-core:
     gateway:
       replicas: 1
-      httpPort: 80
-      httpsPort: 443
+      # Avoid hostPort 80/443 — k3s Traefik ServiceLB already binds them.
+      # Match gateway.publicURL NodePort-style ports on single-node installs.
+      httpPort: 30080
+      httpsPort: 30443
       service:
         type: ClusterIP
         ports:
           - name: http2
-            port: 80
+            port: 30080
             protocol: TCP
-            targetPort: 80
+            targetPort: 30080
           - name: https
-            port: 443
+            port: 30443
             protocol: TCP
-            targetPort: 443
+            targetPort: 30443
     controller:
       replicas: 1
       image: higress
@@ -280,10 +282,10 @@ worker:
       repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-copaw-worker
       tag: ""
     hermes:
-      repository: hiclaw/hermes-worker
+      repository: swr.cn-north-4.myhuaweicloud.com/registry-huawei/effyic/hermes-worker
       tag: "latest"
     agno:
-      repository: hiclaw/agno-worker
+      repository: swr.cn-north-4.myhuaweicloud.com/registry-huawei/effyic/agno-worker
       tag: "latest"
     openhuman:
       repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-openhuman-worker

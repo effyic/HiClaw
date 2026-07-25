@@ -114,7 +114,7 @@ sensitiveContent:
 # ── Worker defaults ───────────────────────────────────────────────────────
 worker:
   image:
-    repository: hiclaw/agno-worker
+    repository: swr.cn-north-4.myhuaweicloud.com/registry-huawei/effyic/agno-worker
     tag: latest
 
 globalEnv:
