@@ -42,6 +42,31 @@ def _config_with_scripts(**extra):
     return cfg
 
 
+def _two_reply_config():
+    return _config_with_scripts(
+        required_actions=[
+            {
+                "type": "reply",
+                "field": "阶段小结",
+                "user_visible": True,
+                "when": "missing_empty",
+            },
+            {
+                "type": "reply",
+                "field": "推荐科室",
+                "user_visible": True,
+                "when": "missing_empty",
+            },
+            {
+                "type": "mcp",
+                "tool": "mec_create_emr_case",
+                "when": "missing_empty",
+                "user_visible": False,
+            },
+        ]
+    )
+
+
 def test_resolve_scripts_config():
     assert resolve_scripts_config({}) is None
     scripts = resolve_scripts_config(_config_with_scripts())
@@ -80,14 +105,101 @@ def test_apply_scripts_marks_opening_after_reply():
 
 
 def test_appendix_requires_closing_when_ready():
-    config = _config_with_scripts()
-    state = empty_collection_state()
-    state = update_collected_fields(
-        state, {"主诉": "头晕", "推荐科室": "神经内科[sjnk]"}, config
+    config = _config_with_scripts(
+        required_actions=[
+            {
+                "type": "reply",
+                "field": "推荐科室",
+                "user_visible": True,
+                "when": "missing_empty",
+            },
+            {
+                "type": "mcp",
+                "tool": "mec_create_emr_case",
+                "when": "missing_empty",
+                "user_visible": False,
+            },
+        ]
     )
+    state = empty_collection_state()
+    state = update_collected_fields(state, {"主诉": "头晕"}, config)
+    state["collected"]["推荐科室"] = "神经内科[sjnk]"
     state["phase"] = PHASE_READY
     state["probe_done"] = True
     state["opening_delivered"] = True
     text = collection_instructions_appendix(state, config)
-    assert "CLOSING REQUIRED" in text
+    assert "REQUIRED ACTIONS (silent chain)" in text
+
+
+def test_progress_after_first_reply_no_closing():
+    from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+        compose_patient_reply_progress,
+    )
+
+    config = _two_reply_config()
+    state = empty_collection_state()
+    state["collected"] = {
+        "阶段小结": "目前信息已汇总如下。",
+    }
+    state["actions_done"] = {"reply:阶段小结": {"ok": True}}
+    text = compose_patient_reply_progress(state, config)
+    assert text == "目前信息已汇总如下。"
+    assert "温馨提示" not in text
+
+
+def test_progress_after_last_reply_includes_closing_before_mcp():
+    from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+        compose_patient_reply_progress,
+    )
+
+    config = _two_reply_config()
+    state = empty_collection_state()
+    state["collected"] = {
+        "阶段小结": "目前信息已汇总如下。",
+        "推荐科室": "神经内科[sjnk]",
+    }
+    state["actions_done"] = {
+        "reply:阶段小结": {"ok": True},
+        "reply:推荐科室": {"ok": True},
+    }
+    text = compose_patient_reply_progress(state, config)
+    assert "目前信息已汇总如下。" in text
+    assert "建议您挂：神经内科[sjnk]" in text
+    assert text.index("目前信息已汇总如下。") < text.index("建议您挂")
     assert "温馨提示：带好证件" in text
+
+
+def test_compose_single_reply_with_reason_and_closing():
+    from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+        compose_patient_reply_progress,
+    )
+
+    config = _config_with_scripts(
+        required_actions=[
+            {
+                "type": "reply",
+                "field": "推荐科室",
+                "user_visible": True,
+                "reason_field": "分科理由",
+                "when": "missing_empty",
+            },
+            {
+                "type": "mcp",
+                "tool": "mec_create_emr_case",
+                "when": "missing_empty",
+                "user_visible": False,
+            },
+        ]
+    )
+    state = empty_collection_state()
+    state["collected"] = {
+        "分科理由": "头晕与体位相关，优先考虑神经系统问题。",
+        "推荐科室": "神经内科[sjnk]",
+    }
+    state["actions_done"] = {"reply:推荐科室": {"ok": True}}
+    text = compose_patient_reply_progress(state, config)
+    assert text is not None
+    assert text.count("建议您挂") == 1
+    assert text.count("温馨提示") == 1
+    assert "体位相关" in text
+    assert text.index("体位相关") < text.index("建议您挂")

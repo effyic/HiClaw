@@ -6,12 +6,11 @@ import logging
 from typing import Any
 
 from agno_worker.tenant.collection.kinds.dialogue.config import (
-    REQUIRED_ACTIONS_MODE_CONCURRENT,
     confirm_required,
     reply_action_fields,
+    reply_companion_field_names,
     required_action_auto_mark_done,
     required_action_key,
-    required_actions_mode,
     resolve_probe_config,
     resolve_required_actions,
 )
@@ -27,12 +26,11 @@ from agno_worker.tenant.collection.kinds.dialogue.constants import (
 )
 from agno_worker.tenant.collection.kinds.dialogue.schema import (
     compute_missing,
-    field_is_after_probe,
     normalize_schema_fields,
     resolve_field_probe,
     resolve_inline_schema_fields,
-    schema_field_names,
     schema_source,
+    writable_field_names,
     _schema_field_by_name,
     _validate_field_value,
 )
@@ -64,10 +62,9 @@ def pre_probe_field_names(
 ) -> list[str]:
     """Ordered collectable slots before enrichment probe (cursor walk order).
 
-    Includes required fields that are not deferred. Optional (``required=false``)
-    fields are never walked by the cursor (they may still be written when the
-    cursor is idle / via explicit update after enrichment). Deferred slots:
-    ``after_probe=true`` or referenced by ``required_actions`` type=reply.
+    Includes required schema fields that are not deferred result slots.
+    Optional (``required=false``) fields are never walked by the cursor.
+    Deferred slots are those referenced by ``required_actions`` type=reply.
     """
     deferred = reply_action_fields(config)
     names: list[str] = []
@@ -77,7 +74,7 @@ def pre_probe_field_names(
             continue
         if not as_bool(field.get("required"), True):
             continue
-        if field_is_after_probe(field) or name in deferred:
+        if name in deferred:
             continue
         names.append(name)
     return names
@@ -87,13 +84,9 @@ def deferred_required_fields(
     schema: list[dict[str, Any]],
     config: dict[str, Any] | None = None,
 ) -> set[str]:
-    """Fields that may stay missing until their reply required_action is current."""
-    deferred = set(reply_action_fields(config))
-    for field in schema or []:
-        name = str(field.get("name") or "").strip()
-        if name and field_is_after_probe(field):
-            deferred.add(name)
-    return deferred
+    """Result slots that may stay missing until their reply required_action is current."""
+    _ = schema
+    return set(reply_action_fields(config))
 
 
 def _normalize_field_probe_entry(raw: Any) -> dict[str, Any]:
@@ -286,7 +279,7 @@ def is_probe_ready(state: dict[str, Any], config: dict[str, Any] | None) -> bool
     """Whether post-required enrichment may start.
 
     Requires at least one pre-probe collectable field that is fully collected
-    (+ field probes done). Schemas with only deferred / after_probe slots never
+    (+ field probes done). Schemas with only deferred reply-result slots never
     enter enrichment (avoids an empty probing loop with nothing to enrich).
     """
     probe = resolve_probe_config(config)
@@ -306,7 +299,7 @@ def is_probe_finished(state: dict[str, Any], config: dict[str, Any] | None) -> b
     """True when enrichment is disabled, skipped, finished, or max rounds reached.
 
     When the schema has no pre-probe collectable fields, enrichment is skipped
-    (treated as finished) so deferred / after_probe slots can proceed.
+    (treated as finished) so deferred reply-result slots can proceed.
     """
     probe = resolve_probe_config(config)
     if not probe:
@@ -340,7 +333,7 @@ def required_action_pipeline_ready(
 ) -> bool:
     """Whether the required_actions serial pipeline may start."""
     current = ensure_collection_state(state, config)
-    if not current.get("schema"):
+    if not current.get("schema") and not reply_action_fields(config):
         return False
     if is_field_probe_active(current):
         return False
@@ -425,7 +418,7 @@ def required_action_when_met(
     *,
     for_mark_done: bool = False,
 ) -> bool:
-    """Whether a required_action may run / be recorded now."""
+    """Whether a required_action may run / be recorded now (serial order)."""
     when = str(action.get("when") or "missing_empty")
     if when == "before_mark_done":
         return bool(for_mark_done)
@@ -433,9 +426,6 @@ def required_action_when_met(
         return False
     if is_required_action_completed(state, action):
         return False
-    mode = required_actions_mode(config)
-    if mode == REQUIRED_ACTIONS_MODE_CONCURRENT:
-        return True
     current = current_required_action(state, config, for_mark_done=for_mark_done)
     if not current:
         return False
@@ -446,12 +436,10 @@ def hard_gated_tool_names(
     state: dict[str, Any],
     config: dict[str, Any] | None,
 ) -> set[str]:
-    """MCP tool names that must be hidden until their turn / pipeline ready."""
+    """MCP tool names that must be hidden until their serial turn / pipeline ready."""
     if not config:
         return set()
     blocked: set[str] = set()
-    mode = required_actions_mode(config)
-    pipeline_ready = required_action_pipeline_ready(state, config)
     current = current_required_action(state, config)
     current_key = required_action_key(current) if current else ""
     for action in resolve_required_actions(config):
@@ -466,13 +454,8 @@ def hard_gated_tool_names(
             continue
         if is_required_action_completed(state, action):
             continue
-        if mode == REQUIRED_ACTIONS_MODE_CONCURRENT:
-            # Concurrent: hide only until the whole pipeline may start; then all
-            # incomplete MCP required_actions are visible in the same turn.
-            if not pipeline_ready:
-                blocked.add(tool)
-            continue
-        # Serial: only the current MCP step is visible; others stay hidden.
+        # Serial: only the current MCP step is visible; earlier reply steps must
+        # finish first (same turn OK — tools refresh after collection_update_fields).
         if required_action_key(action) != current_key:
             blocked.add(tool)
     return blocked
@@ -527,40 +510,26 @@ def pending_required_actions(
     *,
     for_mark_done: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return incomplete required_actions that are actionable now."""
+    """Return incomplete required_actions (definition order) once the pipeline is ready.
+
+    Lists the full remaining chain so prompts can require finishing it in the same
+    turn. MCP hard-gate still exposes only the current step (see
+    :func:`hard_gated_tool_names`).
+    """
     current = ensure_collection_state(state, config)
     actions = resolve_required_actions(config)
     if not actions:
         return []
     if not required_action_pipeline_ready(current, config, for_mark_done=for_mark_done):
         return []
-    mode = required_actions_mode(config)
-    if mode == REQUIRED_ACTIONS_MODE_CONCURRENT:
-        pending: list[dict[str, Any]] = []
-        for action in actions:
-            when = str(action.get("when") or "missing_empty")
-            if when == "before_mark_done" and not for_mark_done:
-                continue
-            if is_required_action_completed(current, action):
-                continue
-            pending.append(action)
-        return pending
-
-    pending = []
-    seen_current = False
-    active = current_required_action(current, config, for_mark_done=for_mark_done)
-    active_key = required_action_key(active) if active else ""
+    pending: list[dict[str, Any]] = []
     for action in actions:
-        key = required_action_key(action)
+        when = str(action.get("when") or "missing_empty")
+        if when == "before_mark_done" and not for_mark_done:
+            continue
         if is_required_action_completed(current, action):
             continue
-        if not seen_current:
-            if key != active_key:
-                continue
-            seen_current = True
         pending.append(action)
-        # Serial: only expose the current step in prompts/status pending list.
-        break
     return pending
 
 
@@ -570,14 +539,19 @@ def pending_required_action_tools(
     *,
     for_mark_done: bool = False,
 ) -> list[str]:
-    """Return pending MCP tool names among actionable required_actions."""
+    """Return MCP tools that are actionable now (serial current step only)."""
     pending: list[str] = []
-    for action in pending_required_actions(state, config, for_mark_done=for_mark_done):
+    for action in resolve_required_actions(config):
         if str(action.get("type") or "") != "mcp":
             continue
         tool = str(action.get("tool") or "").strip()
-        if tool:
-            pending.append(tool)
+        if not tool:
+            continue
+        if not required_action_when_met(
+            state, config, action, for_mark_done=for_mark_done
+        ):
+            continue
+        pending.append(tool)
     return pending
 
 
@@ -648,10 +622,12 @@ def _apply_pending_collected(
             break
         raw = pending.pop(current)
         collected = dict(out.get("collected") or {})
-        collected[current] = _validate_field_value(out.get("schema") or [], current, str(raw))
+        collected[current] = _validate_field_value(
+            out.get("schema") or [], current, str(raw), config
+        )
         out["collected"] = collected
         out["pending_collected"] = pending
-        out["missing"] = compute_missing(out.get("schema") or [], collected)
+        out["missing"] = compute_missing(out.get("schema") or [], collected, config)
         logger.info("collection cursor: applied pending %s", current)
         out = sync_field_cursor(out, config)
         # Newly filled field may enter probe; do not auto-skip unless min=0
@@ -907,7 +883,7 @@ def ensure_collection_state(
     if config and schema_source(config) == "inline":
         state = reconcile_inline_schema_from_config(state, config)
     elif state["schema"]:
-        state["missing"] = compute_missing(state["schema"], state["collected"])
+        state["missing"] = compute_missing(state["schema"], state["collected"], config)
     state = ensure_field_probe_maps(state)
     return sync_field_cursor(state, config)
 
@@ -924,6 +900,8 @@ def reconcile_inline_schema_from_config(
         for field in latest
         if str(field.get("name") or "").strip()
     }
+    allowed |= reply_action_fields(config)
+    allowed |= reply_companion_field_names(config)
     collected_in = out.get("collected") if isinstance(out.get("collected"), dict) else {}
     out["collected"] = {
         str(k): v
@@ -931,7 +909,7 @@ def reconcile_inline_schema_from_config(
         if str(k).strip() and str(k).strip() in allowed
     }
     out["schema"] = latest
-    out["missing"] = compute_missing(out["schema"], out["collected"])
+    out["missing"] = compute_missing(out["schema"], out["collected"], config)
     if out["schema"] and out.get("phase") == PHASE_INIT:
         out["phase"] = PHASE_COLLECTING
     elif not out["schema"]:
@@ -945,20 +923,20 @@ def advance_collection_phase(
 ) -> dict[str, Any]:
     """Deterministically advance phase from collected/missing/probe/confirm flags."""
     out = ensure_collection_state(state, config)
-    if not out["schema"]:
-        out["phase"] = PHASE_INIT
-        return out
-
-    out["missing"] = compute_missing(out["schema"], out["collected"])
+    out["missing"] = compute_missing(out["schema"], out["collected"], config)
     out = sync_reply_actions_done(out, config)
     out = sync_field_cursor(out, config)
+
+    if not out["schema"] and not reply_action_fields(config):
+        out["phase"] = PHASE_INIT
+        return out
 
     # Cursor still on a collectable field (ask or field-probe).
     if str(out.get("current_field") or "").strip():
         out["phase"] = PHASE_COLLECTING
         return out
 
-    # Global probe may start before after_probe / reply-action slots are filled.
+    # Global probe may start before reply-action result slots are filled.
     if is_probe_active(out, config):
         out["phase"] = PHASE_PROBING
         return out
@@ -1031,10 +1009,16 @@ def load_schema_into_state(
                 f"(call the schema tool then collection_load_schema with the result)"
             )
     if not schema_fields:
+        if reply_action_fields(config):
+            out["schema"] = []
+            out["missing"] = compute_missing(out["schema"], out["collected"], config)
+            if out.get("phase") == PHASE_INIT:
+                out["phase"] = PHASE_COLLECTING
+            return advance_collection_phase(out, config)
         raise ValueError("no schema fields available to load")
 
     out["schema"] = schema_fields
-    out["missing"] = compute_missing(out["schema"], out["collected"])
+    out["missing"] = compute_missing(out["schema"], out["collected"], config)
     if out["phase"] == PHASE_INIT:
         out["phase"] = PHASE_COLLECTING
     return advance_collection_phase(out, config)
@@ -1059,16 +1043,16 @@ def update_collected_fields(
     out = ensure_collection_state(state, config)
     if not isinstance(updates, dict) or not updates:
         raise ValueError("fields must be a non-empty object of {name: value}")
-    if not out["schema"]:
+    if not out["schema"] and not reply_action_fields(config):
         raise ValueError(
             "schema is empty; call collection_load_schema before collection_update_fields"
         )
 
-    allowed = schema_field_names(out["schema"])
+    allowed = writable_field_names(out["schema"], config)
     unknown = [str(k).strip() for k in updates if str(k).strip() and str(k).strip() not in allowed]
     if unknown:
         raise ValueError(
-            "unknown field names (must match schema): "
+            "unknown field names (must match schema or reply result slots): "
             + ", ".join(unknown)
             + "; allowed="
             + ", ".join(sorted(allowed))
@@ -1095,7 +1079,7 @@ def update_collected_fields(
     if not normalized:
         raise ValueError("fields must be a non-empty object of {name: value}")
 
-    # Hard-gate after_probe / deferred decision slots until global probe ends
+    # Hard-gate deferred reply-result slots until global probe ends
     # and the collectable cursor is idle.
     probe_blocked = bool(probe_cfg) and (
         bool(out.get("current_field")) or not is_probe_finished(out, config)
@@ -1103,7 +1087,7 @@ def update_collected_fields(
     for name in list(normalized):
         if name in deferred and probe_blocked:
             raise ValueError(
-                f"field {name!r} is after_probe / deferred; "
+                f"field {name!r} is deferred / reply result; "
                 "finish probe (probe_done) before collection_update_fields"
             )
 
@@ -1136,11 +1120,11 @@ def update_collected_fields(
     applied: dict[str, str] = {}
 
     # After collectable cursor is done, allow writing deferred / remaining missing
-    # (e.g. decision slots with after_probe) without a current_field.
+    # (reply result slots) without a current_field.
     if not current:
         collected = dict(out["collected"])
         for name, text in normalized.items():
-            collected[name] = _validate_field_value(out["schema"], name, text)
+            collected[name] = _validate_field_value(out["schema"], name, text, config)
         out["collected"] = collected
         out["pending_collected"] = pending
         return advance_collection_phase(out, config)
@@ -1153,7 +1137,7 @@ def update_collected_fields(
         if name in deferred:
             # Deferred slots are never walked by the cursor — do not stash forever.
             raise ValueError(
-                f"field {name!r} is after_probe / deferred; "
+                f"field {name!r} is deferred / reply result; "
                 "finish enrichment probe (probe_done) and clear the collectable "
                 "cursor before collection_update_fields"
             )
@@ -1175,7 +1159,7 @@ def update_collected_fields(
 
     collected = dict(out["collected"])
     for name, text in applied.items():
-        collected[name] = _validate_field_value(out["schema"], name, text)
+        collected[name] = _validate_field_value(out["schema"], name, text, config)
     out["collected"] = collected
     out["pending_collected"] = pending
     if stashed:

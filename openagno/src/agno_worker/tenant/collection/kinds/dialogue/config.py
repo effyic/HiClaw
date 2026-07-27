@@ -85,7 +85,7 @@ def resolve_probe_config(config: dict[str, Any] | None) -> dict[str, Any] | None
       many notes. After min and before max, the model may finish early.
     - ``max_rounds``: auto-complete enrichment when note count reaches this.
     - ``allow_skip``: when false, finish is blocked until max_rounds.
-    - Deferred slots use ``schema.fields[].after_probe=true`` (decision slots).
+    - Deferred result slots are ``required_actions`` type=reply (not schema fields).
     - Per-field enrichment uses ``schema.fields[].probe``, not this block.
     """
     if not isinstance(config, dict):
@@ -128,27 +128,11 @@ def probe_max_rounds(config: dict[str, Any] | None) -> int:
 
 
 REQUIRED_ACTIONS_MODE_SERIAL = "serial"
-REQUIRED_ACTIONS_MODE_CONCURRENT = "concurrent"
 
 
 def required_actions_mode(config: dict[str, Any] | None) -> str:
-    """How ``required_actions`` may execute once the pipeline is ready.
-
-    - ``serial``: only the current incomplete step is actionable; later MCP tools
-      stay hard-gated until prior steps complete (may span turns).
-    - ``concurrent``: all incomplete steps are actionable in the same turn
-      (reply fields + MCP tools visible together). Definition order is preferred
-      in prompts but not hard-enforced between steps.
-    """
-    if not config:
-        return REQUIRED_ACTIONS_MODE_SERIAL
-    raw = str(
-        config.get("required_actions_mode")
-        or config.get("required_action_mode")
-        or ""
-    ).strip().lower()
-    if raw in {REQUIRED_ACTIONS_MODE_SERIAL, REQUIRED_ACTIONS_MODE_CONCURRENT}:
-        return raw
+    """Execution policy for ``required_actions`` (always serial)."""
+    _ = config
     return REQUIRED_ACTIONS_MODE_SERIAL
 
 
@@ -158,10 +142,16 @@ def resolve_required_actions(config: dict[str, Any] | None) -> list[dict[str, An
     Supported ``type`` values:
 
     - ``mcp``: require a successful MCP tool call (``tool``).
-    - ``reply``: require collecting a schema field and producing the patient-facing
-      closing / recommendation content for that field (``field``).
+    - ``reply``: require writing an end-of-flow result slot (``field``) and
+      (when ``user_visible``) producing the patient-facing closing for that slot.
+      Slot constraints (``goal`` / ``pattern`` / ``exports``) may live on the
+      action and/or on a same-named ``schema.fields[]`` entry; runtime merges
+      both (reply overlays schema on conflict).
+    - ``user_visible``: whether this step may/must emit patient-facing text.
+      Defaults: ``reply`` → true, ``mcp`` → false. Non-visible steps must not
+      restate closing/recommendation (tools only).
 
-    Execution policy is controlled by :func:`required_actions_mode`.
+    Always serial: complete the remaining chain in order within the same turn.
     """
     if not config:
         return []
@@ -176,8 +166,30 @@ def resolve_required_actions(config: dict[str, Any] | None) -> list[dict[str, An
     return actions
 
 
+def last_reply_required_action(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Last ``type=reply`` step in ``required_actions`` definition order."""
+    last: dict[str, Any] | None = None
+    for action in resolve_required_actions(config):
+        if str(action.get("type") or "") == "reply":
+            last = action
+    return last
+
+
+def user_visible_reply_required_actions(
+    config: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Reply steps with ``user_visible=true`` (default true for reply)."""
+    out: list[dict[str, Any]] = []
+    for action in resolve_required_actions(config):
+        if str(action.get("type") or "") != "reply":
+            continue
+        if action.get("user_visible", True):
+            out.append(action)
+    return out
+
+
 def reply_action_fields(config: dict[str, Any] | None) -> set[str]:
-    """Schema field names referenced by ``type=reply`` required actions."""
+    """Result slot names referenced by ``type=reply`` required actions."""
     names: set[str] = set()
     for action in resolve_required_actions(config):
         if str(action.get("type") or "") != "reply":
@@ -186,6 +198,42 @@ def reply_action_fields(config: dict[str, Any] | None) -> set[str]:
         if field:
             names.add(field)
     return names
+
+
+def reply_companion_field_names(config: dict[str, Any] | None) -> set[str]:
+    """Extra collected keys referenced by reply actions (e.g. reason_field)."""
+    names: set[str] = set()
+    for action in resolve_required_actions(config):
+        if str(action.get("type") or "") != "reply":
+            continue
+        companion = str(action.get("reason_field") or "").strip()
+        if companion:
+            names.add(companion)
+    return names
+
+
+def reply_result_slots(config: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Decision/result slots defined on ``required_actions`` type=reply.
+
+    These are **not** cursor-collect fields. Constraint keys
+    (``goal`` / ``pattern`` / ``exports``) share the same extractor as
+    ``schema.fields[]``; runtime merges both sources via ``resolve_field_def``.
+    """
+    from agno_worker.tenant.collection.kinds.dialogue.schema import apply_slot_constraints
+
+    slots: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for action in resolve_required_actions(config):
+        if str(action.get("type") or "") != "reply":
+            continue
+        name = str(action.get("field") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        slot: dict[str, Any] = {"name": name, "required": True}
+        apply_slot_constraints(slot, action)
+        slots.append(slot)
+    return slots
 
 
 def suggested_write_tool(config: dict[str, Any] | None) -> str | None:
@@ -216,23 +264,42 @@ def _normalize_required_action(item: Any) -> dict[str, Any] | None:
             hard_gate = as_bool(item.get("hard_gate"), True)
         else:
             hard_gate = when == "missing_empty"
+        user_visible = (
+            as_bool(item.get("user_visible"), False)
+            if "user_visible" in item
+            else False
+        )
         return {
             "type": "mcp",
             "tool": tool,
             "when": when,
             "hard_gate": hard_gate,
+            "user_visible": user_visible,
         }
 
     if action_type == "reply":
         field = str(item.get("field") or item.get("name") or "").strip()
         if not field:
             return None
-        return {
+        from agno_worker.tenant.collection.kinds.dialogue.schema import apply_slot_constraints
+
+        user_visible = (
+            as_bool(item.get("user_visible"), True)
+            if "user_visible" in item
+            else True
+        )
+        out: dict[str, Any] = {
             "type": "reply",
             "field": field,
             "when": when,
             "hard_gate": False,
+            "user_visible": user_visible,
         }
+        apply_slot_constraints(out, item)
+        reason_field = str(item.get("reason_field") or "").strip()
+        if reason_field:
+            out["reason_field"] = reason_field
+        return out
 
     return None
 

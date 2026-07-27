@@ -296,23 +296,11 @@ class AgentBuilder:
                 coll = apply_required_actions_from_run(coll, coll_cfg, run_output)
                 reply_text = None
                 if run_output is not None and hasattr(run_output, "content"):
-                    from agno_worker.runtime.structured_output import (
-                        content_to_reply_text,
-                        prefer_last_assistant_after_tools,
-                    )
+                    from agno_worker.runtime.structured_output import content_to_reply_text
 
-                    preferred = prefer_last_assistant_after_tools(run_output)
-                    if preferred is not None:
-                        reply_text = preferred
-                    else:
-                        reply_text = content_to_reply_text(
-                            getattr(run_output, "content", None)
-                        )
-                had_reply = bool((reply_text or "").strip())
-                was_closing = bool(coll.get("closing_delivered"))
-                coll = apply_scripts_progress_from_run(
-                    coll, coll_cfg, had_patient_reply=had_reply
-                )
+                    reply_text = content_to_reply_text(
+                        getattr(run_output, "content", None)
+                    )
 
                 salvaged: list = []
                 if reply_text is not None:
@@ -327,30 +315,31 @@ class AgentBuilder:
                 )
                 if reply_text is not None:
                     coll = apply_ask_quality_tracking(coll, coll_cfg, reply_text)
-                # Closing turn: restore reply-field substance if tools kept only
-                # scripts.closing as the last assistant segment.
-                just_closed = (not was_closing) and bool(coll.get("closing_delivered"))
-                if reply_text is not None and just_closed:
-                    from agno_worker.tenant.collection.kinds.dialogue.scripts import (
-                        ensure_reply_fields_visible,
-                    )
+                from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+                    compose_or_keep_patient_reply,
+                )
 
-                    reply_text = ensure_reply_fields_visible(
-                        reply_text, coll, coll_cfg
-                    )
+                reply_text = compose_or_keep_patient_reply(reply_text, coll, coll_cfg)
+                had_reply = bool((reply_text or "").strip())
+                coll = apply_scripts_progress_from_run(
+                    coll, coll_cfg, had_patient_reply=had_reply
+                )
                 run_context.session_state[COLLECTION_STATE_KEY] = coll
                 if isinstance(coll, dict) and coll.get("phase"):
                     run_context.session_state["phase"] = coll["phase"]
 
-                if reply_text is not None:
-                    # Pending-action / probe reminders stay INTERNAL (next-turn
-                    # instructions via probe_nudge_due). Do not append [系统提示]
-                    # into patient-visible content — that caused models to print
-                    # collection_probe_note(...) as chat text.
-                    run_output.content = append_status_marker(
-                        reply_text, coll, config=coll_cfg
-                    )
-                    reply_text = str(run_output.content or "")
+                # Always rewrite patient content on collection turns. If compose
+                # stripped a premature scripts.closing to empty, we must still
+                # overwrite run_output.content — otherwise the raw closing sticks.
+                visible = str(reply_text or "").strip()
+                run_output.content = append_status_marker(
+                    visible, coll, config=coll_cfg
+                )
+                reply_text = str(run_output.content or "")
+                _sync_last_assistant_message(
+                    run_output,
+                    visible,
+                )
                 # Prefer metadata for streaming H5 clients (reply chunks omit marker).
                 # Include dept_code parsed from collected slots and/or reply text.
                 status = collection_status_payload(
@@ -417,6 +406,32 @@ class AgentBuilder:
         except Exception:
             logger.exception("Failed to build OpenAIResponses; falling back to model id string")
             return f"openai:{default_model}"
+
+
+def _sync_last_assistant_message(run_output: Any, patient_text: str) -> None:
+    """Overwrite the last assistant message content with protocol-composed text.
+
+    Agno persists both ``run.content`` and ``messages[]``. Compose updates
+    ``content``, but raw ``messages`` often still hold only ``scripts.closing``.
+    """
+    text = str(patient_text or "").strip()
+    if not text or run_output is None:
+        return
+    messages = getattr(run_output, "messages", None)
+    if not isinstance(messages, list) or not messages:
+        return
+    for msg in reversed(messages):
+        role = str(getattr(msg, "role", None) or "").lower()
+        if role not in {"assistant", "model"}:
+            continue
+        try:
+            if isinstance(msg, dict):
+                msg["content"] = text
+            else:
+                setattr(msg, "content", text)
+        except Exception:
+            logger.debug("failed to sync assistant message content", exc_info=True)
+        return
 
 
 def _extract_session_id(session: Any, run_context: Any) -> str:

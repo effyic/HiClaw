@@ -156,6 +156,17 @@ def build_collection_tools() -> list[Any]:
                 payload["hint"] = (
                     f"current_field={cursor!r} stage=collect: ask/write ONLY this field."
                 )
+            next_mcp = pending_required_action_tools(state, config)
+            if next_mcp and not (state.get("missing") or []):
+                payload["next_required_mcp"] = next_mcp
+                prev_hint = str(payload.get("hint") or "").strip()
+                unlock = (
+                    "Reply required_action field(s) are filled; NOW call "
+                    + json.dumps(next_mcp, ensure_ascii=False)
+                    + " in THIS same turn (serial chain). Ensure patient-visible "
+                    "summary/recommendation was already output."
+                )
+                payload["hint"] = f"{prev_hint} {unlock}".strip() if prev_hint else unlock
             return json.dumps(payload, ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)

@@ -5,7 +5,6 @@ import json
 from typing import Any
 
 from agno_worker.tenant.collection.kinds.dialogue.config import (
-    REQUIRED_ACTIONS_MODE_CONCURRENT,
     ask_batch_size,
     confirm_required,
     required_actions_mode,
@@ -29,7 +28,11 @@ from agno_worker.tenant.collection.kinds.dialogue.core import (
     pending_required_actions,
     pre_probe_field_names,
 )
-from agno_worker.tenant.collection.kinds.dialogue.schema import schema_source
+from agno_worker.tenant.collection.kinds.dialogue.schema import (
+    field_ask_goal,
+    iter_resolved_field_defs,
+    schema_source,
+)
 from agno_worker.tenant.collection.kinds.dialogue.scripts import (
     _append_dialogue_scripts_rules,
 )
@@ -150,9 +153,12 @@ def collection_instructions_appendix(
     if current.get("ask_quality_nudge_due"):
         lines.append(
             "4c. PREVIOUS TURN ask-quality miss (multi-question, A-or-B, or repeated ask). "
-            "This turn: exactly ONE atomic question; no '还是/或者' choice; "
-            "explicitly build on the user's latest answer; FORBIDDEN to repeat "
-            "or paraphrase the prior question — ask a different next gap."
+            "This turn MUST: (1) collection_update_fields for current_field using the "
+            "user's latest answer + any extractable later fields into the same call "
+            "(stashed by protocol) — do NOT skip the write; "
+            "(2) then either finish field probe if min_rounds met, or ask exactly ONE "
+            "NEW atomic gap (no '还是/或者'; FORBIDDEN to repeat/paraphrase the prior "
+            "question)."
         )
     if cursor and stage == FIELD_STAGE_PROBE:
         field_cfg = None
@@ -163,7 +169,7 @@ def collection_instructions_appendix(
         fp = (field_cfg or {}).get("probe") if isinstance(field_cfg, dict) else None
         fp = fp if isinstance(fp, dict) else {}
         entry = (current.get("field_probes") or {}).get(cursor) or {}
-        goal = str(fp.get("goal") or "").strip()
+        goal = field_ask_goal(field_cfg)
         goal_clause = f" Follow field probe_goal: {goal}." if goal else ""
         rounds_now = int(entry.get("rounds") or 0)
         min_now = int(fp.get("min_rounds") or 0)
@@ -186,13 +192,15 @@ def collection_instructions_appendix(
                     else (
                         f"rounds>={min_now}: DEFAULT is collection_probe_finish(field="
                         f"{cursor!r}) in this turn — especially when collected["
-                        f"{cursor!r}] already has enough detail for the field goal. "
+                        f"{cursor!r}] already has enough detail for the field goal, "
+                        "OR when pending_collected already holds later fields "
+                        "(do NOT re-ask those stashed facts). "
                         "Only ask ONE new clarifying question about THIS field if a "
                         "clear information gap remains that is NOT already stated in "
                         f"collected[{cursor!r}], pending_collected, or prior dialogue. "
                         "FORBIDDEN to re-ask / paraphrase facts already inside "
-                        f"collected[{cursor!r}]. Writing the next field also "
-                        "auto-finishes when min_rounds is met. "
+                        f"collected[{cursor!r}] or pending_collected. Writing the next "
+                        "field also auto-finishes when min_rounds is met. "
                     )
                 )
                 + "If you ask, ask exactly 1 atomic clarifying question about THIS field. "
@@ -210,15 +218,26 @@ def collection_instructions_appendix(
         rule_base = 6
         write_tool = None
     elif cursor and stage == FIELD_STAGE_COLLECT:
+        field_cfg = None
+        for item in current.get("schema") or []:
+            if isinstance(item, dict) and str(item.get("name") or "").strip() == cursor:
+                field_cfg = item
+                break
+        goal = field_ask_goal(field_cfg)
+        goal_clause = f" Field ask goal: {goal}." if goal else ""
         lines.extend(
             [
                 f"5. FIELD CURSOR (stage=collect, field={cursor}): ask ONE question to "
-                f"obtain {cursor!r}, then collection_update_fields. "
-                "FORBIDDEN to ask later_fields "
+                f"obtain {cursor!r}, then collection_update_fields."
+                + goal_clause
+                + " FORBIDDEN to ask later_fields "
                 + json.dumps(later, ensure_ascii=False)
                 + ". If pending_collected already has "
                 f"{cursor!r}, do not re-ask — the protocol will auto-apply it after "
-                "the previous field probe ends.",
+                "the previous field probe ends. "
+                "CRITICAL: after the user answers, you MUST call collection_update_fields "
+                f"for {cursor!r} in THIS turn (plus any other extracted later fields). "
+                "FORBIDDEN to only re-ask without writing.",
             ]
         )
         rule_base = 6
@@ -269,7 +288,7 @@ def collection_instructions_appendix(
                 "collection_probe_finish is blocked until enrichment_probe_min_rounds. "
                 "Write/required_actions MCP tools are HARD-REMOVED while probing "
                 "(see write_tools_hard_gated); do not invent a write call. "
-                "Also forbidden: filling remaining after_probe / decision slots that "
+                "Also forbidden: filling remaining reply-result / decision slots that "
                 "should wait until after enrichment probe. "
                 "Prefer enrichment_probe_goal / hints and schema field guidance; "
                 "do not invent off-config topics beyond those.",
@@ -305,54 +324,47 @@ def collection_instructions_appendix(
             )
         )
         rule_base = 6
-    # required_actions: serial (one step) or concurrent (same-turn bundle).
-    if actions_mode == REQUIRED_ACTIONS_MODE_CONCURRENT and pending_actions:
+    # required_actions: serial ordered chain — finish remaining steps in THIS turn.
+    if pending_actions:
         reply_fields = [
             str(a.get("field") or "").strip()
             for a in pending_actions
             if str(a.get("type") or "") == "reply" and str(a.get("field") or "").strip()
         ]
-        mcp_tools = pending_required_action_tools(current, config)
+        reply_goals = []
+        from agno_worker.tenant.collection.kinds.dialogue.schema import resolve_field_def
+
+        for name in reply_fields:
+            field_cfg = resolve_field_def(current.get("schema") or [], name, config)
+            g = field_ask_goal(field_cfg)
+            if g:
+                reply_goals.append({"field": name, "goal": g})
+        chain = json.dumps(pending_actions, ensure_ascii=False)
         lines.append(
-            f"{rule_base}. REQUIRED ACTIONS (concurrent, same turn): complete ALL "
-            "pending required_actions in this turn when possible. "
+            f"{rule_base}. REQUIRED ACTIONS (serial, same turn): complete the FULL "
+            "remaining chain IN ORDER in THIS turn — tools and collection_update_fields "
+            "ONLY. Chain: "
+            + chain
+            + ". "
             + (
-                "Fill reply field(s) via collection_update_fields "
+                "For type=reply: write "
                 + json.dumps(reply_fields, ensure_ascii=False)
-                + " and output the user-facing recommendation/summary once; "
-                "patient-visible text MUST include the substance of those reply "
-                "field value(s) (brief OK) — do NOT only emit scripts.closing "
-                "while hiding the summary/recommendation solely inside the field. "
+                + " via collection_update_fields (and md_get_dept_list when needed). "
+                "Do NOT emit patient-facing text yourself — protocol renders after "
+                "EACH completed user_visible reply (cumulative); scripts.closing only "
+                "after the LAST type=reply in the chain completes. "
+                + (
+                    "Reply field goals: "
+                    + json.dumps(reply_goals, ensure_ascii=False)
+                    + ". "
+                    if reply_goals
+                    else ""
+                )
                 if reply_fields
                 else ""
             )
-            + (
-                "call MCP tool(s) "
-                + json.dumps(mcp_tools, ensure_ascii=False)
-                + " successfully in the same turn after the reply field(s) are written. "
-                if mcp_tools
-                else ""
-            )
-            + "Preferred order follows required_actions definition; do not leave "
-            "pending steps for a later turn unless a tool fails."
-        )
-        rule_n = rule_base + 1
-        if mcp_tools and not (current.get("missing") or []):
-            lines.append(
-                f"{rule_n}. Anti-repeat: after recommendation text is set, user-visible "
-                "closing must appear at most once this turn; do not emit a second full "
-                "recommendation block after MCP tools."
-            )
-            rule_n += 1
-        write_tool = None
-    elif active_action and str(active_action.get("type") or "") == "reply":
-        field = str(active_action.get("field") or "").strip()
-        lines.append(
-            f"{rule_base}. REQUIRED ACTION (serial, type=reply): current step is "
-            f"user-facing reply for schema field {field!r}. "
-            "Fill that field via collection_update_fields (after any needed lookup tools), "
-            "and output the recommendation/summary to the user in this turn. "
-            "Later MCP required_actions stay hard-gated until this reply step completes."
+            + "For type=mcp: call after prior reply writes succeed. "
+            "user_visible=false (default on mcp): no patient text after the tool."
         )
         rule_n = rule_base + 1
         write_tool = None
@@ -366,23 +378,29 @@ def collection_instructions_appendix(
     else:
         rule_n = rule_base
     pending = pending_required_action_tools(current, config)
-    if actions_mode != REQUIRED_ACTIONS_MODE_CONCURRENT and pending:
+    if pending:
         lines.append(
-            f"{rule_n}. REQUIRED ACTION (serial, type=mcp): call these tools "
-            "successfully first (do not only reply with text): "
+            f"{rule_n}. REQUIRED ACTION (serial, type=mcp, current): call these tools "
+            "successfully now (do not only reply with text): "
             + json.dumps(pending, ensure_ascii=False)
             + ". Earlier reply steps must already be done; collection_mark_done is "
             "blocked until the full required_actions chain succeeds."
         )
         rule_n += 1
-    if pending and not (current.get("missing") or []):
+    # Anti-repeat after reply result is done: pending write MCP must not restate.
+    reply_pending = any(
+        str(a.get("type") or "") == "reply" for a in pending_actions
+    )
+    if (
+        pending
+        and not reply_pending
+        and not (current.get("missing") or [])
+    ):
         lines.append(
-            f"{rule_n}. Anti-repeat: missing is empty and write tools are still "
-            "pending ("
+            f"{rule_n}. Anti-repeat / write-pending: reply slots are filled — call "
             + json.dumps(pending, ensure_ascii=False)
-            +             "). Call the pending tools first. Patient-visible reply must be "
-            "ONE short status line only — do NOT restate the previous recommendation, "
-            "closing tips, or summary verbatim."
+            + " only. FORBIDDEN patient-facing recommendation/summary/closing; "
+            "protocol already rendered or will render the single closing block."
         )
         rule_n += 1
     elif (
@@ -394,6 +412,7 @@ def collection_instructions_appendix(
             "user-visible reply MUST be brief (<=2 short sentences). "
             "FORBIDDEN: restate recommendation / decision reasons, closing tips, "
             "or the previous summary — even if the user asks again for the result. "
+            "FORBIDDEN: mention EMR / write-back / job submission status. "
             "If they re-ask, answer with only the already collected decision value "
             "in one line, nothing else."
         )
@@ -415,7 +434,7 @@ def collection_instructions_appendix(
             "pattern": f.get("pattern"),
             "pattern_message": f.get("pattern_message") or "",
         }
-        for f in (current.get("schema") or [])
+        for f in iter_resolved_field_defs(current.get("schema") or [], config)
         if isinstance(f, dict) and str(f.get("pattern") or "").strip()
     ]
     if patterned:
