@@ -9,6 +9,64 @@ from agno_worker.tenant.collection.kinds.dialogue.util import as_bool
 
 logger = logging.getLogger(__name__)
 
+# Shared constraint keys for schema.fields[] and required_actions type=reply.
+SLOT_CONSTRAINT_KEYS = ("goal", "pattern", "pattern_message", "exports")
+
+
+def extract_slot_constraints(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Pull goal / pattern / pattern_message / exports from a field or reply action.
+
+    Used by both ``schema.fields[]`` and ``required_actions`` type=reply so
+    validation / prompt / H5 export share one shape.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    goal = str(raw.get("goal") or "").strip()
+    if goal:
+        out["goal"] = goal
+    pattern = str(raw.get("pattern") or "").strip()
+    if pattern:
+        out["pattern"] = pattern
+    pattern_message = str(raw.get("pattern_message") or "").strip()
+    if pattern_message:
+        out["pattern_message"] = pattern_message
+    exports = raw.get("exports")
+    if isinstance(exports, dict) and exports:
+        cleaned = {str(k): v for k, v in exports.items() if str(k).strip()}
+        if cleaned:
+            out["exports"] = cleaned
+    return out
+
+
+def merge_slot_constraints(*sources: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge constraint dicts; later non-empty values win (exports merge by key)."""
+    out: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, dict) or not source:
+            continue
+        for key in ("goal", "pattern", "pattern_message"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                out[key] = value
+        exports = source.get("exports")
+        if isinstance(exports, dict) and exports:
+            merged_exports = dict(out.get("exports") or {})
+            for export_key, spec in exports.items():
+                name = str(export_key).strip()
+                if name:
+                    merged_exports[name] = spec
+            if merged_exports:
+                out["exports"] = merged_exports
+    return out
+
+
+def apply_slot_constraints(target: dict[str, Any], raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Copy extracted constraints onto ``target`` (mutates and returns it)."""
+    target.update(extract_slot_constraints(raw))
+    return target
+
+
 def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
     """Normalize schema fields; preserve generic constraints (pattern / exports).
 
@@ -33,22 +91,9 @@ def normalize_schema_fields(raw_fields: Any) -> list[dict[str, Any]]:
             continue
         field: dict[str, Any] = {
             "name": name,
-            "description": str(item.get("description") or "").strip(),
             "required": as_bool(item.get("required"), True),
         }
-        if as_bool(item.get("after_probe"), False):
-            field["after_probe"] = True
-        pattern = str(item.get("pattern") or "").strip()
-        if pattern:
-            field["pattern"] = pattern
-        pattern_message = str(item.get("pattern_message") or "").strip()
-        if pattern_message:
-            field["pattern_message"] = pattern_message
-        exports = item.get("exports")
-        if isinstance(exports, dict) and exports:
-            field["exports"] = {
-                str(k): v for k, v in exports.items() if str(k).strip()
-            }
+        apply_slot_constraints(field, item)
         field_probe = normalize_field_probe(item.get("probe"))
         if field_probe:
             field["probe"] = field_probe
@@ -110,11 +155,89 @@ def resolve_field_probe(field: dict[str, Any] | None) -> dict[str, Any] | None:
     return normalize_field_probe(probe)
 
 
-def field_is_after_probe(field: dict[str, Any] | None) -> bool:
-    """True when the field should be collected only after the global probe."""
+def field_ask_goal(field: dict[str, Any] | None) -> str:
+    """Business ask guidance for a field def (probe.goal, else field.goal)."""
     if not isinstance(field, dict):
-        return False
-    return as_bool(field.get("after_probe"), False)
+        return ""
+    probe = field.get("probe") if isinstance(field.get("probe"), dict) else {}
+    goal = str((probe or {}).get("goal") or "").strip()
+    if goal:
+        return goal
+    return str(field.get("goal") or "").strip()
+
+
+def resolve_field_def(
+    schema: list[dict[str, Any]] | None,
+    name: str,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Look up a field def with schema + reply constraints merged.
+
+    Precedence for overlapping ``goal`` / ``pattern`` / ``exports``:
+    schema fills first, then ``required_actions`` type=reply overlays
+    (reply wins on conflict). Probe / required flags stay on the schema side.
+    """
+    schema_field = _schema_field_by_name(schema or [], name)
+    reply_slot = _reply_slot_by_name(config, name)
+    if not schema_field and not reply_slot:
+        return None
+    if schema_field and not reply_slot:
+        return schema_field
+    if reply_slot and not schema_field:
+        return dict(reply_slot)
+    merged = dict(schema_field)
+    merged.update(
+        merge_slot_constraints(
+            extract_slot_constraints(schema_field),
+            extract_slot_constraints(reply_slot),
+        )
+    )
+    return merged
+
+
+def iter_resolved_field_defs(
+    schema: list[dict[str, Any]] | None,
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Ordered field defs for validate / export / missing / prompt.
+
+    Schema collect fields first (merged with reply meta when same name), then
+    reply-only result slots that are not already in schema.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for field in schema or []:
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        resolved = resolve_field_def([field], name, config)
+        out.append(resolved if resolved is not None else field)
+    if config:
+        from agno_worker.tenant.collection.kinds.dialogue.config import reply_result_slots
+
+        for slot in reply_result_slots(config):
+            name = str(slot.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(dict(slot))
+    return out
+
+
+def writable_field_names(
+    schema: list[dict[str, Any]] | None,
+    config: dict[str, Any] | None = None,
+) -> set[str]:
+    """Names allowed in collection_update_fields (schema + reply result slots)."""
+    names = set(schema_field_names(schema or []))
+    if config:
+        from agno_worker.tenant.collection.kinds.dialogue.config import reply_action_fields
+
+        names |= reply_action_fields(config)
+    return names
 
 
 def resolve_inline_schema_fields(config: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -135,13 +258,28 @@ def _schema_field_by_name(
     return None
 
 
+def _reply_slot_by_name(
+    config: dict[str, Any] | None,
+    name: str,
+) -> dict[str, Any] | None:
+    if not config or not name:
+        return None
+    from agno_worker.tenant.collection.kinds.dialogue.config import reply_result_slots
+
+    for slot in reply_result_slots(config):
+        if str(slot.get("name") or "").strip() == name:
+            return slot
+    return None
+
+
 def _validate_field_value(
     schema: list[dict[str, Any]],
     name: str,
     text: str,
+    config: dict[str, Any] | None = None,
 ) -> str:
-    """Enforce optional per-field ``pattern`` from published schema."""
-    field = _schema_field_by_name(schema, name)
+    """Enforce optional per-field ``pattern`` from schema and/or reply action."""
+    field = resolve_field_def(schema, name, config)
     if not field:
         return text
     pattern = str(field.get("pattern") or "").strip()
@@ -193,15 +331,12 @@ def apply_schema_exports(
     schema: list[dict[str, Any]] | None,
     collected: dict[str, Any] | None,
     reply_text: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Project schema field ``exports`` into flat keys for H5 / metadata."""
+    """Project merged field ``exports`` into flat keys for H5 / metadata."""
     out: dict[str, str] = {}
-    if not isinstance(schema, list):
-        return out
     collected_map = collected if isinstance(collected, dict) else {}
-    for field in schema:
-        if not isinstance(field, dict):
-            continue
+    for field in iter_resolved_field_defs(schema, config):
         exports = field.get("exports")
         if not isinstance(exports, dict) or not exports:
             continue
@@ -222,9 +357,11 @@ def apply_schema_exports(
 def compute_missing(
     schema: list[dict[str, Any]],
     collected: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> list[str]:
+    """Required schema fields + unfilled reply result slots (merged defs)."""
     missing: list[str] = []
-    for field in schema:
+    for field in iter_resolved_field_defs(schema, config):
         name = str(field.get("name") or "").strip()
         if not name:
             continue
@@ -234,7 +371,6 @@ def compute_missing(
         if value is None or (isinstance(value, str) and not value.strip()):
             missing.append(name)
     return missing
-
 
 
 def schema_source(config: dict[str, Any] | None) -> str:

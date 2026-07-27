@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -313,6 +314,18 @@ class AgnoRuntime:
         saw_assistant_content = False
         tools_after_content = False
         replace_emitted = False
+        completed_content: Any = None
+        completed_session_state: dict[str, Any] | None = self._session_state_from_any(
+            target
+        )
+        collection_run = self._is_collection_workflow(completed_session_state)
+        if not collection_run:
+            # New / cold sessions often lack session_state.workflow on the Agent
+            # object until pre_hooks run; medical roles are always collection.
+            role = str(ctx.role_code or "").strip().lower()
+            if role.startswith("medical-"):
+                collection_run = True
+        last_progress_reply = ""
 
         thinking_token = set_enable_thinking(enable_thinking)
         # 与 arun 一致：请求级 request_id 注入 contextvars 供 Guardrail 读取
@@ -338,6 +351,12 @@ class AgnoRuntime:
                         resolved_session_id = str(sid)
 
                 event_name = str(getattr(event, "event", "") or "")
+                # Keep freshest session_state for compose / collection detection.
+                event_ss = self._session_state_from_any(event)
+                if event_ss:
+                    completed_session_state = event_ss
+                    if self._is_collection_workflow(event_ss):
+                        collection_run = True
 
                 if event_name == RunEvent.reasoning_content_delta.value:
                     if enable_thinking:
@@ -369,11 +388,23 @@ class AgnoRuntime:
                     RunEvent.tool_call_completed.value,
                     RunEvent.tool_call_error.value,
                 }:
-                    if saw_assistant_content:
-                        tools_after_content = True
-                        # Start a new content segment after tools intervene.
-                        if content_segments[-1]:
-                            content_segments.append([])
+                    tools_after_content = True
+                    if saw_assistant_content and content_segments[-1]:
+                        content_segments.append([])
+                        replace_emitted = False
+                    if event_name == RunEvent.tool_call_completed.value:
+                        progress_text, last_progress_reply = (
+                            self._progress_reply_from_session(
+                                completed_session_state, last_progress_reply
+                            )
+                        )
+                        if progress_text:
+                            yield {
+                                "event": "RunContent",
+                                "replace": True,
+                                "content": progress_text,
+                                "session_id": resolved_session_id or None,
+                            }
                     if stream_events:
                         yield self._agno_event_passthrough(
                             event,
@@ -399,12 +430,18 @@ class AgnoRuntime:
                         saw_assistant_content = True
                     if not content_str and not reasoning_str:
                         continue
+                    # collection_dialogue：工具之后患者可见文案只走协议 compose / final replace
+                    if tools_after_content and collection_run:
+                        continue
+                    # 未完成结案 reply 前，禁止流式泄漏 scripts.closing
+                    if collection_run and content_str and self._is_premature_closing_chunk(
+                        content_str, completed_session_state
+                    ):
+                        continue
                     payload: dict[str, Any] = {
                         "event": "RunContent",
                         "session_id": resolved_session_id or None,
                     }
-                    # After tools, subsequent user-facing text replaces the bubble
-                    # (generic tool-turn UX; no domain keywords).
                     if content_str and tools_after_content and not replace_emitted:
                         payload["replace"] = True
                         replace_emitted = True
@@ -435,7 +472,7 @@ class AgnoRuntime:
                     return
 
                 if event_name == RunEvent.run_completed.value:
-                    # Terminal event is synthesized after post_filter below.
+                    completed_content = getattr(event, "content", None)
                     continue
 
                 if stream_events and event_name not in {
@@ -464,10 +501,38 @@ class AgnoRuntime:
         reply = join_content_segments(
             segments, tools_intervened=tools_after_content
         )
+        if completed_session_state is None:
+            completed_session_state = self._session_state_from_any(target)
+        composed = self._compose_reply_from_session(completed_session_state)
+        if composed:
+            final_reply = composed
+        elif completed_content is not None:
+            final_reply = content_to_reply_text(completed_content).strip()
+        else:
+            final_reply = str(reply or "").strip()
+        if final_reply and completed_session_state:
+            final_reply = self._strip_premature_closing_text(
+                final_reply, completed_session_state
+            )
         output = self._request_filters.apply_post_filter(
             ctx,
-            {"reply": reply, "session_id": resolved_session_id},
+            {"reply": final_reply, "session_id": resolved_session_id},
         )
+        final_reply = str(output.get("reply", final_reply) or "").strip()
+        if "<!--COLLECTION_STATUS" in final_reply:
+            final_reply = re.sub(
+                r"<!--COLLECTION_STATUS\s+\{.*?\}\s*-->",
+                "",
+                final_reply,
+                flags=re.S,
+            ).strip()
+        if final_reply:
+            yield {
+                "event": "RunContent",
+                "replace": True,
+                "content": final_reply,
+                "session_id": str(output.get("session_id", resolved_session_id)) or None,
+            }
         yield {
             "event": "RunCompleted",
             "session_id": str(output.get("session_id", resolved_session_id)),
@@ -515,6 +580,151 @@ class AgnoRuntime:
                 "session_id": session_id or None,
             },
         ]
+
+    @staticmethod
+    def _is_collection_workflow(session_state: dict[str, Any] | None) -> bool:
+        from agno_worker.tenant.collection import is_collection_enabled
+
+        if not isinstance(session_state, dict):
+            return False
+        if isinstance(session_state.get("collection"), dict):
+            return True
+        workflow = session_state.get("workflow") or {}
+        return isinstance(workflow, dict) and is_collection_enabled(workflow)
+
+    @classmethod
+    def _strip_premature_closing_text(
+        cls,
+        text: str,
+        session_state: dict[str, Any] | None,
+    ) -> str:
+        from agno_worker.tenant.collection import (
+            is_collection_enabled,
+            resolve_collection_config,
+        )
+        from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+            collection_state_from_session,
+            strip_premature_scripts_closing,
+        )
+
+        if not text or not session_state:
+            return text
+        workflow = session_state.get("workflow") or {}
+        if not isinstance(workflow, dict) or not is_collection_enabled(workflow):
+            return text
+        coll = collection_state_from_session(session_state) or {}
+        return strip_premature_scripts_closing(
+            text, coll, resolve_collection_config(workflow)
+        )
+
+    @classmethod
+    def _is_premature_closing_chunk(
+        cls,
+        content_str: str,
+        session_state: dict[str, Any] | None,
+    ) -> bool:
+        """True when chunk is scripts.closing while last reply action is incomplete."""
+        from agno_worker.tenant.collection import (
+            is_collection_enabled,
+            resolve_collection_config,
+        )
+        from agno_worker.tenant.collection.kinds.dialogue.config import (
+            last_reply_required_action,
+            resolve_scripts_config,
+        )
+        from agno_worker.tenant.collection.kinds.dialogue.core import (
+            is_required_action_completed,
+            sync_reply_actions_done,
+            ensure_collection_state,
+        )
+        from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+            collection_state_from_session,
+        )
+
+        text = str(content_str or "").strip()
+        if not text or not session_state:
+            return False
+        workflow = session_state.get("workflow") or {}
+        if not isinstance(workflow, dict) or not is_collection_enabled(workflow):
+            return False
+        config = resolve_collection_config(workflow)
+        scripts = resolve_scripts_config(config) or {}
+        closing = str(scripts.get("closing") or "").strip()
+        if not closing:
+            return False
+        # Exact closing, or chunk that is only closing (streamed as one piece).
+        if text != closing and closing not in text:
+            return False
+        # If the whole chunk is closing, or closing-dominated short chunk.
+        if text != closing and len(text) > len(closing) + 20:
+            return False
+        coll = collection_state_from_session(session_state) or {}
+        current = sync_reply_actions_done(ensure_collection_state(coll, config), config)
+        last_reply = last_reply_required_action(config)
+        if not last_reply:
+            return False
+        return not is_required_action_completed(current, last_reply)
+
+    @staticmethod
+    def _session_state_from_any(obj: Any) -> dict[str, Any] | None:
+        from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+            session_state_from_run_event,
+        )
+
+        if obj is None:
+            return None
+        if isinstance(obj, dict) and (
+            "collection" in obj or "workflow" in obj or "session_state" in obj
+        ):
+            if "collection" in obj or "workflow" in obj:
+                return obj
+            nested = obj.get("session_state")
+            return nested if isinstance(nested, dict) else None
+        ss = session_state_from_run_event(obj)
+        if ss:
+            return ss
+        for attr in ("session_state", "_session_state"):
+            nested = getattr(obj, attr, None)
+            if isinstance(nested, dict):
+                return nested
+        return None
+
+    @classmethod
+    def _compose_reply_from_session(
+        cls,
+        session_state: dict[str, Any] | None,
+    ) -> str | None:
+        from agno_worker.tenant.collection import (
+            is_collection_enabled,
+            resolve_collection_config,
+        )
+        from agno_worker.tenant.collection.kinds.dialogue.scripts import (
+            collection_state_from_session,
+            compose_patient_reply_progress,
+        )
+
+        if not session_state:
+            return None
+        workflow = session_state.get("workflow") or {}
+        if not isinstance(workflow, dict) or not is_collection_enabled(workflow):
+            return None
+        coll = collection_state_from_session(session_state)
+        if not coll:
+            return None
+        return compose_patient_reply_progress(
+            coll, resolve_collection_config(workflow)
+        )
+
+    @classmethod
+    def _progress_reply_from_session(
+        cls,
+        session_state: dict[str, Any] | None,
+        last_progress: str,
+    ) -> tuple[str | None, str]:
+        progress = cls._compose_reply_from_session(session_state)
+        if not progress or progress == last_progress:
+            return None, last_progress
+        return progress, progress
 
     def _build_run_kwargs(
         self,

@@ -22,6 +22,11 @@ _TEXTUAL_TOOL_CALL_LOOSE_RE = re.compile(
     r"(?:^|\n)\s*collection_[a-z_]+\s*\([^()\n]*\)\s*(?=\n|$)",
     re.IGNORECASE,
 )
+# Never show write-back / EMR job status to the patient.
+_WRITE_STATUS_LINE_RE = re.compile(
+    r"(?m)^[^\n]*(?:电子病历|写库|病历生成|任务已提交|任务已受理|正在后台处理|"
+    r"系统正在处理|请稍后重试|写入成功|写入失败)[^\n]*\n?"
+)
 
 
 def sanitize_patient_visible_reply(text: str | None) -> tuple[str, list[dict[str, str]]]:
@@ -45,6 +50,7 @@ def sanitize_patient_visible_reply(text: str | None) -> tuple[str, list[dict[str
     cleaned = _TEXTUAL_TOOL_CALL_RE.sub(_consume, cleaned)
     cleaned = _TEXTUAL_TOOL_CALL_LOOSE_RE.sub("\n", cleaned)
     cleaned = _SYSTEM_TIP_RE.sub("", cleaned)
+    cleaned = _WRITE_STATUS_LINE_RE.sub("", cleaned)
     # Collapse excessive blank lines left by stripping.
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, salvaged

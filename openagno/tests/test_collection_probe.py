@@ -26,7 +26,7 @@ from agno_worker.tenant.collection.kinds.dialogue.core import (  # noqa: E402
 )
 
 
-def _triage_config(*, mode: str = "concurrent"):
+def _triage_config(*, mode: str = "serial"):
     return {
         "kind": "collection_dialogue",
         "confirm_required": False,
@@ -42,11 +42,16 @@ def _triage_config(*, mode: str = "concurrent"):
             "fields": [
                 {"name": "主诉", "required": True},
                 {"name": "持续时间", "required": True},
-                {"name": "推荐科室", "required": True, "after_probe": True},
             ],
         },
         "required_actions": [
-            {"type": "reply", "field": "推荐科室", "when": "missing_empty"},
+            {
+                "type": "reply",
+                "field": "推荐科室",
+                "when": "missing_empty",
+                "goal": "最终推荐科室，格式 名称[code]",
+                "pattern": "^.+\\[[A-Za-z0-9_-]+\\]$",
+            },
             {"type": "mcp", "tool": "mec_create_emr_case", "when": "missing_empty"},
         ],
     }
@@ -100,20 +105,20 @@ def test_triage_probe_before_recommended_dept():
     assert "推荐科室" in state["missing"]
     assert pending_required_action_tools(state, config) == []
 
-    # Hard-gate: after_probe slot cannot be filled while probe is active.
+    # Hard-gate: reply result slot cannot be filled while probe is active.
     try:
         update_collected_fields(state, {"推荐科室": "神经内科[sjnk]"}, config)
-        raise AssertionError("expected after_probe hard-gate during probing")
+        raise AssertionError("expected deferred reply-slot hard-gate during probing")
     except ValueError as exc:
-        assert "after_probe" in str(exc) or "deferred" in str(exc)
+        assert "deferred" in str(exc) or "reply" in str(exc)
 
     state = append_probe_note(state, config, "伴恶心")
     assert state["probe_rounds"] == 1
     state = finish_probe(state, config, reason="enough")
     assert state["phase"] == PHASE_COLLECTING
-    # Concurrent: MCP is already pending/visible alongside reply.
-    assert pending_required_action_tools(state, config) == ["mec_create_emr_case"]
-    assert hard_gated_tool_names(state, config) == set()
+    # Serial: reply current → MCP still hard-gated / not yet actionable.
+    assert pending_required_action_tools(state, config) == []
+    assert "mec_create_emr_case" in hard_gated_tool_names(state, config)
     current = current_required_action(state, config)
     assert current is not None
     assert current["type"] == "reply"
@@ -129,14 +134,26 @@ def test_triage_probe_before_recommended_dept():
     assert current["tool"] == "mec_create_emr_case"
 
 
-def test_concurrent_mode_exposes_mcp_with_reply_same_turn():
-    config = _triage_config(mode="concurrent")
+def test_serial_exposes_mcp_only_after_reply_field():
+    """Serial: MCP stays gated until reply field is filled (same-turn unlock OK)."""
+    config = _triage_config(mode="serial")
     state = update_collected_fields(
         empty_collection_state(), {"主诉": "头痛", "持续时间": "三天"}, config
     )
     assert "mec_create_emr_case" in hard_gated_tool_names(state, config)
     state = append_probe_note(state, config, "伴恶心")
     state = finish_probe(state, config, reason="enough")
+    # Reply step current → write MCP still hard-gated.
+    assert "mec_create_emr_case" in hard_gated_tool_names(state, config)
+    assert pending_required_action_tools(state, config) == []
+    # Full remaining chain is visible for same-turn prompts.
+    from agno_worker.tenant.collection import pending_required_actions
+
+    pending = pending_required_actions(state, config)
+    assert any(a.get("type") == "reply" for a in pending)
+    assert any(a.get("tool") == "mec_create_emr_case" for a in pending)
+
+    state = update_collected_fields(state, {"推荐科室": "神经内科[sjnk]"}, config)
     assert hard_gated_tool_names(state, config) == set()
     assert pending_required_action_tools(state, config) == ["mec_create_emr_case"]
 
@@ -157,11 +174,19 @@ def test_serial_reply_then_mcp_hard_gates_write_until_reply_done():
     assert pending_required_action_tools(state, config) == ["mec_create_emr_case"]
 
 
-def test_after_probe_defers_decision_slot():
+def test_legacy_concurrent_mode_coerced_to_serial():
+    from agno_worker.tenant.collection.kinds.dialogue.config import required_actions_mode
+
+    assert required_actions_mode({"required_actions_mode": "concurrent"}) == "serial"
+    assert required_actions_mode({"required_actions_mode": "serial"}) == "serial"
+    assert required_actions_mode({}) == "serial"
+
+
+def test_reply_result_slot_defers_decision():
     config = {
         "kind": "collection_dialogue",
         "confirm_required": False,
-        "required_actions_mode": "concurrent",
+        "required_actions_mode": "serial",
         "probe": {
             "enabled": True,
             "min_rounds": 1,
@@ -172,7 +197,6 @@ def test_after_probe_defers_decision_slot():
             "source": "inline",
             "fields": [
                 {"name": "主诉", "required": True},
-                {"name": "推荐科室", "required": True, "after_probe": True},
             ],
         },
         "required_actions": [
@@ -208,9 +232,11 @@ def test_field_probe_before_global_probe():
                     "required": True,
                     "probe": {"enabled": True, "min_rounds": 1, "max_rounds": 2},
                 },
-                {"name": "推荐科室", "required": True, "after_probe": True},
             ],
         },
+        "required_actions": [
+            {"type": "reply", "field": "推荐科室", "when": "missing_empty"},
+        ],
     }
     state = update_collected_fields(empty_collection_state(), {"主诉": "头痛"}, config)
     assert state["phase"] == PHASE_COLLECTING
@@ -252,7 +278,6 @@ def test_cursor_stashes_ahead_and_blocks_while_min_probe():
                     "name": "持续时间",
                     "required": True,
                 },
-                {"name": "推荐科室", "required": True, "after_probe": True},
             ],
         },
     }
@@ -283,7 +308,7 @@ def test_cursor_stashes_ahead_and_blocks_while_min_probe():
 
 
 def test_cursor_auto_finish_probe_when_writing_next_and_min_met():
-    """min_rounds=0: writing the next field auto-finishes current field probe."""
+    """min_rounds met: writing the next field auto-finishes current field probe."""
     config = {
         "kind": "collection_dialogue",
         "confirm_required": False,
@@ -299,21 +324,23 @@ def test_cursor_auto_finish_probe_when_writing_next_and_min_met():
                 {
                     "name": "主诉",
                     "required": True,
-                    "probe": {"enabled": True, "min_rounds": 0, "max_rounds": 2},
+                    "probe": {"enabled": True, "min_rounds": 1, "max_rounds": 2},
                 },
                 {"name": "持续时间", "required": True},
-                {"name": "推荐科室", "required": True, "after_probe": True},
             ],
         },
     }
     state = update_collected_fields(empty_collection_state(), {"主诉": "头晕"}, config)
     assert state["field_stage"] == "probe"
+    state = append_probe_note(state, config, "体位相关", field="主诉")
     state = update_collected_fields(state, {"持续时间": "两天"}, config)
     assert state["collected"]["主诉"] == "头晕"
     assert state["collected"]["持续时间"] == "两天"
     assert state["field_probes"]["主诉"]["done"] is True
     assert state["phase"] == PHASE_PROBING
     assert not state.get("current_field")
+
+
 
 
 def test_cursor_cascade_pending_without_field_probe():
@@ -333,7 +360,6 @@ def test_cursor_cascade_pending_without_field_probe():
                 {"name": "主诉", "required": True},
                 {"name": "持续时间", "required": True},
                 {"name": "既往病史", "required": True},
-                {"name": "推荐科室", "required": True, "after_probe": True},
             ],
         },
     }
@@ -372,7 +398,6 @@ def test_cursor_pending_applies_when_field_probe_hits_max_rounds():
                     "probe": {"enabled": True, "min_rounds": 1, "max_rounds": 1},
                 },
                 {"name": "持续时间", "required": True},
-                {"name": "推荐科室", "required": True, "after_probe": True},
             ],
         },
     }
@@ -389,7 +414,7 @@ def test_cursor_pending_applies_when_field_probe_hits_max_rounds():
     assert state["phase"] == PHASE_PROBING
 
 
-def test_enrichment_skipped_when_only_after_probe_fields():
+def test_enrichment_skipped_when_only_reply_result_slots():
     """Schemas with no pre-probe slots must not empty-run enrichment."""
     from agno_worker.tenant.collection import (
         is_probe_finished,
@@ -409,7 +434,6 @@ def test_enrichment_skipped_when_only_after_probe_fields():
         "schema": {
             "source": "inline",
             "fields": [
-                {"name": "决策项", "required": True, "after_probe": True},
             ],
         },
         "required_actions": [
@@ -476,7 +500,7 @@ def test_hard_gate_hides_write_tool_until_probe_and_missing_done():
 
 
 def test_filter_collection_gated_tools_drops_write_mcp():
-    config = _triage_config(mode="concurrent")
+    config = _triage_config(mode="serial")
     state = update_collected_fields(
         empty_collection_state(), {"主诉": "头痛", "持续时间": "三天"}, config
     )
@@ -501,15 +525,16 @@ if __name__ == "__main__":
     test_probe_defaults_hints_empty()
     test_probe_min_rounds_blocks_early_finish_until_min()
     test_triage_probe_before_recommended_dept()
-    test_concurrent_mode_exposes_mcp_with_reply_same_turn()
+    test_serial_exposes_mcp_only_after_reply_field()
     test_serial_reply_then_mcp_hard_gates_write_until_reply_done()
-    test_after_probe_defers_decision_slot()
+    test_legacy_concurrent_mode_coerced_to_serial()
+    test_reply_result_slot_defers_decision()
     test_field_probe_before_global_probe()
     test_cursor_stashes_ahead_and_blocks_while_min_probe()
     test_cursor_auto_finish_probe_when_writing_next_and_min_met()
     test_cursor_cascade_pending_without_field_probe()
     test_cursor_pending_applies_when_field_probe_hits_max_rounds()
-    test_enrichment_skipped_when_only_after_probe_fields()
+    test_enrichment_skipped_when_only_reply_result_slots()
     test_ask_batch_size_hard_cursor_always_one()
     test_hard_gate_hides_write_tool_until_probe_and_missing_done()
     test_filter_collection_gated_tools_drops_write_mcp()

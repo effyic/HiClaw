@@ -77,7 +77,9 @@ def collection_status_payload(
         # Alias of field_stage == "probe" (derived mirror for older clients).
         "field_probe_busy": stage == FIELD_STAGE_PROBE,
     }
-    exported = apply_schema_exports(schema, collected, reply_text=reply_text)
+    exported = apply_schema_exports(
+        schema, collected, reply_text=reply_text, config=config
+    )
     payload.update(exported)
     return payload
 
