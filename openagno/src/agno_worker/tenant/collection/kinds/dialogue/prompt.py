@@ -37,6 +37,48 @@ from agno_worker.tenant.collection.kinds.dialogue.scripts import (
     _append_dialogue_scripts_rules,
 )
 
+
+def _known_facts_digest(current: dict[str, Any]) -> list[str]:
+    """Flatten collected + pending + all field-probe notes for NO-REPEAT grounding."""
+    facts: list[str] = []
+    seen: set[str] = set()
+
+    def _add(text: Any) -> None:
+        s = str(text or "").strip()
+        if not s or s in seen:
+            return
+        seen.add(s)
+        facts.append(s)
+
+    collected = current.get("collected") if isinstance(current.get("collected"), dict) else {}
+    for name, value in collected.items():
+        v = str(value or "").strip()
+        if v:
+            _add(f"{name}: {v}")
+    pending = (
+        current.get("pending_collected")
+        if isinstance(current.get("pending_collected"), dict)
+        else {}
+    )
+    for name, value in pending.items():
+        v = str(value or "").strip()
+        if v:
+            _add(f"pending/{name}: {v}")
+    probes = current.get("field_probes") if isinstance(current.get("field_probes"), dict) else {}
+    for field_name, entry in probes.items():
+        if not isinstance(entry, dict):
+            continue
+        for note in entry.get("notes") or []:
+            n = str(note or "").strip()
+            if n and not n.startswith("[skip]"):
+                _add(f"probe/{field_name}: {n}")
+    for note in current.get("probe_notes") or []:
+        n = str(note or "").strip()
+        if n and not n.startswith("[skip]"):
+            _add(f"enrichment: {n}")
+    return facts
+
+
 def collection_instructions_appendix(
     state: dict[str, Any],
     config: dict[str, Any] | None,
@@ -78,6 +120,7 @@ def collection_instructions_appendix(
         f"missing: {json.dumps(missing, ensure_ascii=False)}",
         f"collected: {json.dumps(current.get('collected') or {}, ensure_ascii=False)}",
         f"field_probes: {json.dumps(current.get('field_probes') or {}, ensure_ascii=False)}",
+        f"known_facts_digest: {json.dumps(_known_facts_digest(current), ensure_ascii=False)}",
         f"pre_probe_fields: {json.dumps(pre_probe_field_names(current.get('schema') or [], config), ensure_ascii=False)}",
     ]
     if probe:
@@ -126,6 +169,11 @@ def collection_instructions_appendix(
             "with all of them — protocol keeps current_field and stashes the rest "
             "into pending_collected (auto-applied when the cursor arrives). "
             "Do NOT re-ask facts already in collected or pending_collected.",
+            "2b. FORBIDDEN before required_actions type=reply completes via "
+            "collection_update_fields: free-form result dumps that belong in "
+            "reply slots, or scripts.closing. During the silent required_actions "
+            "chain emit NO patient-facing text — protocol composes after reply. "
+            "Ask at most one atomic question instead while still collecting.",
             "3. While current_field is non-empty OR write_tools_hard_gated is non-empty, "
             "do not attempt write/required_actions MCP — those tools are removed "
             "from the available tool list until conditions are met.",
@@ -142,6 +190,9 @@ def collection_instructions_appendix(
             "(including details given in the user's first message); never repeat the "
             "same or near-identical question after the user already answered — "
             "paraphrase counts as repeat; advance to a NEW information gap. "
+            "Treat known_facts_digest as ground truth across ALL fields "
+            "(a fact captured under field A must NOT be re-asked while probing "
+            "field B). "
             "If the prior answer was vague, one short clarification only — do not "
             "restart the same topic. "
             "Prefer short colloquial phrasing over checklist / form language. "
@@ -185,21 +236,28 @@ def collection_instructions_appendix(
                 + json.dumps(later, ensure_ascii=False)
                 + ". "
                 + (
-                    f"rounds<{min_now}: MUST ask one clarifying question about "
-                    f"{cursor!r} and call collection_probe_note "
-                    f"(finish is blocked until min_rounds). "
+                    f"rounds<{min_now}: MUST advance min_rounds without repeating known "
+                    f"facts. Prefer: (1) ask ONE NEW gap about {cursor!r} that is NOT "
+                    "already in known_facts_digest / collected / pending_collected, then "
+                    "collection_probe_note; OR (2) if no new gap remains, call "
+                    "collection_probe_note summarizing already-known facts for this field "
+                    "(counts toward min_rounds) and do NOT ask the user a repeated "
+                    "question — short ack only is OK. Finish is blocked until min_rounds. "
                     if must_more
                     else (
                         f"rounds>={min_now}: DEFAULT is collection_probe_finish(field="
                         f"{cursor!r}) in this turn — especially when collected["
                         f"{cursor!r}] already has enough detail for the field goal, "
                         "OR when pending_collected already holds later fields "
-                        "(do NOT re-ask those stashed facts). "
+                        "(do NOT re-ask those stashed facts), "
+                        "OR when known_facts_digest already covers the field goal. "
                         "Only ask ONE new clarifying question about THIS field if a "
                         "clear information gap remains that is NOT already stated in "
-                        f"collected[{cursor!r}], pending_collected, or prior dialogue. "
+                        f"collected[{cursor!r}], pending_collected, known_facts_digest, "
+                        "or prior dialogue. "
                         "FORBIDDEN to re-ask / paraphrase facts already inside "
-                        f"collected[{cursor!r}] or pending_collected. Writing the next "
+                        f"collected[{cursor!r}], other collected fields, "
+                        "known_facts_digest, or pending_collected. Writing the next "
                         "field also auto-finishes when min_rounds is met. "
                     )
                 )
@@ -399,8 +457,10 @@ def collection_instructions_appendix(
         lines.append(
             f"{rule_n}. Anti-repeat / write-pending: reply slots are filled — call "
             + json.dumps(pending, ensure_ascii=False)
-            + " only. FORBIDDEN patient-facing recommendation/summary/closing; "
-            "protocol already rendered or will render the single closing block."
+            + " at most ONCE this turn (never retry the same MCP in a loop). "
+            "On tool failure: stop retrying; emit NO patient-facing text. "
+            "FORBIDDEN patient-facing recommendation/summary/closing; "
+            "protocol already rendered the single closing block."
         )
         rule_n += 1
     elif (

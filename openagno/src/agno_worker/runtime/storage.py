@@ -19,6 +19,8 @@ SLIM_SESSION_STATE_KEYS = frozenset(
         "workflow",
         "session_id",
         "collection",
+        # Last protocol-composed patient bubble (stream SSE finalization).
+        "patient_speech",
     }
 )
 

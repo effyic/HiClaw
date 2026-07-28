@@ -64,6 +64,15 @@ def _normalize_ask_text(text: str) -> str:
     return _ASK_NORMALIZE_RE.sub("", str(text or "")).strip().lower()
 
 
+def _ask_stem(text: str) -> str:
+    """Core ask stem before A-or-B tails (还是/或者) for near-repeat matching."""
+    raw = str(text or "").strip()
+    for sep in ("还是", "或者"):
+        if sep in raw:
+            raw = raw.split(sep, 1)[0]
+    return _normalize_ask_text(raw)
+
+
 def patient_ask_quality_issues(text: str | None) -> list[str]:
     """Detect multi-question / A-or-B patterns in user-visible reply."""
     raw = str(text or "").strip()
@@ -91,6 +100,8 @@ def apply_ask_quality_tracking(
     prev = str(out.get("last_ask_text") or "").strip()
     prev_norm = _normalize_ask_text(prev)
     cur_norm = _normalize_ask_text(cleaned)
+    prev_stem = _ask_stem(prev)
+    cur_stem = _ask_stem(cleaned)
     if (
         prev_norm
         and cur_norm
@@ -99,6 +110,11 @@ def apply_ask_quality_tracking(
             cur_norm == prev_norm
             or cur_norm in prev_norm
             or prev_norm in cur_norm
+            or (
+                len(cur_stem) >= 6
+                and len(prev_stem) >= 6
+                and (cur_stem == prev_stem or cur_stem in prev_stem or prev_stem in cur_stem)
+            )
         )
     ):
         issues.append("repeat_ask")
