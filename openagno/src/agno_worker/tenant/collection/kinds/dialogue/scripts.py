@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from agno_worker.tenant.collection.kinds.dialogue.config import (
@@ -126,6 +127,12 @@ def apply_scripts_progress_from_run(
     """Advance opening/closing delivery flags after a turn (cluster-safe)."""
     out = ensure_collection_state(state, config)
     scripts = resolve_scripts_config(config)
+    if (
+        had_patient_reply
+        and reply_action_complete(out, config)
+        and not out.get("result_reply_delivered")
+    ):
+        out["result_reply_delivered"] = True
     if not scripts:
         return out
     if (
@@ -167,26 +174,27 @@ def _format_reply_field_for_patient(
     value: str,
     collected: dict[str, Any],
 ) -> str:
-    """Map one user_visible reply slot to patient-facing text."""
-    field = str(action.get("field") or "").strip()
+    """Map one user_visible reply slot to patient-facing text via protocol config.
+
+    Uses ``patient_template`` with ``{value}`` / ``{reason}`` placeholders when set;
+    otherwise returns the slot value (optionally prefixed by ``reason_field``).
+    """
     clean = _clean_slot_text(value)
-    if field == "推荐科室":
-        reason = ""
-        for key in ("分科理由", "推荐理由", "reason"):
-            candidate = str(collected.get(key) or "").strip()
-            if candidate:
-                reason = _clean_slot_text(candidate)
-                break
-        reason_field = str(action.get("reason_field") or "").strip()
-        if reason_field:
-            reason = _clean_slot_text(str(collected.get(reason_field) or "")) or reason
-        dept_line = f"建议您挂：{clean}"
-        return f"{reason}\n\n{dept_line}".strip() if reason else dept_line
-    if field == "问诊摘要":
-        # Always label so patients don't mistake the block for scripts.closing only.
-        if clean.startswith("问诊摘要") or clean.startswith("根据您"):
-            return clean
-        return f"根据您刚才的描述，问诊小结如下：\n\n{clean}"
+    reason = ""
+    reason_field = str(action.get("reason_field") or "").strip()
+    if reason_field:
+        reason = _clean_slot_text(str(collected.get(reason_field) or ""))
+    template = str(action.get("patient_template") or "").strip()
+    if template:
+        rendered = (
+            template.replace("{value}", clean).replace("{reason}", reason).strip()
+        )
+        if not reason:
+            rendered = re.sub(r"^\n+", "", rendered)
+            rendered = re.sub(r"\n{3,}", "\n\n", rendered).strip()
+        return rendered
+    if reason:
+        return f"{reason}\n\n{clean}".strip()
     return clean
 
 
@@ -243,17 +251,235 @@ def compose_patient_reply_progress(
     return "\n\n".join(p for p in parts if p and str(p).strip()).strip() or None
 
 
+# Patient SSE / post_hook speech modes (protocol-owned, scene-agnostic).
+SPEECH_STREAM = "stream"
+SPEECH_COMPOSE = "compose"
+SPEECH_SILENT = "silent"
+
+
+@dataclass(frozen=True)
+class PatientTurnSpeech:
+    """Authoritative patient-visible text decision for one turn.
+
+    - ``stream``: model Q&A (collecting / probing / post-close chitchat)
+    - ``compose``: protocol renders ``type=reply`` + optional ``scripts.closing``
+    - ``silent``: no patient bubble (write-MCP follow-up or reply chain waiting)
+    """
+
+    mode: str
+    text: str = ""
+
+
+def resolve_patient_turn_speech(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+    *,
+    model_text: str | None = None,
+    reply_delivered_at_start: bool = False,
+) -> PatientTurnSpeech:
+    """Decide patient-visible speech from collection protocol state only."""
+    current = sync_reply_actions_done(ensure_collection_state(state, config), config)
+    composed = compose_patient_reply_progress(current, config) or ""
+
+    # Write-MCP-only follow-up *after a prior turn* already showed the reply.
+    # Do not use result_reply_delivered alone — post_hook may flip it this turn
+    # before stream finalization, which would wrongly silence first delivery.
+    if pending_mcp_only(current, config) and reply_delivered_at_start:
+        return PatientTurnSpeech(SPEECH_SILENT, "")
+
+    # Waiting for reply slot fill: tools only; protocol will compose after.
+    if silent_reply_chain_active(current, config) and not composed:
+        return PatientTurnSpeech(SPEECH_SILENT, "")
+
+    # Protocol compose owns the bubble on first delivery. After a prior turn
+    # already delivered, fall through so post-close chitchat can stream.
+    if composed and not reply_delivered_at_start:
+        return PatientTurnSpeech(SPEECH_COMPOSE, composed)
+
+    cleaned = strip_premature_result_speech(
+        str(model_text or "").strip(), current, config
+    )
+    if cleaned:
+        from agno_worker.runtime.structured_output import collapse_duplicate_paragraphs
+
+        cleaned = collapse_duplicate_paragraphs(cleaned)
+    return PatientTurnSpeech(SPEECH_STREAM, cleaned or "")
+
+
+def patient_sse_replace_content(
+    *,
+    speech: PatientTurnSpeech,
+    streamed_visible: str = "",
+) -> str | None:
+    """Content for a patient ``RunContent`` with ``replace=true``, or None to skip.
+
+    Contract (no historical empty-wipe):
+    - ``silent`` → no event
+    - empty text → no event (never clear the bubble with ``content: ""``)
+    - identical to what SSE already showed → no event
+    - otherwise → non-empty authoritative text
+    """
+    if speech.mode == SPEECH_SILENT:
+        return None
+    text = str(speech.text or "").strip()
+    if not text:
+        return None
+    if text == str(streamed_visible or "").strip():
+        return None
+    return text
+
+
+def should_suppress_patient_deltas(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> bool:
+    """True when model token deltas must not reach patient SSE."""
+    current = sync_reply_actions_done(ensure_collection_state(state, config), config)
+    if silent_reply_chain_active(current, config):
+        return True
+    # Reply substance is protocol-owned while write MCP remains.
+    if pending_mcp_only(current, config):
+        return True
+    return False
+
+
 def compose_or_keep_patient_reply(
     model_text: str | None,
     state: dict[str, Any],
     config: dict[str, Any] | None,
 ) -> str | None:
-    """Prefer protocol-composed progress; never keep premature scripts.closing alone."""
-    composed = compose_patient_reply_progress(state, config)
-    if composed:
-        return composed
-    text = strip_premature_scripts_closing(str(model_text or "").strip(), state, config)
-    return text or None
+    """Map protocol speech resolution onto post_hook assistant content."""
+    speech = resolve_patient_turn_speech(
+        state,
+        config,
+        model_text=model_text,
+        reply_delivered_at_start=bool(state.get("result_reply_delivered")),
+    )
+    if speech.mode == SPEECH_SILENT:
+        return ""
+    return speech.text or None
+
+
+def reply_action_complete(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    current = sync_reply_actions_done(ensure_collection_state(state, config), config)
+    last_reply = last_reply_required_action(config)
+    if not last_reply:
+        return True
+    return is_required_action_completed(current, last_reply)
+
+
+def pending_mcp_only(state: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    """True when schema slots are done, reply rendered, only write MCP remains."""
+    current = sync_reply_actions_done(ensure_collection_state(state, config), config)
+    if current.get("missing"):
+        return False
+    if not reply_action_complete(current, config):
+        return False
+    return bool(pending_required_action_tools(current, config))
+
+
+def silent_reply_chain_active(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> bool:
+    """True when required_actions pipeline is ready but a type=reply step is pending.
+
+    Protocol: patient-facing text is forbidden during the silent chain — only
+    tools / ``collection_update_fields``; compose renders after reply completes.
+    """
+    from agno_worker.tenant.collection.kinds.dialogue.core import (
+        incomplete_required_actions,
+        required_action_pipeline_ready,
+    )
+
+    current = sync_reply_actions_done(ensure_collection_state(state, config), config)
+    if not required_action_pipeline_ready(current, config):
+        return False
+    for action in incomplete_required_actions(current, config):
+        if str(action.get("type") or "") == "reply":
+            return True
+    return False
+
+
+def _template_literals(template: str) -> list[str]:
+    """Static fragments from ``patient_template`` (outside ``{value}`` / ``{reason}``)."""
+    parts = re.split(r"\{(?:value|reason)\}", str(template or ""))
+    out: list[str] = []
+    for part in parts:
+        lit = str(part or "").strip()
+        if len(lit) >= 4:
+            out.append(lit)
+    return out
+
+
+def _incomplete_reply_actions(
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    current = sync_reply_actions_done(ensure_collection_state(state, config), config)
+    out: list[dict[str, Any]] = []
+    for action in resolve_required_actions(config):
+        if str(action.get("type") or "") != "reply":
+            continue
+        if is_required_action_completed(current, action):
+            continue
+        out.append(action)
+    return out
+
+
+def _protocol_fragment_match(chunk: str, fragment: str, *, min_len: int = 4) -> bool:
+    """True when chunk is the fragment, contains it, or is a streaming prefix of it."""
+    c = str(chunk or "").strip()
+    f = str(fragment or "").strip()
+    if not c or not f:
+        return False
+    if c == f or f in c:
+        return True
+    if len(c) < min_len:
+        return False
+    # Token deltas of scripts.closing / patient_template ("感谢您的" …).
+    if f.startswith(c) or c in f:
+        return True
+    return False
+
+
+def looks_like_result_speech_chunk(
+    text: str,
+    state: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Heuristic from protocol config only (closing / patterns / templates)."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if not config:
+        return False
+    if silent_reply_chain_active(state or {}, config):
+        return True
+    # Until reply compose is done, suppress closing / template fragments — including
+    # progressive SSE token prefixes (full-string match alone lets closing leak).
+    if not reply_action_complete(state or {}, config):
+        scripts = resolve_scripts_config(config) or {}
+        closing = str(scripts.get("closing") or "").strip()
+        if closing and _protocol_fragment_match(raw, closing):
+            return True
+        for action in _incomplete_reply_actions(state or {}, config):
+            pattern = str(action.get("pattern") or "").strip()
+            if pattern:
+                try:
+                    if re.search(pattern, raw):
+                        return True
+                except re.error:
+                    pass
+            for lit in _template_literals(str(action.get("patient_template") or "")):
+                if _protocol_fragment_match(raw, lit):
+                    return True
+        return False
+    scripts = resolve_scripts_config(config) or {}
+    closing = str(scripts.get("closing") or "").strip()
+    if closing and (raw == closing or closing in raw):
+        return True
+    return False
 
 
 def strip_premature_scripts_closing(
@@ -261,30 +487,77 @@ def strip_premature_scripts_closing(
     state: dict[str, Any],
     config: dict[str, Any] | None,
 ) -> str:
-    """Remove scripts.closing from model speech until the last type=reply is done.
+    """Backward-compatible alias for :func:`strip_premature_result_speech`."""
+    return strip_premature_result_speech(text, state, config)
 
-    Models often dump ``scripts.closing`` before writing 问诊摘要 / 推荐科室; that
-    must not reach the patient as the sole bubble.
+
+def strip_premature_result_speech(
+    text: str,
+    state: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> str:
+    """Remove premature result speech using protocol hooks only.
+
+    - ``scripts.closing`` until last type=reply completes
+    - Silent chain (pipeline ready + pending reply): drop all patient text
+    - Lines matching incomplete reply ``pattern``
+    - Paragraphs containing incomplete reply ``patient_template`` literals
+    - Write-MCP-only follow-ups after reply delivered: empty
     """
     raw = str(text or "").strip()
     if not raw or not config:
         return raw
     scripts = resolve_scripts_config(config) or {}
     closing = str(scripts.get("closing") or "").strip()
-    if not closing:
+    reply_done = reply_action_complete(state, config)
+    mcp_only = pending_mcp_only(state, config)
+
+    if reply_done and not mcp_only:
         return raw
-    current = sync_reply_actions_done(ensure_collection_state(state, config), config)
-    last_reply = last_reply_required_action(config)
-    if last_reply and is_required_action_completed(current, last_reply):
-        return raw
-    # Reply chain not done — strip closing (and closing-only bubbles).
-    if raw == closing or raw.replace("\r\n", "\n") == closing.replace("\r\n", "\n"):
+    # MCP-only follow-up: silence *model* text. Protocol compose is never
+    # passed through this function on the SSE path (engine uses speech modes).
+    if mcp_only:
         return ""
-    if closing in raw:
-        cleaned = raw.replace(closing, "").strip()
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-        return cleaned
-    return raw
+    if silent_reply_chain_active(state, config):
+        return ""
+
+    if closing:
+        if raw == closing or raw.replace("\r\n", "\n") == closing.replace("\r\n", "\n"):
+            return ""
+        if closing in raw:
+            raw = raw.replace(closing, "").strip()
+        elif _protocol_fragment_match(raw, closing):
+            # Entire buffer is a progressive closing dump — drop it.
+            return ""
+
+    incomplete = _incomplete_reply_actions(state, config)
+    pattern_res: list[re.Pattern[str]] = []
+    literals: list[str] = []
+    for action in incomplete:
+        pattern = str(action.get("pattern") or "").strip()
+        if pattern:
+            try:
+                pattern_res.append(re.compile(pattern))
+            except re.error:
+                pass
+        literals.extend(_template_literals(str(action.get("patient_template") or "")))
+
+    paras = [p.strip() for p in re.split(r"\n\s*\n", raw) if p and str(p).strip()]
+    kept: list[str] = []
+    for para in paras:
+        if any(lit in para for lit in literals):
+            continue
+        cleaned_lines: list[str] = []
+        for line in para.splitlines():
+            if any(rx.search(line) for rx in pattern_res):
+                continue
+            cleaned_lines.append(line)
+        cleaned = "\n".join(cleaned_lines).strip()
+        if cleaned:
+            kept.append(cleaned)
+    cleaned = "\n\n".join(kept).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
 
 
 def collection_state_from_session(session_state: Any) -> dict[str, Any] | None:

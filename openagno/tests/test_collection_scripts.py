@@ -50,12 +50,14 @@ def _two_reply_config():
                 "field": "阶段小结",
                 "user_visible": True,
                 "when": "missing_empty",
+                "patient_template": "{value}",
             },
             {
                 "type": "reply",
                 "field": "推荐科室",
                 "user_visible": True,
                 "when": "missing_empty",
+                "patient_template": "建议您挂：{value}",
             },
             {
                 "type": "mcp",
@@ -182,6 +184,7 @@ def test_compose_single_reply_with_reason_and_closing():
                 "user_visible": True,
                 "reason_field": "分科理由",
                 "when": "missing_empty",
+                "patient_template": "{reason}\n\n建议您挂：{value}",
             },
             {
                 "type": "mcp",

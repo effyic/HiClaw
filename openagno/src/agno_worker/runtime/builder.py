@@ -359,10 +359,24 @@ class AgentBuilder:
                     visible, coll, config=coll_cfg
                 )
                 reply_text = str(run_output.content or "")
-                _sync_last_assistant_message(
-                    run_output,
-                    visible,
-                )
+                # Persist protocol speech on session_state so stream finalization
+                # can read it from run_completed.session_state (event metadata
+                # often omits run_output.metadata).
+                if visible:
+                    run_context.session_state["patient_speech"] = visible
+                    coll["patient_speech"] = visible
+                    run_context.session_state[COLLECTION_STATE_KEY] = coll
+                if run_output is not None:
+                    if not isinstance(getattr(run_output, "metadata", None), dict):
+                        run_output.metadata = {}
+                    run_output.metadata["patient_speech"] = visible
+                # Do not wipe the prior assistant bubble when this turn is a
+                # silent write-MCP follow-up (visible empty by protocol).
+                if visible:
+                    _sync_last_assistant_message(
+                        run_output,
+                        visible,
+                    )
                 # Prefer metadata for streaming H5 clients (reply chunks omit marker).
                 # Include dept_code parsed from collected slots and/or reply text.
                 status = collection_status_payload(

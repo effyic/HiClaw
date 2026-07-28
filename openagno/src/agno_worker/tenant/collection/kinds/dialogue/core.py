@@ -814,6 +814,8 @@ def empty_collection_state() -> dict[str, Any]:
         # workflow.scripts delivery flags (cluster-safe in session_state)
         "opening_delivered": False,
         "closing_delivered": False,
+        # User-visible required_actions reply already pushed once
+        "result_reply_delivered": False,
         # Internal-only: remind model next turn to call collection_probe_note
         "probe_nudge_due": False,
         # Internal-only: remind next turn after multi-ask / A-or-B / repeat-ask
@@ -871,6 +873,9 @@ def ensure_collection_state(
         )
         state["opening_delivered"] = as_bool(existing.get("opening_delivered"), False)
         state["closing_delivered"] = as_bool(existing.get("closing_delivered"), False)
+        state["result_reply_delivered"] = as_bool(
+            existing.get("result_reply_delivered"), False
+        )
         state["probe_nudge_due"] = as_bool(existing.get("probe_nudge_due"), False)
         state["ask_quality_nudge_due"] = as_bool(
             existing.get("ask_quality_nudge_due"), False
@@ -1360,6 +1365,42 @@ def extract_successful_tool_names(run_output: Any) -> list[str]:
     return names
 
 
+def extract_attempted_tool_names(run_output: Any) -> list[str]:
+    """Collect tool names that were invoked this turn (success or failure)."""
+    if run_output is None:
+        return []
+    tools = getattr(run_output, "tools", None)
+    messages = getattr(run_output, "messages", None)
+    if isinstance(run_output, dict):
+        if tools is None:
+            tools = run_output.get("tools")
+        if messages is None:
+            messages = run_output.get("messages")
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(entry: Any) -> None:
+        name = _tool_entry_name(entry)
+        if not name or name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    for entry in tools or []:
+        _add(entry)
+    for msg in messages or []:
+        if isinstance(msg, dict):
+            role = str(msg.get("role") or "").lower()
+            tool_name = msg.get("tool_name") or msg.get("name")
+        else:
+            role = str(getattr(msg, "role", "") or "").lower()
+            tool_name = getattr(msg, "tool_name", None) or getattr(msg, "name", None)
+        if role not in {"tool", "function"} and not tool_name:
+            continue
+        _add({"tool_name": tool_name})
+    return names
+
+
 def apply_required_actions_from_run(
     state: dict[str, Any],
     config: dict[str, Any] | None,
@@ -1369,6 +1410,10 @@ def apply_required_actions_from_run(
 
     Call from post_hook before session scrub so ``run_output.tools`` is still present.
     Reply steps are auto-marked when their schema field is filled.
+
+    After the patient-visible reply has already been delivered, any MCP attempt
+    (success or failure) soft-completes that step so follow-up turns do not loop
+    into provider ``Repetitive tool`` errors.
     """
     out = ensure_collection_state(state, config)
     out = sync_reply_actions_done(out, config)
@@ -1395,6 +1440,34 @@ def apply_required_actions_from_run(
             continue
         out = record_action_done(out, config, name)
         out = sync_reply_actions_done(out, config)
+
+    # Soft-complete write MCP after one attempt once the patient reply step is done,
+    # so failed EMR writes do not loop into provider "Repetitive tool" errors.
+    from agno_worker.tenant.collection.kinds.dialogue.config import (
+        last_reply_required_action,
+    )
+
+    last_reply = last_reply_required_action(config)
+    reply_done = (not last_reply) or is_required_action_completed(out, last_reply)
+    if reply_done:
+        attempted = set(extract_attempted_tool_names(run_output))
+        for name, action in tool_to_action.items():
+            if name not in attempted:
+                continue
+            if is_required_action_completed(out, action):
+                continue
+            if not required_action_when_met(out, config, action):
+                continue
+            done = dict(out.get("actions_done") or {})
+            done[name] = {"ok": False, "soft": True, "attempted": True}
+            out["actions_done"] = done
+            logger.info(
+                "collection required_actions: soft-complete mcp %s after attempt "
+                "(patient reply already done)",
+                name,
+            )
+            out = advance_collection_phase(out, config)
+
     pending = incomplete_required_actions(out, config)
     if (
         not pending

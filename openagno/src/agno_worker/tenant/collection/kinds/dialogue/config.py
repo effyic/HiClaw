@@ -299,6 +299,9 @@ def _normalize_required_action(item: Any) -> dict[str, Any] | None:
         reason_field = str(item.get("reason_field") or "").strip()
         if reason_field:
             out["reason_field"] = reason_field
+        patient_template = str(item.get("patient_template") or "").strip()
+        if patient_template:
+            out["patient_template"] = patient_template
         return out
 
     return None
