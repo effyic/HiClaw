@@ -166,7 +166,20 @@ def _field_value_filled(collected: dict[str, Any], name: str) -> bool:
 
 
 def _clean_slot_text(value: str) -> str:
-    return re.sub(r"\*\*", "", str(value or "").strip())
+    """Normalize slot text for patient compose.
+
+    Only unwrap a single outer ``**...**`` (legacy model wrap around a short
+    label). Keep inner ``**section**`` markers used by structured summaries.
+    """
+    text = str(value or "").strip()
+    if (
+        len(text) >= 4
+        and text.startswith("**")
+        and text.endswith("**")
+        and text.count("**") == 2
+    ):
+        return text[2:-2].strip()
+    return text
 
 
 def _format_reply_field_for_patient(
