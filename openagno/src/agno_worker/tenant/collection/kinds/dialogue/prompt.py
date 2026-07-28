@@ -408,6 +408,8 @@ def collection_instructions_appendix(
                 "For type=reply: write "
                 + json.dumps(reply_fields, ensure_ascii=False)
                 + " via collection_update_fields (and md_get_dept_list when needed). "
+                "The written value MUST satisfy Reply field goals "
+                "(tone, bans, and any required Markdown ## section structure). "
                 "Do NOT emit patient-facing text yourself — protocol renders after "
                 "EACH completed user_visible reply (cumulative); scripts.closing only "
                 "after the LAST type=reply in the chain completes. "
