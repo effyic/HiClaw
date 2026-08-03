@@ -111,7 +111,7 @@ POST /internal/v1/hit-events:batch                      # event_id 幂等（ON C
 
 ```
 GET /api/v1/tenants/{tenant_id}/metrics/summary     # 命中请求数（request_fingerprint 去重）+ 各最终行为次数
-GET /api/v1/tenants/{tenant_id}/metrics/by-rule     # 命中次数、最近命中时间、最近会话（last_session_id）、top N
+GET /api/v1/tenants/{tenant_id}/metrics/by-rule     # 命中次数、类型名称、最近命中时间、最近会话（last_session_id）、top N
 GET /api/v1/tenants/{tenant_id}/metrics/by-type
 GET /api/v1/tenants/{tenant_id}/metrics/by-action   # 双维度：rule_action 命中次数 / final_action 实际请求数
 GET /api/v1/tenants/{tenant_id}/metrics/trend       # granularity=hour|day|week|month

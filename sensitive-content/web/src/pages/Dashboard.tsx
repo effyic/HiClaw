@@ -148,7 +148,8 @@ export default function Dashboard() {
       title: '所属类型',
       dataIndex: 'type_id',
       width: 130,
-      render: (id: number) => typeNameMap?.get(id) ?? `类型 #${id}（已删除）`,
+      render: (_: number, row: ByRuleItem) =>
+        row.type_name ?? typeNameMap?.get(row.type_id) ?? `类型 #${row.type_id}（已删除）`,
     },
     { title: '事件数', dataIndex: 'events', width: 80 },
     { title: '命中次数', dataIndex: 'hits', width: 90 },
@@ -173,8 +174,9 @@ export default function Dashboard() {
       dataIndex: 'type_id',
       width: 180,
       ellipsis: { showTitle: false },
-      render: (id: number) => {
-        const name = typeNameMap?.get(id) ?? `类型 #${id}（已删除）`
+      render: (_: number, row: ByTypeItem) => {
+        const name =
+          row.type_name ?? typeNameMap?.get(row.type_id) ?? `类型 #${row.type_id}（已删除）`
         return (
           <Typography.Text ellipsis={{ tooltip: name }} style={{ maxWidth: 160 }}>
             {name}

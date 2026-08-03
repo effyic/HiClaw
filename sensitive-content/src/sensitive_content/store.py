@@ -1365,17 +1365,23 @@ def metrics_by_rule(
         rows = _fetch_all(
             conn,
             f"""
-            SELECT rule_id, type_id,
-                   COUNT(*) AS events,
-                   COALESCE(SUM(hit_count), 0) AS hits,
-                   MAX(hit_at) AS last_hit_at,
-                   -- 最近一次命中的会话标识（示例入口，供跳转会话详情）
-                   (array_agg(session_id ORDER BY hit_at DESC)
-                        FILTER (WHERE session_id <> ''))[1] AS last_session_id
-            FROM sensitive_content.hit_event WHERE {where}
-            GROUP BY rule_id, type_id
-            ORDER BY hits DESC, rule_id
-            LIMIT :top
+            SELECT agg.rule_id, agg.type_id, t.name AS type_name,
+                   agg.events, agg.hits, agg.last_hit_at, agg.last_session_id
+            FROM (
+                SELECT rule_id, type_id,
+                       COUNT(*) AS events,
+                       COALESCE(SUM(hit_count), 0) AS hits,
+                       MAX(hit_at) AS last_hit_at,
+                       -- 最近一次命中的会话标识（示例入口，供跳转会话详情）
+                       (array_agg(session_id ORDER BY hit_at DESC)
+                            FILTER (WHERE session_id <> ''))[1] AS last_session_id
+                FROM sensitive_content.hit_event WHERE {where}
+                GROUP BY rule_id, type_id
+                ORDER BY hits DESC, rule_id
+                LIMIT :top
+            ) agg
+            LEFT JOIN sensitive_content.sensitive_type t ON t.id = agg.type_id
+            ORDER BY agg.hits DESC, agg.rule_id
             """,
             {**params, "top": top},
         )
@@ -1393,14 +1399,20 @@ def metrics_by_type(
         rows = _fetch_all(
             conn,
             f"""
-            SELECT type_id,
-                   COUNT(*) AS events,
-                   COALESCE(SUM(hit_count), 0) AS hits,
-                   MAX(hit_at) AS last_hit_at
-            FROM sensitive_content.hit_event WHERE {where}
-            GROUP BY type_id
-            ORDER BY hits DESC, type_id
-            LIMIT :top
+            SELECT agg.type_id, t.name AS type_name,
+                   agg.events, agg.hits, agg.last_hit_at
+            FROM (
+                SELECT type_id,
+                       COUNT(*) AS events,
+                       COALESCE(SUM(hit_count), 0) AS hits,
+                       MAX(hit_at) AS last_hit_at
+                FROM sensitive_content.hit_event WHERE {where}
+                GROUP BY type_id
+                ORDER BY hits DESC, type_id
+                LIMIT :top
+            ) agg
+            LEFT JOIN sensitive_content.sensitive_type t ON t.id = agg.type_id
+            ORDER BY agg.hits DESC, agg.type_id
             """,
             {**params, "top": top},
         )

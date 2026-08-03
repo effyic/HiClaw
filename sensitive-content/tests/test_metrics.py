@@ -129,6 +129,11 @@ class TestByRule:
         # 规则 103 的事件未带 session_id：示例会话为空
         by_id = {i["rule_id"]: i for i in items}
         assert by_id[103]["last_session_id"] is None
+        # 关联敏感类型名称（种子 type_id=1 政治敏感，type_id=2 色情低俗）
+        assert top["type_id"] == 1
+        assert top["type_name"] == "政治敏感"
+        assert by_id[103]["type_id"] == 2
+        assert by_id[103]["type_name"] == "色情低俗"
 
     def test_top_n(self, seeded_events):
         items = _get(seeded_events, "mt", "by-rule", top=1)["items"]
@@ -143,6 +148,9 @@ class TestByType:
         assert by_id[1]["hits"] == 4
         assert by_id[2]["hits"] == 1
         assert by_id[2]["last_hit_at"].startswith(f"{DAY2}T10:00:00")
+        # 关联敏感类型名称（种子 type_id=1 政治敏感，type_id=2 色情低俗）
+        assert by_id[1]["type_name"] == "政治敏感"
+        assert by_id[2]["type_name"] == "色情低俗"
 
 
 class TestByAction:

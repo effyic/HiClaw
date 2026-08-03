@@ -174,6 +174,8 @@ export interface MetricsSummary {
 export interface ByRuleItem {
   rule_id: number
   type_id: number
+  /** 关联敏感类型名称；类型已物理删除时为 null */
+  type_name: string | null
   events: number
   hits: number
   last_hit_at: string | null
@@ -182,6 +184,8 @@ export interface ByRuleItem {
 
 export interface ByTypeItem {
   type_id: number
+  /** 关联敏感类型名称；类型已物理删除时为 null */
+  type_name: string | null
   events: number
   hits: number
   last_hit_at: string | null
