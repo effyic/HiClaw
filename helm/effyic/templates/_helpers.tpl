@@ -206,42 +206,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "http://%s.%s.svc.cluster.local:%d" (include "hiclaw.controller.fullname" .) (include "hiclaw.namespace" .) (.Values.controller.service.port | int) }}
 {{- end }}
 
-{{/*
-Higress Service DNS names — override via:
-  higress.higress-core.gateway.name
-  higress.higress-core.controller.name
-  higress.higress-console.name
-Defaults keep upstream chart names for stock installs.
-*/}}
-{{- define "hiclaw.higress.gatewayName" -}}
-{{- $name := "higress-gateway" -}}
-{{- if and .Values.higress (index .Values.higress "higress-core") -}}
-{{- $gw := index (index .Values.higress "higress-core") "gateway" | default dict -}}
-{{- if $gw.name }}{{- $name = $gw.name -}}{{- end -}}
-{{- end -}}
-{{- $name -}}
-{{- end }}
-
-{{- define "hiclaw.higress.controllerName" -}}
-{{- $name := "higress-controller" -}}
-{{- if and .Values.higress (index .Values.higress "higress-core") -}}
-{{- $c := index (index .Values.higress "higress-core") "controller" | default dict -}}
-{{- if $c.name }}{{- $name = $c.name -}}{{- end -}}
-{{- end -}}
-{{- $name -}}
-{{- end }}
-
-{{- define "hiclaw.higress.consoleName" -}}
-{{- $name := "higress-console" -}}
-{{- if and .Values.higress (index .Values.higress "higress-console") -}}
-{{- $con := index .Values.higress "higress-console" | default dict -}}
-{{- if $con.name }}{{- $name = $con.name -}}{{- end -}}
-{{- end -}}
-{{- $name -}}
-{{- end }}
-
 {{- define "hiclaw.higress.consoleURL" -}}
-{{- printf "http://%s.%s.svc.cluster.local:8080" (include "hiclaw.higress.consoleName" .) (include "hiclaw.namespace" .) }}
+{{- printf "http://higress-console.%s.svc.cluster.local:8080" (include "hiclaw.namespace" .) }}
 {{- end }}
 
 {{- define "hiclaw.higress.gatewayURL" -}}
@@ -250,7 +216,7 @@ Defaults keep upstream chart names for stock installs.
 {{- $gw := index (index .Values.higress "higress-core") "gateway" | default dict }}
 {{- $port = $gw.httpPort | default 80 }}
 {{- end }}
-{{- printf "http://%s.%s.svc.cluster.local:%d" (include "hiclaw.higress.gatewayName" .) (include "hiclaw.namespace" .) ($port | int) }}
+{{- printf "http://higress-gateway.%s.svc.cluster.local:%d" (include "hiclaw.namespace" .) ($port | int) }}
 {{- end }}
 
 {{/* ── ServiceAccount helpers ──────────────────────────────────────────── */}}
